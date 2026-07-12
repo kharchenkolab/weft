@@ -22,6 +22,9 @@ from .errors import WeftError
 
 class Solver(Protocol):
     ecosystem: str
+    # conda packages this layer needs present in the base layer (the
+    # cross-layer contract, enforced generically before any solve)
+    conda_requirements: tuple[str, ...]
 
     def solve(self, deps: list[str], spec, workdir: Path) -> dict:
         """-> layer dict: {"records": [...sorted, hashed...],
@@ -43,6 +46,7 @@ class PixiSolver:
     base strategy's job (prefix/packed), so realize_layer is a no-op."""
 
     ecosystem = "conda"
+    conda_requirements: tuple[str, ...] = ()
 
     def __init__(self, pixi_bin: str):
         self.pixi_bin = pixi_bin
@@ -84,6 +88,7 @@ class CranSolver:
     """
 
     ecosystem = "cran"
+    conda_requirements = ("r-base",)
     PPM = "https://packagemanager.posit.co/cran/__linux__/focal/{date}"
 
     def __init__(self, pixi_bin: str, home: Path | None = None):
@@ -330,24 +335,35 @@ class CranSolver:
         return f"{package}: see the cran layer record (env_why returns it)"
 
 
-def check_layer_requirements(spec, layers_present: dict[str, list[str]]) -> None:
-    """Cross-layer contract checks, before any solving is paid for."""
+def default_solvers(pixi_bin: str) -> dict[str, object]:
+    """The registry. Adding an ecosystem = one class + one entry here
+    (or inject externally via Weft(solvers={...}))."""
+    return {
+        "conda": PixiSolver(pixi_bin),
+        "cran": CranSolver(pixi_bin),
+    }
+
+
+def check_layer_requirements(spec, layers_present: dict[str, list[str]],
+                             solvers: dict[str, object]) -> None:
+    """Generic cross-layer contract: each solver declares what it needs
+    from the conda layer; checked before any solving is paid for."""
     conda_names = {d.split()[0].lower() for d in spec.conda}
-    if layers_present.get("cran") and "r-base" not in conda_names:
-        raise WeftError(
-            "env.layer_conflict",
-            "cran layer requires R itself from the conda layer",
-            stage="solve",
-            hints={"layer": "cran", "needs": "r-base in deps.conda",
-                   "have_conda": sorted(conda_names),
-                   "suggestion": 'add "r-base =4.4" to deps.conda (pin it: '
-                                 "cran packages install against it)"},
-        )
-    if layers_present.get("julia") and "julia" not in conda_names:
-        raise WeftError(
-            "env.layer_conflict",
-            "julia layer requires julia itself from the conda layer",
-            stage="solve",
-            hints={"layer": "julia", "needs": "julia in deps.conda",
-                   "suggestion": 'add "julia" to deps.conda'},
-        )
+    for eco, deps in layers_present.items():
+        if not deps:
+            continue
+        solver = solvers.get(eco)
+        needs = getattr(solver, "conda_requirements", ()) if solver else ()
+        missing = [p for p in needs if p.lower() not in conda_names]
+        if missing:
+            raise WeftError(
+                "env.layer_conflict",
+                f"{eco} layer requires {', '.join(missing)} from the conda layer",
+                stage="solve",
+                hints={"layer": eco, "needs": f"{missing[0]} in deps.conda",
+                       "missing": missing,
+                       "have_conda": sorted(conda_names),
+                       "suggestion": f"add {missing} to deps.conda "
+                                     "(version-pin interpreters: the layer's "
+                                     "packages install against them)"},
+            )

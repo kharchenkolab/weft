@@ -80,6 +80,12 @@ class Store:
             )
         if "queue_reason" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN queue_reason TEXT")
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS kernels("
+            "kernel_id TEXT PRIMARY KEY, site TEXT, lang TEXT, env_id TEXT,"
+            "jobdir TEXT, handle TEXT, state TEXT, blocks_run INTEGER,"
+            "created_at REAL, last_used REAL)"
+        )
 
     # -- serialized access helpers ------------------------------------------
 
@@ -438,6 +444,41 @@ class Store:
         self._write(
             "UPDATE sessions SET state=? WHERE session_id=?", (state, session_id)
         )
+
+    # -- kernels ---------------------------------------------------------------
+
+    def put_kernel(self, kernel_id: str, site: str, lang: str,
+                   env_id: str | None, jobdir: str, handle: str) -> None:
+        now = time.time()
+        self._write(
+            "INSERT INTO kernels VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (kernel_id, site, lang, env_id, jobdir, handle, "running",
+             0, now, now),
+        )
+
+    def get_kernel(self, kernel_id: str) -> dict | None:
+        r = self._row("SELECT * FROM kernels WHERE kernel_id=?", (kernel_id,))
+        return dict(r) if r else None
+
+    def update_kernel(self, kernel_id: str, *, state: str | None = None,
+                      handle: str | None = None,
+                      blocks_run: int | None = None) -> None:
+        sets, vals = ["last_used=?"], [time.time()]
+        if state is not None:
+            sets.append("state=?"); vals.append(state)
+        if handle is not None:
+            sets.append("handle=?"); vals.append(handle)
+        if blocks_run is not None:
+            sets.append("blocks_run=?"); vals.append(blocks_run)
+        vals.append(kernel_id)
+        self._write(f"UPDATE kernels SET {', '.join(sets)} WHERE kernel_id=?",
+                    tuple(vals))
+
+    def list_kernels(self, state: str | None = None) -> list[dict]:
+        q, vals = "SELECT * FROM kernels", ()
+        if state:
+            q += " WHERE state=?"; vals = (state,)
+        return [dict(r) for r in self._rows(q + " ORDER BY created_at", vals)]
 
     def close(self) -> None:
         with self._lock:

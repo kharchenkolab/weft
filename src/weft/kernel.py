@@ -1,0 +1,237 @@
+"""Persistent interactive kernels (design-next §3): a tracked, detached
+interpreter fed code blocks through files — Jupyter-like statefulness
+without sockets, daemons, or protocol tunnels.
+
+A kernel is a special detached job: it survives disconnects, is watched by
+the site poller (death → `kernel.died` naming the killing block), is
+bounded by walltime, and leaves an ordered transcript (code + outputs)
+that is itself the provenance trail of the exploration. Doctrine: kernels
+are for exploration; the citable record is the assembled script re-run as
+a normal task.
+
+Languages are a registry — adding one = a driver file + an entry here.
+"""
+
+from __future__ import annotations
+
+import shlex
+import time
+import uuid
+from pathlib import Path
+
+from .errors import WeftError
+from .realize import env_dir_rel
+
+_DRIVER_DIR = Path(__file__).resolve().parent / "kernels"
+
+# lang -> (driver filename, interpreter argv prefix)
+LANGUAGES: dict[str, tuple[str, str]] = {
+    "python": ("driver.py", "python3 -u"),
+    "r": ("driver.R", "Rscript"),
+    "julia": ("driver.jl", "julia"),
+}
+
+
+class KernelManager:
+    def __init__(self, store, adapters, runner):
+        self.store = store
+        self.adapters = adapters
+        self.runner = runner
+
+    def _adapter(self, site: str):
+        if site not in self.adapters:
+            raise WeftError("task.invalid", f"unknown site: {site}",
+                            stage="infra",
+                            hints={"registered": sorted(self.adapters)})
+        return self.adapters[site]
+
+    def _get(self, kernel_id: str) -> dict:
+        k = self.store.get_kernel(kernel_id)
+        if not k:
+            raise WeftError("task.invalid", f"unknown kernel: {kernel_id}",
+                            stage="infra")
+        return k
+
+    # -- lifecycle ------------------------------------------------------------
+
+    def start(self, site: str, lang: str = "python",
+              env_id: str | None = None, walltime: str = "08:00:00") -> dict:
+        if lang not in LANGUAGES:
+            raise WeftError(
+                "task.invalid", f"no kernel driver for lang {lang!r}",
+                stage="infra", hints={"registered": sorted(LANGUAGES)})
+        adapter = self._adapter(site)
+        driver_file, interp = LANGUAGES[lang]
+
+        activate = "true"
+        if env_id:
+            rel = env_dir_rel(env_id)
+            if not adapter.file_exists(f"{rel}/.weft-ready"):
+                raise WeftError(
+                    "env.realize_failed",
+                    f"env {env_id} is not realized on {site}",
+                    stage="realize",
+                    hints={"suggestion": "run any task with this env on the "
+                                         "site first (or env_ensure + a "
+                                         "trivial task) — kernels attach to "
+                                         "realized envs"})
+            activate = f". {shlex.quote(adapter.path(rel))}/activate.sh"
+
+        kernel_id = "krn_" + uuid.uuid4().hex[:10]
+        jobdir_rel = f"kernels/{kernel_id}"
+        driver_src = (_DRIVER_DIR / driver_file).read_bytes()
+        adapter.write_file(f"{jobdir_rel}/{driver_file}", driver_src)
+        adapter.write_file(f"{jobdir_rel}/activate.sh", (activate + "\n").encode())
+        adapter.write_file(
+            f"{jobdir_rel}/cmd.sh",
+            f"mkdir -p blocks\nexec {interp} {driver_file}\n".encode())
+        handle = adapter.submit(jobdir_rel, {"resources": {"cpus": 1,
+                                                           "walltime": walltime}})
+        self.store.put_kernel(kernel_id, site, lang, env_id, jobdir_rel, handle)
+        self.store.emit("kernel.started", kernel=kernel_id, site=site,
+                        lang=lang, env_id=env_id)
+        from .poller import Watch
+        from .task import Task
+        self.runner.poller_for(site).register(Watch(
+            job_id=kernel_id, handle=handle, jobdir_rel=jobdir_rel,
+            task=Task.from_dict({"command": f"[kernel {lang}]",
+                                 "resources": {"walltime": ""}}),
+            started_at=time.time(), scheduler=False, kernel=True))
+        return {"kernel_id": kernel_id, "site": site, "lang": lang,
+                "env_id": env_id,
+                "note": "exploration only — assemble successful blocks into "
+                        "a task for the citable record"}
+
+    # -- block execution ---------------------------------------------------------
+
+    def exec(self, kernel_id: str, code: str, wait: bool = True,
+             timeout: float = 120.0) -> dict:
+        k = self._get(kernel_id)
+        self._assert_alive(k)
+        adapter = self._adapter(k["site"])
+        n = k["blocks_run"]
+        adapter.write_file(f"{k['jobdir']}/blocks/{n:04d}.code", code.encode())
+        self.store.update_kernel(kernel_id, blocks_run=n + 1)
+        if not wait:
+            return {"kernel_id": kernel_id, "block": n, "state": "submitted"}
+        return self.poll(kernel_id, n, timeout=timeout)
+
+    def poll(self, kernel_id: str, block: int, timeout: float = 0.0) -> dict:
+        k = self._get(kernel_id)
+        adapter = self._adapter(k["site"])
+        base = f"{k['jobdir']}/blocks/{block:04d}"
+        deadline = time.time() + timeout
+        while True:
+            if adapter.file_exists(f"{base}.rc"):
+                rc = int(adapter.read_file(f"{base}.rc").decode().strip() or 1)
+                out = adapter.read_file(f"{base}.out", 65536).decode("utf-8", "replace")
+                err = adapter.read_file(f"{base}.err", 16384).decode("utf-8", "replace")
+                arts = adapter.run_cmd(
+                    f"ls {shlex.quote(adapter.path(base + '.artifacts'))} 2>/dev/null"
+                ).out.split()
+                if rc != 0:
+                    self.store.emit("kernel.block_failed", kernel=kernel_id,
+                                    block=block, rc=rc, err_tail=err[-500:])
+                return {"kernel_id": kernel_id, "block": block, "rc": rc,
+                        "out": out, "err": err, "artifacts": arts,
+                        "state": "done"}
+            if time.time() >= deadline:
+                # not an error: the block may legitimately be long-running
+                self._assert_alive(self._get(kernel_id))
+                return {"kernel_id": kernel_id, "block": block,
+                        "state": "running",
+                        "note": "still executing — poll again, watch for "
+                                "kernel.stuck, or kernel_interrupt"}
+            time.sleep(min(0.3, max(deadline - time.time(), 0.05)))
+
+    def _assert_alive(self, k: dict) -> None:
+        if k["state"] != "running":
+            raise WeftError(
+                "sched.node_failure",
+                f"kernel {k['kernel_id']} is {k['state']}",
+                stage="running",
+                hints={"suggestion": "kernel_restart(kernel_id, "
+                                     "replay='successful') rebuilds state "
+                                     "from the transcript",
+                       "transcript": "kernel_transcript shows what ran"})
+
+    # -- introspection / control ---------------------------------------------------
+
+    def status(self, kernel_id: str) -> dict:
+        k = self._get(kernel_id)
+        adapter = self._adapter(k["site"])
+        current = None
+        try:
+            if adapter.file_exists(f"{k['jobdir']}/current_block"):
+                current = int(adapter.read_file(
+                    f"{k['jobdir']}/current_block").decode().strip())
+        except (WeftError, ValueError):
+            pass
+        return {"kernel_id": kernel_id, "site": k["site"], "lang": k["lang"],
+                "env_id": k["env_id"], "state": k["state"],
+                "blocks_run": k["blocks_run"], "current_block": current,
+                "idle_s": round(time.time() - k["last_used"], 1)}
+
+    def transcript(self, kernel_id: str, last: int = 20) -> list[dict]:
+        k = self._get(kernel_id)
+        adapter = self._adapter(k["site"])
+        out = []
+        for n in range(max(0, k["blocks_run"] - last), k["blocks_run"]):
+            base = f"{k['jobdir']}/blocks/{n:04d}"
+            entry = {"block": n}
+            try:
+                entry["code"] = adapter.read_file(f"{base}.code", 4096).decode()
+                if adapter.file_exists(f"{base}.rc"):
+                    entry["rc"] = int(adapter.read_file(f"{base}.rc"
+                                                        ).decode().strip() or 1)
+                    entry["out_tail"] = adapter.read_file(
+                        f"{base}.out", 2048).decode("utf-8", "replace")
+                else:
+                    entry["rc"] = None  # still running / never ran
+            except WeftError:
+                entry["error"] = "unreadable"
+            out.append(entry)
+        return out
+
+    def interrupt(self, kernel_id: str) -> dict:
+        k = self._get(kernel_id)
+        adapter = self._adapter(k["site"])
+        pid = adapter.read_file(f"{k['jobdir']}/pid.real").decode().strip()
+        # `kill -s INT -- -pgid`: the only group-kill form dash accepts
+        adapter.run_cmd(f"kill -s INT -- -{shlex.quote(pid)} 2>/dev/null; true")
+        self.store.emit("kernel.interrupted", kernel=kernel_id)
+        return {"kernel_id": kernel_id, "note": "SIGINT sent; the running "
+                "block should finish with rc=130"}
+
+    def stop(self, kernel_id: str) -> dict:
+        k = self._get(kernel_id)
+        adapter = self._adapter(k["site"])
+        adapter.write_file(f"{k['jobdir']}/kernel.stop", b"1\n")
+        self.runner.poller_for(k["site"]).notify_cancel(kernel_id)
+        time.sleep(0.5)
+        adapter.cancel(k["handle"], k["jobdir"])
+        self.store.update_kernel(kernel_id, state="stopped")
+        self.store.emit("kernel.stopped", kernel=kernel_id)
+        return {"kernel_id": kernel_id, "state": "stopped"}
+
+    def restart(self, kernel_id: str, replay: str = "successful") -> dict:
+        """After a death (or deliberately): new kernel, same env/site;
+        optionally replay the transcript's successful blocks to rebuild
+        interpreter state."""
+        k = self._get(kernel_id)
+        codes = []
+        if replay == "successful":
+            for entry in self.transcript(kernel_id, last=10**6):
+                if entry.get("rc") == 0 and "code" in entry:
+                    codes.append(entry["code"])
+        if k["state"] == "running":
+            self.stop(kernel_id)
+        fresh = self.start(k["site"], k["lang"], k["env_id"])
+        replayed = 0
+        for code in codes:
+            r = self.exec(fresh["kernel_id"], code, wait=True, timeout=300)
+            if r.get("rc") == 0:
+                replayed += 1
+        self.store.emit("kernel.restarted", kernel=fresh["kernel_id"],
+                        previous=kernel_id, replayed=replayed)
+        return {**fresh, "previous": kernel_id, "replayed_blocks": replayed}

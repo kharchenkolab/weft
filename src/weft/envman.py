@@ -21,10 +21,8 @@ class EnvManager:
         self.store = store
         self.solve_dir = Path(solve_dir)
         self.pixi_bin = pixi_bin
-        from .solvers import CranSolver, PixiSolver
-        self.solvers: dict = {"conda": PixiSolver(pixi_bin),
-                              "cran": CranSolver(pixi_bin),
-                              **(solvers or {})}
+        from .solvers import default_solvers
+        self.solvers: dict = {**default_solvers(pixi_bin), **(solvers or {})}
 
     def _lookup_spec(self, spec_hash: str) -> EnvSpec | None:
         body = self.store.get_spec(spec_hash)
@@ -60,7 +58,7 @@ class EnvManager:
                                      "needs to be enabled/installed"},
             )
         from .solvers import check_layer_requirements
-        check_layer_requirements(merged, merged.deps_extra)
+        check_layer_requirements(merged, merged.deps_extra, self.solvers)
 
         if not update and not dry_run:
             cached = self.store.env_for_spec(merged_hash)

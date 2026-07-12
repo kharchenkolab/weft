@@ -290,7 +290,7 @@ class SSHAdapter(SiteAdapter):
     def cancel(self, handle: str, jobdir_rel: str) -> None:
         if handle.startswith("pid:"):
             pid = handle[4:]
-            self.run_cmd(f"kill -TERM -{shlex.quote(pid)} 2>/dev/null; true")
+            self.run_cmd(f"kill -s TERM -- -{shlex.quote(pid)} 2>/dev/null; true")
 
     def close_control(self) -> None:
         """Drop the multiplexed connection (used by chaos tests)."""

@@ -73,13 +73,17 @@ cmd_run() {
     jobdir=$(cd "$jobdir" && pwd)
     timer=""
     command -v /usr/bin/time >/dev/null 2>&1 && /usr/bin/time -v true 2>/dev/null && timer="/usr/bin/time -v -o $jobdir/rusage"
+    # backgrounding under a non-interactive shell leaves SIGINT ignored and
+    # exec inherits that — interpreters would be un-interruptible. Reset it.
+    sigreset=""
+    env --default-signal=INT true 2>/dev/null && sigreset="env --default-signal=INT,HUP"
     cat > "$jobdir/runner.sh" <<EOF
 #!/bin/sh
 cd "$jobdir"
 echo \$\$ > pid.real
 [ -f activate.sh ] && . ./activate.sh
 start=\$(date +%s)
-$timer sh cmd.sh >> log 2>&1
+$timer $sigreset sh cmd.sh >> log 2>&1
 rc=\$?
 end=\$(date +%s)
 echo "\$((end - start))" > wall_s

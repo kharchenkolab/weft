@@ -43,6 +43,7 @@ class Watch:
     last_reason: str = ""        # last scheduler pending-reason recorded
     lost_strikes: int = 0
     cancelled: bool = False
+    kernel: bool = False         # kernel watches report deaths, not results
 
 
 class SitePoller:
@@ -172,6 +173,9 @@ class SitePoller:
             self._unregister(w.job_id)
             return
         state = status.get("state")
+        if w.kernel:
+            self._kernel_transition(w, state, status)
+            return
 
         if state == "exited":
             self._unregister(w.job_id)
@@ -241,6 +245,36 @@ class SitePoller:
                        "elapsed_s": round(time.time() - w.started_at, 1),
                        "suggestion": "raise resources.walltime or shrink the task"},
             )
+
+    def _kernel_transition(self, w: Watch, state: str, status: dict) -> None:
+        """Kernels have no COLLECTING: an exit is either a requested stop
+        or a death — and the *block that killed it* is the diagnostic."""
+        if state in ("exited", "lost", "missing"):
+            w.lost_strikes += 1
+            if state != "exited" and w.lost_strikes < LOST_STRIKES:
+                return
+            self._unregister(w.job_id)
+            k = self.runner.store.get_kernel(w.job_id)
+            if not k or k["state"] != "running":
+                return  # clean stop already recorded
+            killing, log_tail = None, ""
+            try:
+                if self.adapter.file_exists(f"{w.jobdir_rel}/current_block"):
+                    killing = int(self.adapter.read_file(
+                        f"{w.jobdir_rel}/current_block").decode().strip())
+                log_tail = self.runner.tail_log(self.adapter, w.jobdir_rel, 30)
+            except (WeftError, ValueError):
+                pass
+            self.runner.store.update_kernel(w.job_id, state="died")
+            self.runner.store.emit(
+                "kernel.died", kernel=w.job_id, site=self.site,
+                killing_block=killing, exit_code=status.get("exit_code"),
+                log_tail=log_tail[-800:],
+                suggestion="kernel_restart(kernel_id, replay='successful') "
+                           "rebuilds state; skip the killing block",
+            )
+            return
+        w.lost_strikes = 0
 
     def _fail(self, w: Watch, err: WeftError) -> None:
         self._unregister(w.job_id)

@@ -125,4 +125,4 @@ class LocalAdapter(SiteAdapter):
         if handle.startswith("pid:"):
             pid = handle[4:]
             # negative pid: kill the whole detached process group
-            self.run_cmd(f"kill -TERM -{shlex.quote(pid)} 2>/dev/null; true")
+            self.run_cmd(f"kill -s TERM -- -{shlex.quote(pid)} 2>/dev/null; true")

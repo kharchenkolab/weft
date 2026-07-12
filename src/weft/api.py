@@ -66,6 +66,8 @@ class Weft:
         self.provisioners: dict = {}
         from .session import SessionManager
         self.sessions = SessionManager(self.store, self.envman)
+        from .kernel import KernelManager
+        self.kernels = KernelManager(self.store, self.adapters, self.runner)
         self._restore_sites()
 
     # -- site management ---------------------------------------------------
@@ -409,6 +411,48 @@ class Weft:
 
     def session_stop(self, session_id: str) -> dict:
         return self.sessions.stop(session_id, self._session_adapter(session_id))
+
+    # -- kernels (persistent interactive interpreters) --------------------------
+
+    def kernel_start(self, site: str, lang: str = "python",
+                     env_id: str | None = None,
+                     walltime: str = "08:00:00") -> dict:
+        try:
+            r = self.kernels.start(site, lang, env_id, walltime)
+            self.store.audit_log("agent", "kernel.start", site=site,
+                                 command=f"{lang} env={env_id}")
+            return r
+        except WeftError as e:
+            return e.to_dict()
+
+    def kernel_exec(self, kernel_id: str, code: str, wait: bool = True,
+                    timeout: float = 120.0) -> dict:
+        try:
+            return self.kernels.exec(kernel_id, code, wait=wait, timeout=timeout)
+        except WeftError as e:
+            return e.to_dict()
+
+    def kernel_poll(self, kernel_id: str, block: int,
+                    timeout: float = 0.0) -> dict:
+        return self.kernels.poll(kernel_id, block, timeout=timeout)
+
+    def kernel_status(self, kernel_id: str) -> dict:
+        return self.kernels.status(kernel_id)
+
+    def kernel_transcript(self, kernel_id: str, last: int = 20) -> list[dict]:
+        return self.kernels.transcript(kernel_id, last)
+
+    def kernel_interrupt(self, kernel_id: str) -> dict:
+        return self.kernels.interrupt(kernel_id)
+
+    def kernel_restart(self, kernel_id: str, replay: str = "successful") -> dict:
+        try:
+            return self.kernels.restart(kernel_id, replay)
+        except WeftError as e:
+            return e.to_dict()
+
+    def kernel_stop(self, kernel_id: str) -> dict:
+        return self.kernels.stop(kernel_id)
 
     # -- events / diagnostics -----------------------------------------------------
 
