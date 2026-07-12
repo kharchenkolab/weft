@@ -27,7 +27,10 @@ w = Weft(workspace_dir)          # pixi/pixi-pack auto-found next to pixi_bin
   described by a *probed capability record* + live `site_load()`.
 - **EnvSpec → EnvID** — declarative environment, solved & locked once;
   the EnvID (`env:v1:…` conda/pypi-only, `env:v2:…` with extra layers) is
-  the universal cache key. Never install imperatively.
+  the universal cache key. Never install imperatively. Mid-analysis "add
+  one package": `{"extends_env": <EnvID>, "deps": {"pypi": [...]}}` —
+  base frozen by construction, realizes in seconds as an overlay on the
+  parent's prefix.
 - **DataRef** — `dref:<sha256>` for every file/tree. Content moves at most
   once per site; outputs chain site-side for free.
 - **Task** — env + inputs + command + outputs; content-hashed, so identical
@@ -91,8 +94,9 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
 
 - `references/sites.md` — registering local/ssh/slurm/cloud, policy blocks,
   capability probing, live load & queue/ETA, modules, budgets, teardown.
-- `references/environments.md` — spec schema, layering, sessions+snapshot,
-  GPU/CUDA pinning, realization strategies, repair, reuse semantics.
+- `references/environments.md` — spec schema, layering (`extends` /
+  `extends_env` + overlay realization), sessions+snapshot, GPU/CUDA
+  pinning, realization strategies, repair, reuse, eviction semantics.
 - `references/data.md` — DataRefs, staging plans, chaining, fetch,
   transfer progress, chunked big files.
 - `references/jobs.md` — lifecycle, arrays & digests & retry, monitoring,
