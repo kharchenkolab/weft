@@ -274,3 +274,31 @@ w.data_register("https://example.org/run.h5", site="hpc")   # into site CAS
 w.kernel_promote(k, blocks=[7])        # transcript-grade manifest
 w.register_site("hpc", "slurm", {..., "shared": True})      # team caches
 ```
+
+### Adaptivity: forgiving solves, drift, reclamation
+
+```python
+# one call instead of a conflict-relax-retry loop ('?' = soft constraint)
+w.env_ensure({"deps": {"conda": ["python =3.12", "scipy ==1.14.1?"]}},
+             relax="soft")        # → {"relaxed": [...]}; result still pinned
+
+# explore cheaply; capture the bespoke fix; snapshot it with your reasoning
+s = w.session_start({"deps": {"conda": ["python =3.12"]}}, "beamlab")
+w.session_run_installer(s["session_id"], "pip install ./vendored",
+                        note="upstream wheel broken on this platform")
+w.session_snapshot(s["session_id"], notes=["drop when upstream 2.2 ships"])
+
+# the world moved: revise instead of dead-ending (or site policy on_drift)
+w.env_revise(env_id)              # → new EnvID + package-level diff
+w.env_find_near(spec, site="hpc") # warm near-matches, with their diffs
+
+# reclaim disk without losing the way back
+w.site_footprint("hpc")           # prefixes vs shared cache vs data
+w.env_evict(env_id, "hpc")        # rebuild = seconds, offline (cache warm)
+```
+
+Every env and manifest carries a **reproducibility grade** (`fully-pinned`
+→ `snapshot-pinned` → `attested` → `escape-hatch` → `state-dependent`) plus
+the per-component breakdown, and identity-neutral `notes` / `step_notes`
+recording *why* an adaptive step was taken. weft grades and reports; the
+agent decides.

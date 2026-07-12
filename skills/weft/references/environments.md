@@ -30,10 +30,12 @@ w.env_ensure({
   `cuda-version` pin + note. Packages with CPU/GPU builds need the GPU
   variant forced: `pytorch-gpu` metapackage or `"pytorch 2.* *cuda*"`
   build selector. Apple Silicon needs nothing (MPS is in default builds).
-- **Sessions (interactive):** `session_start(env_id, site)` → scratch clone;
-  `session_exec`, `session_install(conda=[...])`; when stable,
-  `session_snapshot()` → real EnvID (minimal delta over the base). Nothing
-  from a session enters the record — re-run under the snapshot EnvID.
+- **Sessions (interactive):** `session_start(spec_or_env_id, site)` → a
+  mutable scratch clone (one call: it realizes the base for you);
+  `session_exec`, `session_install(conda=[...])`,
+  `session_run_installer(cmd, note=...)`; when it stabilizes,
+  `session_snapshot(notes=[...])` → a real EnvID carrying whatever you did.
+  Iterate freely here — that's what it's for. See "Adaptive moves" below.
 - **Reuse:** identical resolutions share EnvIDs; realizations re-adopt
   across workspaces from the site marker; `env_status(env_id)` shows the
   per-site realization matrix (your memory of what is installed where).
