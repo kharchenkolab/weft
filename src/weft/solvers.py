@@ -229,7 +229,11 @@ class CranSolver:
             'if (length(miss)) {{ write(paste("MISSING:", paste(miss, collapse=",")), stderr()); quit(status=3) }};'
             'cl <- unique(c(want, unlist(tools::package_dependencies(want, db=ap, recursive=TRUE))));'
             'cl <- setdiff(cl, base); cl <- intersect(cl, rownames(ap));'
-            'write.table(ap[cl, c("Package","Version"), drop=FALSE], {out}, sep="\\t", '
+            # per-package direct deps: the graph offline installs need for
+            # topological ordering (packed layers, design-next B2)
+            'dg <- tools::package_dependencies(cl, db=ap, recursive=FALSE);'
+            'dgs <- vapply(cl, function(p) paste(setdiff(intersect(dg[[p]], cl), base), collapse=","), "");'
+            'write.table(data.frame(ap[cl, "Package"], ap[cl, "Version"], dgs), {out}, sep="\\t", '
             'row.names=FALSE, col.names=FALSE, quote=FALSE)'
         ).format(snap=_json.dumps(snapshot),
                  want=", ".join(_json.dumps(x) for x in want) or '""',
@@ -250,8 +254,11 @@ class CranSolver:
             rows = [l.split("\t") for l in out.read_text().splitlines() if l]
         else:
             rows = []
-        records = [{"name": n, "version": v, "source": snapshot, "sha256": ""}
-                   for n, v in rows]
+        records = [{"name": r[0], "version": r[1], "source": snapshot,
+                    "sha256": "",
+                    "deps": [d for d in (r[2] if len(r) > 2 else ""
+                                         ).split(",") if d]}
+                   for r in rows]
         for p in cran_direct:  # exact-version assertions
             if p["version"]:
                 got = next((r["version"] for r in records

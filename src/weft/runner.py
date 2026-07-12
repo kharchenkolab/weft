@@ -592,7 +592,12 @@ class JobRunner:
         entries, total_bytes = self.dataman.collect_outputs(adapter, jobdir_rel, task)
         self._enrich_previews(adapter, jobdir_rel, task, entries)
         job = self.store.get_job(job_id)
+        env_row = self.store.get_env(task.env) if task.env else None
         manifest = {
+            "schema": "manifest:v1",
+            # the reproducibility ladder: task > transcript > weak
+            "reproducibility": "weak" if (env_row or {}).get(
+                "weakly_reproducible") else "task",
             "job_id": job_id,
             "task_hash": job["task_hash"],
             "env_id": task.env,

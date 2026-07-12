@@ -499,6 +499,15 @@ class Weft:
 
     # -- events / diagnostics -----------------------------------------------------
 
+    def events_subscribe(self, callback) -> dict:
+        """In-process push: callback receives every event object the poll
+        feed would yield, as it is emitted (fire-and-forget; exceptions in
+        the callback are swallowed). events_poll remains the canonical
+        catch-up path — mix push for liveness with poll after gaps."""
+        self.store.subscribe(callback)
+        return {"subscribed": True,
+                "note": "same objects as events_poll; poll for catch-up"}
+
     def events_poll(self, since_cursor: int = 0, limit: int = 100,
                     compact: bool = True) -> dict:
         """compact drops per-element events of array groups — the digests
@@ -674,6 +683,9 @@ class Weft:
                             stage="infra")
         task = job["task"]
         node = {
+            "schema": "provenance:v1",
+            "reproducibility": (job["manifest"] or {}).get(
+                "reproducibility", "task"),
             "job_id": target, "state": job["state"], "site": job["site"],
             "task_hash": job["task_hash"],
             "command": task.get("command"),
