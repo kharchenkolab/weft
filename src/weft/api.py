@@ -197,6 +197,17 @@ class Weft:
                             hints={"registered": [s["name"] for s in self.store.list_sites()]})
         return row
 
+    def site_associations(self, name: str) -> dict:
+        """What am *I* allowed to ask for on this scheduler: my accounts,
+        allowed/default QOS per partition, structured QOS ceilings
+        (cpu/gpu/mem per user), fairshare. Fields are None (never
+        defaulted) when the cluster exposes no accounting."""
+        adapter = self._adapter(name)
+        if not hasattr(adapter, "associations"):
+            return {"site": name,
+                    "note": "not a scheduler site — no association model"}
+        return {"site": name, **adapter.associations()}
+
     def site_probe(self, name: str) -> dict:
         """Re-probe on demand (capability drift, doc 02 §7)."""
         adapter = self._adapter(name)
@@ -217,13 +228,20 @@ class Weft:
                 caps[k] = {**caps[k], **v}
             else:
                 caps[k] = v
+        if override:
+            # declared-vs-measured provenance: an agent should know which
+            # facts came from a human's claim rather than a probe
+            caps["overridden_fields"] = sorted(override)
         return caps
 
     def site_load(self, name: str, resources: dict | None = None,
-                  fresh: bool = False) -> dict:
+                  fresh: bool = False,
+                  partitions: list[str] | None = None) -> dict:
         """What's realistically available under current load (doc 02 §7 spirit):
-        host load; on schedulers also idle CPUs, queue backlog, QOS, and —
-        when `resources` is given — an sbatch --test-only start estimate."""
+        host load; on schedulers also idle CPUs + GPUs, queue backlog, QOS,
+        my associations/fairshare, and — when `resources` is given — an
+        sbatch --test-only start estimate (per partition when `partitions`
+        names candidates: 'shortest queue for this ask, right now')."""
         adapter = self._adapter(name)
         if getattr(adapter, "launched", None) is False:
             return {"site": name, "note": "cloud instance not launched; "
@@ -235,7 +253,12 @@ class Weft:
                             stage="infra", retryable=True)
         out = {"site": name, **info}
         if resources and hasattr(adapter, "estimate_start"):
-            out["start_estimate"] = adapter.estimate_start(resources)
+            if partitions:
+                out["start_estimates"] = {
+                    p: adapter.estimate_start(resources, partition=p)
+                    for p in partitions}
+            else:
+                out["start_estimate"] = adapter.estimate_start(resources)
         return out
 
     def module_check(self, site: str, names: list[str]) -> dict:
@@ -263,6 +286,36 @@ class Weft:
         missing = [n for n, ok in out.items() if not ok]
         return {"site": site, "module_system": "ok", "modules": out,
                 "missing": missing, "satisfiable_here": not missing}
+
+    def module_list(self, site: str, search: str | None = None,
+                    limit: int = 200) -> dict:
+        """Enumerate the site's module offerings (discovery — module_check
+        is for verifying names you already know). Cached per site; pass
+        search= to filter (case-insensitive substring)."""
+        adapter = self._adapter(site)
+        if not hasattr(adapter, "module_inventory"):
+            return {"site": site, "module_system": "absent",
+                    "note": "site kind has no module system"}
+        system = adapter.module_system_status() \
+            if hasattr(adapter, "module_system_status") else "ok"
+        if system != "ok":
+            return {"site": site, "module_system": system, "modules": [],
+                    "note": "the `module` command is unavailable in "
+                            "non-interactive shells — set modules_init in "
+                            "the site config first"}
+        key = ("__inventory__", site)
+        if key not in self._module_cache:
+            self._module_cache[key] = adapter.module_inventory()
+        names = self._module_cache[key]
+        if search:
+            s = search.lower()
+            names = [n for n in names if s in n.lower()]
+        out = {"site": site, "module_system": "ok", "total": len(names),
+               "modules": names[:limit]}
+        if len(names) > limit:
+            out["note"] = (f"showing {limit} of {len(names)} — refine with "
+                           "search= (e.g. search='cuda')")
+        return out
 
     def _adapter(self, name: str) -> SiteAdapter:
         if name not in self.adapters:
@@ -871,7 +924,8 @@ class Weft:
 # exactly what the MCP server exposes. One list, one source of truth.
 PUBLIC_TOOLS = [
     "register_site", "sites_list", "sites_describe", "site_probe",
-    "site_load", "module_check", "site_exec", "site_teardown",
+    "site_load", "site_associations", "module_check", "module_list",
+    "site_exec", "site_teardown",
     "env_ensure", "env_status", "env_why", "env_repair", "env_gpu_hint",
     "env_revise", "env_find_near",
     "data_register", "data_describe", "data_fetch",

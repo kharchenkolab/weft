@@ -172,9 +172,14 @@ snap = w.session_snapshot(s["session_id"])       # minimal delta → real EnvID
 ### Monitoring, arrays, load
 
 ```python
-w.site_load("hpc")                          # idle CPUs, backlog, GPU util, QOS
+w.site_load("hpc")                          # idle CPUs+GPUs per partition,
+                                            # backlog, QOS, my associations
 w.site_load("hpc", resources={"cpus": 8, "walltime": "04:00:00"})
                                             # + sbatch --test-only start ETA
+w.site_load("hpc", resources={"gpus": 2}, partitions=["gpu", "short"])
+                                            # ETA per candidate partition
+w.site_associations("hpc")                  # MY accounts/QOS ceilings/fairshare
+w.module_list("hpc", search="cuda")         # discover site software offerings
 r = w.task_submit({..., "array": 2000})     # fan-out with WEFT_ARRAY_INDEX
 w.events_poll(cursor)                       # compact: array digests, transfer
                                             # progress, job states (non-array)
@@ -183,8 +188,12 @@ w.array_result(r["group"])                  # roll-up: wall stats, failures
 w.env_repair(env_id, "hpc")                 # clear a corrupt realization
 ```
 
+Partition records carry `gres` (GPU model/count) and `features`; GPU asks
+validate against them (login nodes have no GPUs), and refusals name the
+fitting partitions.
+
 Off-CI regression scenarios live in `misc/scenarios/scenarios.py`
-(gitignored): 12 end-to-end runs against dockerized sites —
+(gitignored): 21 end-to-end runs against dockerized sites —
 `pixi run python misc/scenarios/scenarios.py`.
 
 ### Multi-ecosystem environments (R/CRAN/GitHub, more to come)

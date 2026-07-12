@@ -9,7 +9,14 @@ from __future__ import annotations
 
 
 def normalize_probe(probe: dict, compute_probe: dict | None = None) -> dict:
+    import time
     caps = {
+        # v2: versioned; carries where each record was MEASURED (login vs
+        # a compute node via probe-job) and when — a capability without
+        # provenance is a guess wearing a fact's clothes
+        "schema": "capabilities:v2",
+        "probed_at": time.time(),
+        "measured_on": probe.get("hostname", "") or "login",
         "os": probe.get("os", "linux"),
         "arch": probe.get("arch", "x86_64"),
         "hostname": probe.get("hostname", ""),
@@ -79,9 +86,17 @@ def satisfies_resources(caps: dict, resources: dict, partitions: list[dict] | No
     if resources.get("mem_gb", 0) > view.get("mem_gb", 0) > 0:
         ok = False
         hints["mem_gb"] = {"asked": resources["mem_gb"], "max": view.get("mem_gb")}
-    if resources.get("gpus", 0) > gpu_count(caps):
+    max_gpus = gpu_count(caps)
+    if partitions:
+        # scheduler sites: GPUs live on compute nodes the login probe
+        # cannot see — partition GRES is the authoritative count there
+        max_gpus = max([max_gpus] + [
+            sum(g.get("count", 0) for g in (p.get("gres") or [])
+                if g.get("type") == "gpu")
+            for p in partitions])
+    if resources.get("gpus", 0) > max_gpus:
         ok = False
-        hints["gpus"] = {"asked": resources["gpus"], "max": gpu_count(caps)}
+        hints["gpus"] = {"asked": resources["gpus"], "max": max_gpus}
     if partitions:
         # a scheduler ask must fit at least one partition (cpus, mem, walltime)
         asked_wall = slurm_time_to_s(resources.get("walltime", ""))
@@ -92,6 +107,11 @@ def satisfies_resources(caps: dict, resources: dict, partitions: list[dict] | No
             pmax = slurm_time_to_s(p.get("max_walltime", ""))
             if fit and asked_wall and pmax is not None and asked_wall > pmax:
                 fit = False
+            if fit and resources.get("gpus", 0):
+                pg = sum(g.get("count", 0) for g in (p.get("gres") or [])
+                         if g.get("type") == "gpu")
+                if resources["gpus"] > pg:
+                    fit = False
             if fit:
                 fits.append(p["name"])
         if not fits:

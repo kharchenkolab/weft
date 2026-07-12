@@ -41,7 +41,8 @@ def test_slurm_load_view_reflects_queue_pressure(w):
             "cluster never became idle within 180s.\n"
             f"last load view: {quiet['partitions']}\n{squeue}")
     assert "load_fraction" in quiet
-    assert quiet["qos"] is None  # no accounting DB on the fixture — honest
+    # the fixture ships fake accounting (shadowed sacctmgr): structured QOS
+    assert any(q["name"] == "normal" for q in quiet["qos"])
 
     # hog the node, then queue one more: pressure must become visible.
     # Submission is async and unordered — wait for the hog to actually RUN

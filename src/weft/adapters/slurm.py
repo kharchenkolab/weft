@@ -21,6 +21,41 @@ _QUEUED = {"PENDING", "CONFIGURING", "REQUEUED", "SUSPENDED", "REQUEUE_HOLD"}
 _RUNNING = {"RUNNING", "COMPLETING", "STAGE_OUT"}
 
 
+def parse_gres(s: str) -> list[dict]:
+    """'gpu:fake:2(S:0-1),shard:4' → [{type: gpu, model: fake, count: 2},
+    {type: shard, model: None, count: 4}]; '(null)'/'' → []."""
+    out = []
+    for tok in (s or "").split(","):
+        tok = tok.strip()
+        if not tok or tok.startswith("(null"):
+            continue
+        tok = re.sub(r"\(.*?\)$", "", tok)     # strip socket/index suffix
+        parts = tok.split(":")
+        try:
+            count = int(parts[-1])
+        except ValueError:
+            continue
+        out.append({"type": parts[0],
+                    "model": parts[1] if len(parts) > 2 else None,
+                    "count": count})
+    return out
+
+
+def parse_tres(s: str) -> dict:
+    """'cpu=32,gres/gpu=2,mem=64G' → {cpu: 32, gpu: 2, mem: '64G'}."""
+    out: dict = {}
+    for tok in (s or "").split(","):
+        if "=" not in tok:
+            continue
+        k, v = tok.split("=", 1)
+        k = k.strip().replace("gres/", "")
+        try:
+            out[k] = int(v)
+        except ValueError:
+            out[k] = v.strip()
+    return out
+
+
 def _expand_array_ids(token: str) -> list[str]:
     """'123_[0-2,5%4]' -> ['123_0','123_1','123_2','123_5']; plain ids pass
     through. Pending array elements only exist in this compact form."""
@@ -63,14 +98,14 @@ class SlurmAdapter(SSHAdapter):
 
     def _probe_partitions(self) -> dict:
         r = self.run_cmd(
-            "sinfo -h -o '%R|%l|%c|%m|%a' 2>/dev/null | sort -u", timeout=30
-        )
+            "sinfo -h -o '%R|%l|%c|%m|%a|%G|%f' 2>/dev/null | sort -u",
+            timeout=30)
         partitions = []
         for line in r.out.splitlines():
             parts = line.strip().split("|")
-            if len(parts) != 5:
+            if len(parts) != 7:
                 continue
-            name, timelimit, cpus, mem_mb, avail = parts
+            name, timelimit, cpus, mem_mb, avail, gres, feats = parts
             try:
                 partitions.append({
                     "name": name,
@@ -78,14 +113,115 @@ class SlurmAdapter(SSHAdapter):
                     "cpus_per_node": int(cpus),
                     "mem_gb_per_node": max(1, int(mem_mb) // 1024),
                     "available": avail.lower().startswith("up"),
+                    "gres": parse_gres(gres),
+                    "features": [] if feats in ("", "(null)")
+                    else sorted(set(feats.split(","))),
                 })
             except ValueError:
                 continue
+        # scontrol has the partition facts sinfo cannot show: who may use
+        # which QOS, defaults, priority — the "am I allowed" half
+        detail = self._partition_detail()
+        for p in partitions:
+            p.update(detail.get(p["name"], {}))
         version = ""
         v = self.run_cmd("sinfo --version 2>/dev/null", timeout=15)
         if v.rc == 0 and v.out.strip():
             version = v.out.strip().split()[-1]
         return {"version": version, "partitions": partitions}
+
+    def _partition_detail(self) -> dict[str, dict]:
+        r = self.run_cmd("scontrol show partition -o 2>/dev/null", timeout=30)
+        out: dict[str, dict] = {}
+        for line in r.out.splitlines():
+            kv = dict(t.split("=", 1) for t in line.split() if "=" in t)
+            name = kv.get("PartitionName")
+            if not name:
+                continue
+            entry = {}
+            if kv.get("AllowQos") not in (None, "ALL"):
+                entry["allow_qos"] = kv["AllowQos"].split(",")
+            if kv.get("QoS") not in (None, "N/A"):
+                entry["partition_qos"] = kv["QoS"]
+            if kv.get("DefaultTime") not in (None, "NONE"):
+                entry["default_walltime"] = kv["DefaultTime"]
+            if kv.get("MaxNodes") not in (None, "UNLIMITED"):
+                try:
+                    entry["max_nodes"] = int(kv["MaxNodes"])
+                except ValueError:
+                    pass
+            if kv.get("PriorityTier"):
+                try:
+                    entry["priority_tier"] = int(kv["PriorityTier"])
+                except ValueError:
+                    pass
+            if kv.get("OverSubscribe"):
+                entry["oversubscribe"] = kv["OverSubscribe"]
+            out[name] = entry
+        return out
+
+    def associations(self) -> dict:
+        """What am *I* allowed to ask for, where — accounts, QOS (with
+        structured ceilings), fairshare. Every field is None when the
+        cluster has no accounting DB: 'unknown' is not 'unlimited'."""
+        assoc = self.run_cmd(
+            "sacctmgr -nP show assoc where user=\"$USER\" "
+            "format=account,user,partition,qos,defaultqos 2>/dev/null; true",
+            timeout=30)
+        associations = []
+        for ln in assoc.out.splitlines():
+            f = ln.split("|")
+            if len(f) < 5 or not f[0]:
+                continue
+            associations.append({
+                "account": f[0],
+                "partition": f[2] or None,     # None = any partition
+                "allowed_qos": [q for q in f[3].split(",") if q],
+                "default_qos": f[4] or None,
+            })
+        qos_r = self.run_cmd(
+            "sacctmgr -nP show qos "
+            "format=name,maxwall,maxtresperuser,priority,maxjobspu "
+            "2>/dev/null; true", timeout=30)
+        qos = []
+        for ln in qos_r.out.splitlines():
+            f = ln.split("|")
+            if len(f) < 3 or not f[0]:
+                continue
+            entry = {"name": f[0], "max_wall": f[1] or None,
+                     "limits_per_user": parse_tres(f[2])}
+            if len(f) > 3 and f[3]:
+                try:
+                    entry["priority"] = int(f[3])
+                except ValueError:
+                    pass
+            if len(f) > 4 and f[4]:
+                try:
+                    entry["max_jobs_per_user"] = int(f[4])
+                except ValueError:
+                    pass
+            qos.append(entry)
+        share = self.run_cmd(
+            "sshare -nP -U format=account,user,rawshares,fairshare "
+            "2>/dev/null; true", timeout=30)
+        fairshare = None
+        for ln in share.out.splitlines():
+            f = ln.split("|")
+            if len(f) >= 4 and f[0]:
+                try:
+                    fairshare = {"account": f[0], "raw_shares": int(f[2]),
+                                 "factor": float(f[3])}
+                except ValueError:
+                    continue
+                break
+        return {
+            "associations": associations or None,
+            "qos": qos or None,
+            "fairshare": fairshare,
+            "note": None if associations else
+            "no accounting DB visible: limits are UNKNOWN, not unlimited — "
+            "submit small and observe, or ask the site owner",
+        }
 
     def load(self) -> dict:
         """Login-node load + the scheduler's live picture: idle vs allocated
@@ -115,21 +251,39 @@ class SlurmAdapter(SSHAdapter):
                 p["pending_jobs"] = p.get("pending_jobs", 0) + 1
             elif fields[1] == "RUNNING":
                 p["running_jobs"] = p.get("running_jobs", 0) + 1
+        # GPUs are usually the limiting factor: configured vs in-use GRES
+        # per partition (nodewise; a node in several partitions counts in
+        # each — same convention sinfo itself uses)
+        g = self.run_cmd(
+            "sinfo -h -N -O 'PartitionName:30,Gres:40,GresUsed:40' "
+            "2>/dev/null", timeout=30)
+        for line in g.out.splitlines():
+            f = line.split()
+            if len(f) < 2:
+                continue
+            pname = f[0]
+            conf = parse_gres(f[1]) if len(f) > 1 else []
+            used = parse_gres(f[2]) if len(f) > 2 else []
+            total = sum(x["count"] for x in conf if x["type"] == "gpu")
+            busy = sum(x["count"] for x in used if x["type"] == "gpu")
+            if total and pname in parts:
+                p = parts[pname]
+                p["gpus_total"] = p.get("gpus_total", 0) + total
+                p["gpus_allocated"] = p.get("gpus_allocated", 0) + busy
+                p["gpus_idle"] = p["gpus_total"] - p["gpus_allocated"]
         base["partitions"] = parts
         mine = self.run_cmd("squeue -h -u \"$USER\" -o '%T' 2>/dev/null", timeout=30)
         my = mine.out.split()
         base["my_jobs"] = {"pending": my.count("PENDING"),
                            "running": my.count("RUNNING")}
-        qos = self.run_cmd(
-            "sacctmgr -nP show qos format=name,maxwall,maxtresperuser "
-            "2>/dev/null; true", timeout=30)
-        base["qos"] = [
-            dict(zip(("name", "max_wall", "max_tres_per_user"), ln.split("|")))
-            for ln in qos.out.splitlines() if ln.strip()
-        ] or None  # None = no accounting DB; not "no limits"
+        acct = self.associations()
+        base["qos"] = acct["qos"]      # None = no accounting DB; not "no limits"
+        base["my_associations"] = acct["associations"]
+        base["fairshare"] = acct["fairshare"]
         return base
 
-    def estimate_start(self, resources: dict) -> dict:
+    def estimate_start(self, resources: dict,
+                       partition: str | None = None) -> dict:
         """Scheduler-computed start ETA under current load and priorities,
         via `sbatch --test-only` — nothing is submitted."""
         directives = [f"--cpus-per-task={resources.get('cpus', 1)}"]
@@ -137,8 +291,10 @@ class SlurmAdapter(SSHAdapter):
             directives.append(f"--mem={resources['mem_gb']}G")
         if resources.get("walltime"):
             directives.append(f"--time={resources['walltime']}")
-        if self.partition:
-            directives.append(f"--partition={self.partition}")
+        if resources.get("gpus"):
+            directives.append(f"--gres=gpu:{resources['gpus']}")
+        if partition or self.partition:
+            directives.append(f"--partition={partition or self.partition}")
         r = self.run_cmd(
             "printf '#!/bin/sh\\ntrue\\n' | sbatch --test-only "
             + " ".join(directives) + " 2>&1; true", timeout=30,
@@ -176,6 +332,28 @@ class SlurmAdapter(SSHAdapter):
             timeout=30,
         )
         return r.rc == 0
+
+    def module_inventory(self) -> list[str]:
+        """The whole module list — DISCOVERY, not verification: on a new
+        cluster the agent needs to find what CUDA/MPI/compilers the site
+        offers, not guess names to check. `-t` gives one name per line;
+        `module` chats on stderr by convention."""
+        init = (self.modules_init + "; ") if self.modules_init else ""
+        r = self.run_cmd(
+            init +
+            "if ! type module >/dev/null 2>&1; then "
+            "[ -f /usr/share/modules/init/sh ] && . /usr/share/modules/init/sh; "
+            "[ -f /usr/share/lmod/lmod/init/sh ] && . /usr/share/lmod/lmod/init/sh; fi; "
+            "module -t avail 2>&1",
+            timeout=60,
+        )
+        names = []
+        for ln in r.out.splitlines():
+            ln = ln.strip()
+            if not ln or ln.endswith(":") or ln.startswith("-"):
+                continue      # section headers ("/opt/site-modules:")
+            names.append(ln.rstrip("(default)").strip())
+        return sorted(set(names))
 
     # -- job control -------------------------------------------------------
 

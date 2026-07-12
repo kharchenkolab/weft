@@ -1,0 +1,5 @@
+#!/bin/sh
+# Fake fairshare output (account|user|rawshares|fairshare-factor).
+cat <<'EOF'
+phys|physicist|100|0.4321
+EOF

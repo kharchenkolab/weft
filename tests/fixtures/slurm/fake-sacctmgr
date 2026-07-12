@@ -1,0 +1,23 @@
+#!/bin/sh
+# Fake accounting for discovery tests: emits the pipe-separated shapes a
+# real slurmdbd-backed sacctmgr produces, for the queries weft makes.
+# Real-cluster validation of these parsers is deferred to real hardware.
+case "$*" in
+    *"show qos"*)
+        cat <<'EOF'
+normal|1-00:00:00|cpu=32,gres/gpu=2|100|10
+gpuq|12:00:00|cpu=16,gres/gpu=4|200|4
+long|7-00:00:00|cpu=8|50|2
+EOF
+        ;;
+    *"show assoc"*)
+        cat <<'EOF'
+phys|physicist||normal,gpuq|normal
+phys|physicist|gpu|gpuq|gpuq
+EOF
+        ;;
+    *)
+        echo "sacctmgr: fake fixture: unsupported query: $*" >&2
+        exit 1
+        ;;
+esac

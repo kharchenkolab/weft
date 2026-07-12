@@ -42,17 +42,32 @@ w.register_site("cloud-gpu", "cloud", {
 
 - `sites_list()` — one line per site: health, cpus/mem/gpus, scheduler,
   internet, policy. `sites_describe(name)` — the full capability record
-  (partitions with limits, runtimes, storage, glibc — `"musl"` means
-  conda-forge envs are impossible there).
+  (`capabilities:v2`): partitions with limits **plus `gres` (GPU
+  type/model/count) and `features` (avx512, ib, …) and scontrol detail
+  (default walltime, priority tier, oversubscribe)**; runtimes; storage
+  incl. probed `candidates` (path/writable/free_gb); glibc — `"musl"`
+  means conda-forge envs are impossible there. `overridden_fields` names
+  facts that came from config, not measurement.
 - `site_probe(name)` — re-probe after drift (quota moved, module renamed).
-- `module_check(site, ["espresso/7.2"])` — lazy module inventory, cached.
-- **`site_load(name, resources=None, fresh=False)`** — what is free *now*:
-  host `load_fraction`, free memory; on Slurm also per-partition
-  `cpus_idle/allocated/total`, `pending_jobs`, `my_jobs`, `qos` (None =
-  no accounting DB, not "no limits"), and with `resources=` a scheduler
-  `start_estimate` from `sbatch --test-only` (nothing is submitted).
+- **`site_associations(name)`** — what am *I* allowed to ask for: my
+  accounts, allowed/default QOS per partition, structured QOS ceilings
+  (`limits_per_user`: cpu/gpu/mem), fairshare factor. All None when the
+  cluster hides accounting — unknown is not unlimited.
+- `module_check(site, ["espresso/7.2"])` — verify names you know, cached.
+  **`module_list(site, search="cuda")`** — DISCOVER what the site offers
+  (the first thing to run on a new cluster).
+- **`site_load(name, resources=None, fresh=False, partitions=None)`** —
+  what is free *now*: host `load_fraction`, free memory; on Slurm also
+  per-partition `cpus_idle/allocated/total`, **`gpus_idle/allocated/
+  total`**, `pending_jobs`, `my_jobs`, `qos`/`my_associations`/`fairshare`
+  (None = no accounting DB, not "no limits"), and with `resources=` a
+  scheduler `start_estimate` from `sbatch --test-only` (nothing is
+  submitted) — pass `partitions=[...]` for a per-partition
+  `start_estimates` comparison ("shortest queue for 2 GPUs right now").
   Use this before choosing where a big campaign goes; `site: "auto"`
   already folds load into its ranking, with reasons.
+- GPU asks validate against partition GRES (login nodes have no GPUs);
+  refusals name the fitting partitions and the honest ceiling.
 
 ## Cloud money rules
 

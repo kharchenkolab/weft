@@ -5,7 +5,7 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=1
+WEFT_SHIM_VERSION=2
 
 json_bool() { if [ "$1" = "0" ]; then echo true; else echo false; fi; }
 
@@ -46,6 +46,18 @@ cmd_probe() {
     gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort | uniq -c \
         | awk '{n=$1; $1=""; sub(/^ /,""); printf "%s{\"model\":\"%s\",\"count\":%d}", sep, $0, n; sep=","}' || true)
     cuda_driver=$(nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9.]*' | awk '{print $3}' | head -1 || true)
+    # storage candidates: where could data/scratch live on this machine?
+    # (existence, writability, free space; merged under user policy
+    # controller-side — policy always wins, this only fills gaps)
+    cands=""; csep=""
+    for d in "$HOME" /scratch "/scratch/$USER" "/lscratch/$USER" /tmp \
+             /dev/shm "/work/$USER"; do
+        [ -d "$d" ] || continue
+        wr=1; [ -w "$d" ] && wr=0
+        cfree=$(df -Pk "$d" 2>/dev/null | awk 'NR==2{print int($4/1048576)}')
+        cands="$cands$csep{\"path\":\"$d\",\"writable\":$(json_bool $wr),\"free_gb\":${cfree:-0}}"
+        csep=","
+    done
     cat <<EOF
 {"shim_version": $WEFT_SHIM_VERSION,
  "os": "$os", "arch": "$arch", "hostname": "$host",
@@ -55,7 +67,8 @@ cmd_probe() {
  "scheduler": {"type": "$sched"},
  "module_system": $(json_bool $modules),
  "gpus": [${gpus:-}], "cuda_driver": "${cuda_driver:-}",
- "storage": {"weft_root": "$root", "free_gb": $free_gb}}
+ "storage": {"weft_root": "$root", "free_gb": $free_gb,
+             "candidates": [${cands:-}]}}
 EOF
 }
 

@@ -13,9 +13,16 @@ RUN chown -R physicist:physicist /home/physicist/.ssh \
     && chmod 700 /home/physicist/.ssh && chmod 600 /home/physicist/.ssh/authorized_keys
 
 COPY slurm.conf /etc/slurm/slurm.conf
+COPY gres.conf /etc/slurm/gres.conf
 RUN mkdir -p /var/spool/slurmctld /var/spool/slurmd /var/log/slurm \
     && chown slurm:slurm /var/spool/slurmctld /var/log/slurm \
     && chmod 755 /var/spool/slurmctld
+
+# fake accounting/fairshare (no slurmdbd in the fixture): /usr/local/bin
+# shadows the real binaries, which would only error without a DB
+COPY fake-sacctmgr /usr/local/bin/sacctmgr
+COPY fake-sshare /usr/local/bin/sshare
+RUN chmod +x /usr/local/bin/sacctmgr /usr/local/bin/sshare
 
 # a site-licensed "module" the tests can require (doc scenario S4)
 COPY modulefiles /opt/site-modules
