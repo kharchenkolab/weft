@@ -82,3 +82,19 @@ group-writable files and takes a **site-side lease** around environment
 builds, so two users racing the same EnvID cooperate: one builds, the
 other waits and adopts (`realize.adopted`). Trust is the filesystem's —
 weft brokers no identity. Env reuse across users is the payoff.
+
+## Reclaiming disk (env footprint)
+
+```python
+w.site_footprint("hpc")   # prefixes vs shared package cache vs data cache,
+                          # per-env bytes and idle_days
+w.env_evict(env_id, "hpc")                 # drop the prefix; cache stays warm
+                                           # → rebuild is SECONDS, offline
+w.env_evict(env_id, "hpc", archive=True)   # + keep a blob on the CONTROLLER
+                                           # → reclaims ~everything; rebuilds
+                                           #   with no site network
+w.gc_packages("hpc", confirm=True)         # the SHARED cache — consequential:
+                                           # rebuilds then need the index
+```
+Realized envs are the bulk of a quota; the lock that re-materializes them
+is kilobytes. Strip aggressively — `env_evict` is cheap to undo.
