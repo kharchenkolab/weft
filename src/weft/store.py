@@ -66,7 +66,18 @@ class Store:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
+            self._migrate()
         self._subscribers: list[Callable[[dict], None]] = []
+
+    def _migrate(self) -> None:
+        """Additive migrations for stores created by older versions."""
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(jobs)")}
+        if "array_group" not in cols:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN array_group TEXT")
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN array_index INTEGER")
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS jobs_by_group ON jobs(array_group)"
+            )
 
     # -- serialized access helpers ------------------------------------------
 
@@ -273,12 +284,15 @@ class Store:
 
     # -- jobs -------------------------------------------------------------
 
-    def put_job(self, job_id: str, task_hash: str, task: dict, site: str, state: str) -> None:
+    def put_job(self, job_id: str, task_hash: str, task: dict, site: str,
+                state: str, array_group: str | None = None,
+                array_index: int | None = None) -> None:
         now = time.time()
         self._write(
             "INSERT INTO jobs(job_id, task_hash, task, site, state, created_at,"
-            " updated_at) VALUES(?,?,?,?,?,?,?)",
-            (job_id, task_hash, _j(task), site, state, now, now),
+            " updated_at, array_group, array_index) VALUES(?,?,?,?,?,?,?,?,?)",
+            (job_id, task_hash, _j(task), site, state, now, now,
+             array_group, array_index),
         )
 
     def update_job(
@@ -328,6 +342,7 @@ class Store:
 
     @staticmethod
     def _job_row(r: sqlite3.Row) -> dict:
+        keys = r.keys()
         return {
             "job_id": r["job_id"], "task_hash": r["task_hash"],
             "task": json.loads(r["task"]), "site": r["site"], "state": r["state"],
@@ -335,7 +350,51 @@ class Store:
             "error": json.loads(r["error"]) if r["error"] else None,
             "manifest": json.loads(r["manifest"]) if r["manifest"] else None,
             "created_at": r["created_at"], "updated_at": r["updated_at"],
+            "array_group": r["array_group"] if "array_group" in keys else None,
+            "array_index": r["array_index"] if "array_index" in keys else None,
         }
+
+    # -- array groups ---------------------------------------------------------
+
+    def jobs_in_group(self, group: str) -> list[dict]:
+        return [self._job_row(r) for r in self._rows(
+            "SELECT * FROM jobs WHERE array_group=? ORDER BY array_index", (group,)
+        )]
+
+    def group_counts(self, group: str) -> dict:
+        rows = self._rows(
+            "SELECT state, COUNT(*) AS n FROM jobs WHERE array_group=? "
+            "GROUP BY state", (group,)
+        )
+        counts = {r["state"]: r["n"] for r in rows}
+        return {
+            "total": sum(counts.values()),
+            "done": counts.get("DONE", 0),
+            "failed": counts.get("FAILED", 0),
+            "cancelled": counts.get("CANCELLED", 0),
+            "running": counts.get("RUNNING", 0) + counts.get("COLLECTING", 0),
+            "queued": counts.get("QUEUED", 0),
+            "preparing": counts.get("PENDING", 0) + counts.get("RESOLVING_ENV", 0)
+                         + counts.get("STAGING", 0),
+        }
+
+    def failed_in_group(self, group: str, limit: int = 3) -> list[dict]:
+        rows = self._rows(
+            "SELECT job_id, array_index, error FROM jobs "
+            "WHERE array_group=? AND state='FAILED' ORDER BY array_index LIMIT ?",
+            (group, limit),
+        )
+        out = []
+        for r in rows:
+            err = json.loads(r["error"]) if r["error"] else {}
+            out.append({
+                "job_id": r["job_id"], "index": r["array_index"],
+                "code": err.get("error"),
+                "signature": (err.get("hints", {}).get("log_signature") or {}
+                              ).get("signature"),
+                "detail": (err.get("detail") or "")[:200],
+            })
+        return out
 
     # -- sessions -----------------------------------------------------------
 

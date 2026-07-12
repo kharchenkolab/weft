@@ -92,14 +92,31 @@ EOF
     echo "{\"started\": true, \"pid\": $(cat "$jobdir/pid")}"
 }
 
-cmd_status() {
-    jobdir=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --dir) jobdir=$2; shift 2;;
-            *) echo "status: unknown arg $1" >&2; exit 2;;
-        esac
-    done
+# alive PID REF_FILE — is PID our process? kill -0 alone lies after a
+# reboot (pid namespaces reset, pids recycle). Guards, where /proc exists:
+# a pid recorded before the last boot is dead; a process that started
+# measurably later than the pid file was written is a reused pid.
+alive() {
+    a_pid=$1; a_ref=$2
+    kill -0 "$a_pid" 2>/dev/null || return 1
+    [ -r /proc/stat ] || return 0
+    btime=$(awk '/^btime/{print $2}' /proc/stat 2>/dev/null)
+    [ -n "$btime" ] || return 0
+    ref_t=$(stat -c %Y "$a_ref" 2>/dev/null || echo 0)
+    [ "$ref_t" -gt 0 ] || return 0
+    [ "$ref_t" -lt "$btime" ] && return 1
+    if [ -r "/proc/$a_pid/stat" ]; then
+        clk=$(getconf CLK_TCK 2>/dev/null || echo 100)
+        st=$(sed 's/^[^)]*) //' "/proc/$a_pid/stat" 2>/dev/null | awk '{print $20}')
+        case "$st" in ''|*[!0-9]*) return 0;; esac
+        pstart=$((btime + st / clk))
+        [ $((pstart - ref_t)) -gt 5 ] && return 1
+    fi
+    return 0
+}
+
+status_of() {
+    jobdir=$1
     if [ ! -d "$jobdir" ]; then
         echo '{"state": "missing"}'; return
     fi
@@ -112,18 +129,21 @@ cmd_status() {
     fi
     # pid.real is written by the runner itself; the setsid wrapper pid can
     # exit immediately on some platforms, so it is only a fallback
+    ref="$jobdir/pid.real"
+    [ -f "$ref" ] || ref="$jobdir/pid"
     pid=$(cat "$jobdir/pid.real" 2>/dev/null || cat "$jobdir/pid" 2>/dev/null || echo "")
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    if [ -n "$pid" ] && alive "$pid" "$ref"; then
         echo "{\"state\": \"running\", \"pid\": $pid}"
     elif [ -n "$pid" ]; then
         # no live pid and no exit_code: either truly dead, just-exited (the
         # exit_code rename is in flight), or just-started (pid.real pending)
         sleep 1
         if [ -f "$jobdir/exit_code" ]; then
-            cmd_status --dir "$jobdir"
+            status_of "$jobdir"
         else
             p2=$(cat "$jobdir/pid.real" 2>/dev/null || echo "$pid")
-            if [ -n "$p2" ] && kill -0 "$p2" 2>/dev/null; then
+            ref2="$jobdir/pid.real"; [ -f "$ref2" ] || ref2="$jobdir/pid"
+            if [ -n "$p2" ] && alive "$p2" "$ref2"; then
                 echo "{\"state\": \"running\", \"pid\": $p2}"
             else
                 echo '{"state": "lost"}'
@@ -132,6 +152,27 @@ cmd_status() {
     else
         echo '{"state": "not_started"}'
     fi
+}
+
+cmd_status() {
+    jobdir=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dir) jobdir=$2; shift 2;;
+            *) echo "status: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    status_of "$jobdir"
+}
+
+# status-batch: job dirs on stdin (one per line), one JSON per line out:
+# {"dir": "<dir>", ...status}. One invocation covers every job on the host.
+cmd_status_batch() {
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        s=$(status_of "$d")
+        printf '{"dir": "%s", %s\n' "$d" "${s#\{}"
+    done
 }
 
 cmd_tail() {
@@ -276,6 +317,7 @@ case "$sub" in
     probe) cmd_probe "$@";;
     run) cmd_run "$@";;
     status) cmd_status "$@";;
+    status-batch) cmd_status_batch "$@";;
     tail) cmd_tail "$@";;
     head) cmd_head "$@";;
     hash-tree) cmd_hash_tree "$@";;

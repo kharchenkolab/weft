@@ -78,7 +78,8 @@ class DataManager:
             if e["kind"] == "file"
         ]
 
-    def ensure_at(self, refs: list[str], adapter: SiteAdapter, transfers: dict) -> dict:
+    def ensure_at(self, refs: list[str], adapter: SiteAdapter, transfers: dict,
+                  job_id: str | None = None) -> dict:
         """Move missing refs to the site CAS; verify; register locations."""
         plan = self.plan_for(refs, adapter.name)
         if plan.to_transfer:

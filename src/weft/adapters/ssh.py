@@ -13,6 +13,7 @@ exit status.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shlex
 import subprocess
@@ -255,6 +256,36 @@ class SSHAdapter(SiteAdapter):
     def poll_job(self, handle: str, jobdir_rel: str) -> dict:
         return self.shim(["status", "--dir", self.path(jobdir_rel)],
                          timeout=self.poll_timeout).json()
+
+    def poll_jobs(self, items: list[tuple[str, str]]) -> dict[str, dict]:
+        if not items:
+            return {}
+        by_dir = {self.path(rel): h for h, rel in items}
+        stdin = ("\n".join(by_dir) + "\n").encode()
+        r = self._run(
+            self._env_prefix() + shlex.join(
+                [self.path("bin/weft-shim"), "status-batch"]),
+            input_bytes=stdin,
+            timeout=max(self.poll_timeout, 5 + 0.05 * len(items)),
+        )
+        if r.rc != 0:
+            raise WeftError(
+                "site.unreachable", f"status-batch failed: {r.err[-300:]}",
+                stage="infra", retryable=True,
+            )
+        out: dict[str, dict] = {}
+        for line in r.out.splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            handle = by_dir.get(rec.pop("dir", ""))
+            if handle is not None:
+                out[handle] = rec
+        # anything the shim didn't answer for counts as unknown, not missing
+        for h, _ in items:
+            out.setdefault(h, {"state": "unknown"})
+        return out
 
     def cancel(self, handle: str, jobdir_rel: str) -> None:
         if handle.startswith("pid:"):

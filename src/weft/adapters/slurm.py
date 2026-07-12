@@ -182,6 +182,87 @@ class SlurmAdapter(SSHAdapter):
                     "wall_s": 0, "note": "exit file missing; used scheduler record"}
         return st
 
+    _CHUNK = 400  # scheduler ids per command line
+
+    def poll_jobs(self, items: list[tuple[str, str]]) -> dict[str, dict]:
+        """One squeue (+ one scontrol for departed ids) per tick for ALL
+        outstanding jobs — the login-node politeness contract. Exit files
+        are consulted only for jobs at a terminal transition."""
+        slurm_items = [(h, rel) for h, rel in items if h.startswith("slurm:")]
+        other = [(h, rel) for h, rel in items if not h.startswith("slurm:")]
+        out: dict[str, dict] = {}
+        if other:
+            out.update(super().poll_jobs(other))
+        if not slurm_items:
+            return out
+
+        by_jid = {h.split(":", 1)[1]: (h, rel) for h, rel in slurm_items}
+        queue_state: dict[str, str] = {}
+        jids = list(by_jid)
+        for i in range(0, len(jids), self._CHUNK):
+            chunk = ",".join(jids[i : i + self._CHUNK])
+            r = self.run_cmd(
+                f"squeue -h -j {shlex.quote(chunk)} -o '%i %T' 2>/dev/null; true",
+                timeout=self.poll_timeout,
+            )
+            for line in r.out.splitlines():
+                parts = line.split()
+                if len(parts) == 2:
+                    queue_state[parts[0]] = parts[1]
+
+        departed = [j for j in jids if j not in queue_state]
+        ctl_state: dict[str, str] = {}
+        for i in range(0, len(departed), self._CHUNK):
+            chunk = ",".join(departed[i : i + self._CHUNK])
+            r = self.run_cmd(
+                f"scontrol show job {shlex.quote(chunk)} -o 2>/dev/null; true",
+                timeout=self.poll_timeout,
+            )
+            for block in r.out.splitlines():
+                mid = re.search(r"JobId=(\d+)", block)
+                mst = re.search(r"JobState=(\S+)", block)
+                if mid and mst:
+                    ctl_state[mid.group(1)] = mst.group(1)
+
+        # exit files, fetched in one shim call, for jobs the scheduler says
+        # are finished (or has forgotten entirely)
+        need_files = [
+            j for j in departed
+            if ctl_state.get(j, "") not in _QUEUED | _RUNNING
+        ]
+        file_status: dict[str, dict] = {}
+        if need_files:
+            batch = super().poll_jobs(
+                [(by_jid[j][0], by_jid[j][1]) for j in need_files]
+            )
+            file_status = {j: batch[by_jid[j][0]] for j in need_files}
+
+        for jid, (handle, rel) in by_jid.items():
+            st = queue_state.get(jid) or ctl_state.get(jid, "")
+            if st in _QUEUED:
+                out[handle] = {"state": "queued", "slurm": st}
+            elif st in _RUNNING:
+                out[handle] = {"state": "running", "slurm": st}
+            elif st == "TIMEOUT":
+                out[handle] = {**file_status.get(jid, {}),
+                               "state": "timeout", "slurm": st}
+            elif st == "OUT_OF_MEMORY":
+                out[handle] = {**file_status.get(jid, {}),
+                               "state": "oom", "slurm": st}
+            elif st == "NODE_FAIL":
+                out[handle] = {"state": "lost", "slurm": st}
+            elif st.startswith("CANCELLED"):
+                out[handle] = {"state": "cancelled", "slurm": st}
+            else:
+                fs = file_status.get(jid, {"state": "unknown"})
+                if fs.get("state") != "exited" and st in ("COMPLETED", "FAILED"):
+                    out[handle] = {"state": "exited", "exit_code": -1,
+                                   "wall_s": 0,
+                                   "note": "exit file missing; scheduler record"}
+                else:
+                    out[handle] = fs
+        return out
+
     def _file_status(self, jobdir_rel: str) -> dict:
         try:
             return self.shim(["status", "--dir", self.path(jobdir_rel)],

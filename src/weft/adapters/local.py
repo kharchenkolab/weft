@@ -97,6 +97,30 @@ class LocalAdapter(SiteAdapter):
     def poll_job(self, handle: str, jobdir_rel: str) -> dict:
         return self.shim(["status", "--dir", self.path(jobdir_rel)]).json()
 
+    def poll_jobs(self, items: list[tuple[str, str]]) -> dict[str, dict]:
+        if not items:
+            return {}
+        import json
+        by_dir = {self.path(rel): h for h, rel in items}
+        proc = subprocess.run(
+            [str(self._root / "bin" / "weft-shim"), "status-batch"],
+            input="\n".join(by_dir) + "\n",
+            capture_output=True, text=True, timeout=60 + 0.05 * len(items),
+            env=self._env(),
+        )
+        out: dict[str, dict] = {}
+        for line in proc.stdout.splitlines():
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            handle = by_dir.get(rec.pop("dir", ""))
+            if handle is not None:
+                out[handle] = rec
+        for h, _ in items:
+            out.setdefault(h, {"state": "unknown"})
+        return out
+
     def cancel(self, handle: str, jobdir_rel: str) -> None:
         if handle.startswith("pid:"):
             pid = handle[4:]

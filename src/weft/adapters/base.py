@@ -81,6 +81,17 @@ class SiteAdapter(ABC):
     def poll_job(self, handle: str, jobdir_rel: str) -> dict:
         """{"state": running|exited|lost|missing, "exit_code": int?, ...}"""
 
+    def poll_jobs(self, items: list[tuple[str, str]]) -> dict[str, dict]:
+        """Batched poll: [(handle, jobdir_rel)] -> {handle: status}.
+
+        One site round-trip per *interval*, not per job (doc 02 §5's
+        batched-polling requirement). Base fallback loops poll_job for
+        adapters without a cheaper batch primitive. A transport failure
+        raises site.unreachable for the whole batch — the caller treats it
+        as one site-level outage, not N job failures.
+        """
+        return {h: self.poll_job(h, rel) for h, rel in items}
+
     @abstractmethod
     def cancel(self, handle: str, jobdir_rel: str) -> None: ...
 
