@@ -1,0 +1,264 @@
+#!/bin/sh
+# weft-shim — site-side helper. POSIX sh + coreutils only; no daemon.
+# Everything weft places on a site lives under one WEFT_ROOT; this script
+# provides the primitives the controller composes: probe, detached run,
+# status, log access, tree hashing, materialization, verified unpack.
+set -eu
+
+WEFT_SHIM_VERSION=1
+
+json_bool() { if [ "$1" = "0" ]; then echo true; else echo false; fi; }
+
+cmd_probe() {
+    os=$(uname -s | tr 'A-Z' 'a-z')
+    arch=$(uname -m)
+    host=$(hostname 2>/dev/null || echo unknown)
+    cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+    mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    mem_gb=$((mem_kb / 1048576))
+    root="${WEFT_ROOT:-$HOME/.weft}"
+    free_kb=$(df -Pk "$(dirname "$root")" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
+    free_gb=$((free_kb / 1048576))
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsm 5 -o /dev/null https://conda.anaconda.org 2>/dev/null; net=$?
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 5 -O /dev/null https://conda.anaconda.org 2>/dev/null; net=$?
+    else
+        net=1
+    fi
+    apptainer_v=$(apptainer --version 2>/dev/null | awk '{print $NF}' || true)
+    docker_ok=1; command -v docker >/dev/null 2>&1 && docker_ok=0
+    sched=none
+    command -v sbatch >/dev/null 2>&1 && sched=slurm
+    command -v qsub  >/dev/null 2>&1 && [ "$sched" = none ] && sched=pbs
+    modules=1; command -v modulecmd >/dev/null 2>&1 && modules=0
+    [ -n "${LMOD_CMD:-}" ] && modules=0
+    type module >/dev/null 2>&1 && modules=0
+    glibc=$(ldd --version 2>/dev/null | head -1 | grep -o '[0-9][0-9.]*$' || echo "")
+    gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort | uniq -c \
+        | awk '{n=$1; $1=""; sub(/^ /,""); printf "%s{\"model\":\"%s\",\"count\":%d}", sep, $0, n; sep=","}' || true)
+    cat <<EOF
+{"shim_version": $WEFT_SHIM_VERSION,
+ "os": "$os", "arch": "$arch", "hostname": "$host",
+ "cpus": $cpus, "mem_gb": $mem_gb, "glibc": "$glibc",
+ "internet": $(json_bool $net),
+ "runtimes": {"apptainer": "${apptainer_v:-}", "docker": $(json_bool $docker_ok)},
+ "scheduler": {"type": "$sched"},
+ "module_system": $(json_bool $modules),
+ "gpus": [${gpus:-}],
+ "storage": {"weft_root": "$root", "free_gb": $free_gb}}
+EOF
+}
+
+# run --dir JOBDIR ; expects JOBDIR/cmd.sh, optional JOBDIR/activate.sh
+# Detached via setsid+nohup: survives the SSH session and controller.
+cmd_run() {
+    jobdir=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dir) jobdir=$2; shift 2;;
+            *) echo "run: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    [ -n "$jobdir" ] && [ -f "$jobdir/cmd.sh" ] || { echo "run: need --dir with cmd.sh" >&2; exit 2; }
+    jobdir=$(cd "$jobdir" && pwd)
+    timer=""
+    command -v /usr/bin/time >/dev/null 2>&1 && /usr/bin/time -v true 2>/dev/null && timer="/usr/bin/time -v -o $jobdir/rusage"
+    cat > "$jobdir/runner.sh" <<EOF
+#!/bin/sh
+cd "$jobdir"
+[ -f activate.sh ] && . ./activate.sh
+start=\$(date +%s)
+$timer sh cmd.sh >> log 2>&1
+rc=\$?
+end=\$(date +%s)
+echo "\$((end - start))" > wall_s
+echo "\$rc" > exit_code.tmp && mv exit_code.tmp exit_code
+EOF
+    chmod +x "$jobdir/runner.sh"
+    : > "$jobdir/log"
+    nohup setsid sh "$jobdir/runner.sh" </dev/null >/dev/null 2>&1 &
+    echo $! > "$jobdir/pid"
+    echo "{\"started\": true, \"pid\": $(cat "$jobdir/pid")}"
+}
+
+cmd_status() {
+    jobdir=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dir) jobdir=$2; shift 2;;
+            *) echo "status: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    if [ ! -d "$jobdir" ]; then
+        echo '{"state": "missing"}'; return
+    fi
+    if [ -f "$jobdir/exit_code" ]; then
+        rc=$(cat "$jobdir/exit_code")
+        wall=$(cat "$jobdir/wall_s" 2>/dev/null || echo 0)
+        rss_kb=$(awk -F': ' '/Maximum resident set/{print $2}' "$jobdir/rusage" 2>/dev/null || echo 0)
+        echo "{\"state\": \"exited\", \"exit_code\": $rc, \"wall_s\": $wall, \"max_rss_kb\": ${rss_kb:-0}}"
+        return
+    fi
+    pid=$(cat "$jobdir/pid" 2>/dev/null || echo "")
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        echo "{\"state\": \"running\", \"pid\": $pid}"
+    elif [ -n "$pid" ]; then
+        # started but no exit_code and no process: died without epilogue
+        echo '{"state": "lost"}'
+    else
+        echo '{"state": "not_started"}'
+    fi
+}
+
+cmd_tail() {
+    file=""; lines=100
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file) file=$2; shift 2;;
+            --lines) lines=$2; shift 2;;
+            *) echo "tail: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    [ -f "$file" ] && tail -n "$lines" "$file" || true
+}
+
+cmd_head() {
+    file=""; bytes=4096
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file) file=$2; shift 2;;
+            --bytes) bytes=$2; shift 2;;
+            *) echo "head: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    [ -f "$file" ] && head -c "$bytes" "$file" || true
+}
+
+# hash-tree --root R [--rel] : TSV of kind, path, exec, size, sha256/target
+cmd_hash_tree() {
+    root=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --root) root=$2; shift 2;;
+            *) echo "hash-tree: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    [ -d "$root" ] || { echo "hash-tree: no such dir: $root" >&2; exit 2; }
+    root=$(cd "$root" && pwd)
+    ( cd "$root" && find . \( -type f -o -type l \) | sed 's|^\./||' | LC_ALL=C sort ) | \
+    while IFS= read -r p; do
+        full="$root/$p"
+        if [ -L "$full" ]; then
+            printf 'link\t%s\t0\t0\t%s\n' "$p" "$(readlink "$full")"
+        else
+            x=0; [ -x "$full" ] && x=1
+            sz=$(wc -c < "$full" | tr -d ' ')
+            h=$(sha256sum "$full" | awk '{print $1}')
+            printf 'file\t%s\t%s\t%s\t%s\n' "$p" "$x" "$sz" "$h"
+        fi
+    done
+}
+
+# materialize --cas C --dir D --plan P ; plan TSV: path<TAB>sha256<TAB>exec
+cmd_materialize() {
+    cas=""; dir=""; plan=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --cas) cas=$2; shift 2;;
+            --dir) dir=$2; shift 2;;
+            --plan) plan=$2; shift 2;;
+            *) echo "materialize: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    [ -f "$plan" ] || { echo "materialize: no plan" >&2; exit 2; }
+    while IFS="$(printf '\t')" read -r path sha x; do
+        [ -n "$path" ] || continue
+        dest="$dir/$path"
+        mkdir -p "$(dirname "$dest")"
+        rm -f "$dest"
+        if [ "$x" = "L" ]; then
+            ln -s "$sha" "$dest"   # sha column carries the link target
+            continue
+        fi
+        blob="$cas/$(echo "$sha" | cut -c1-2)/$sha"
+        [ -f "$blob" ] || { echo "materialize: missing blob $sha for $path" >&2; exit 3; }
+        if [ "$x" = "1" ]; then
+            # copy, not link: chmod on a hardlink would flip the CAS inode
+            cp "$blob" "$dest" && chmod +x "$dest"
+        else
+            ln "$blob" "$dest" 2>/dev/null || cp "$blob" "$dest"
+        fi
+    done < "$plan"
+    echo '{"materialized": true}'
+}
+
+# ingest --cas C --root R --plan P ; plan TSV: path<TAB>sha256
+# Links job outputs into the site CAS so later tasks chain without re-transfer.
+cmd_ingest() {
+    cas=""; root=""; plan=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --cas) cas=$2; shift 2;;
+            --root) root=$2; shift 2;;
+            --plan) plan=$2; shift 2;;
+            *) echo "ingest: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    [ -f "$plan" ] || { echo "ingest: no plan" >&2; exit 2; }
+    while IFS="$(printf '\t')" read -r path sha; do
+        [ -n "$path" ] || continue
+        src="$root/$path"
+        [ -f "$src" ] || { echo "ingest: missing output $path" >&2; exit 3; }
+        blobdir="$cas/$(echo "$sha" | cut -c1-2)"
+        blob="$blobdir/$sha"
+        [ -f "$blob" ] && continue
+        mkdir -p "$blobdir"
+        ln "$src" "$blob.tmp.$$" 2>/dev/null || cp "$src" "$blob.tmp.$$"
+        mv "$blob.tmp.$$" "$blob"
+    done < "$plan"
+    echo '{"ingested": true}'
+}
+
+# unpack-verify --archive A --sha256 H --dest D  (atomic: tmp + rename)
+cmd_unpack_verify() {
+    archive=""; sha=""; dest=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --archive) archive=$2; shift 2;;
+            --sha256) sha=$2; shift 2;;
+            --dest) dest=$2; shift 2;;
+            *) echo "unpack-verify: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    got=$(sha256sum "$archive" | awk '{print $1}')
+    if [ "$got" != "$sha" ]; then
+        echo "{\"ok\": false, \"error\": \"hash mismatch\", \"expected\": \"$sha\", \"got\": \"$got\"}"
+        exit 4
+    fi
+    rm -rf "$dest.tmp"
+    mkdir -p "$dest.tmp"
+    tar -xf "$archive" -C "$dest.tmp"
+    rm -rf "$dest"
+    mv "$dest.tmp" "$dest"
+    echo '{"ok": true}'
+}
+
+cmd_version() { echo "{\"shim_version\": $WEFT_SHIM_VERSION}"; }
+
+sub="${1:-}"
+[ -n "$sub" ] || { echo "usage: weft-shim <probe|run|status|tail|head|hash-tree|materialize|unpack-verify|version>" >&2; exit 2; }
+shift
+case "$sub" in
+    probe) cmd_probe "$@";;
+    run) cmd_run "$@";;
+    status) cmd_status "$@";;
+    tail) cmd_tail "$@";;
+    head) cmd_head "$@";;
+    hash-tree) cmd_hash_tree "$@";;
+    materialize) cmd_materialize "$@";;
+    ingest) cmd_ingest "$@";;
+    unpack-verify) cmd_unpack_verify "$@";;
+    version) cmd_version "$@";;
+    *) echo "weft-shim: unknown command $sub" >&2; exit 2;;
+esac

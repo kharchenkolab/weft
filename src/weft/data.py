@@ -1,0 +1,249 @@
+"""Data manager: DataRef registration, staging plans, transfers, collection.
+
+Staging is a set difference over the location table (doc 04 §3): required
+refs minus refs present at the target, compiled into blob transfers. On
+collection, outputs are hashed *at the site* and ingested into the site
+CAS before anything moves — task chaining then finds them already present.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from .adapters.base import SiteAdapter
+from .cas import LocalCAS, StagingPlan, staging_plan
+from .errors import WeftError
+from .ids import canonical_json, sha256_bytes
+from .preview import preview_for
+from .store import Store
+from .task import Task
+
+PREVIEW_HEAD_BYTES = 32 * 1024
+LOG_TAIL_LINES = 100
+
+
+class DataManager:
+    def __init__(self, store: Store, cas: LocalCAS, workspace: Path):
+        self.store = store
+        self.cas = cas
+        self.workspace = Path(workspace)
+
+    # -- registration ------------------------------------------------------
+
+    def register(self, path: str | Path) -> dict:
+        info = self.cas.register(Path(path))
+        self.store.put_dataref(
+            info.ref, info.kind, info.bytes, info.chunks,
+            meta={"origin": str(path)},
+        )
+        # "@workspace" is a reserved pseudo-site: the local CAS itself
+        self.store.set_location(info.ref, "@workspace", str(self.cas.root))
+        return {"ref": info.ref, "kind": info.kind, "bytes": info.bytes}
+
+    def describe(self, ref: str) -> dict:
+        row = self.store.get_dataref(ref)
+        if not row:
+            raise WeftError("data.missing", f"unknown ref: {ref}", stage="staging")
+        row["locations"] = [
+            {"site": loc["site"], "verified_at": loc["verified_at"]}
+            for loc in self.store.locations_of(ref)
+        ]
+        return row
+
+    # -- staging ------------------------------------------------------------
+
+    def sizes(self, refs: list[str]) -> dict[str, int]:
+        out = {}
+        for r in refs:
+            row = self.store.get_dataref(r)
+            out[r] = row["bytes"] if row else 0
+        return out
+
+    def plan_for(self, refs: list[str], site: str) -> StagingPlan:
+        return staging_plan(refs, self.store.refs_present_at(site), self.sizes(refs))
+
+    def blobs_for(self, ref: str) -> list[tuple[str, int]]:
+        """(sha256, size) of every blob backing a ref."""
+        kind = self.cas.kind_of(ref)
+        if kind is None:
+            raise WeftError(
+                "data.missing", f"ref content not in local CAS: {ref}", stage="staging"
+            )
+        if kind == "file":
+            row = self.store.get_dataref(ref)
+            return [(ref.split(":")[-1], row["bytes"] if row else 0)]
+        return [
+            (e["sha256"], e["size"])
+            for e in self.cas.tree_manifest(ref)
+            if e["kind"] == "file"
+        ]
+
+    def ensure_at(self, refs: list[str], adapter: SiteAdapter, transfers: dict) -> dict:
+        """Move missing refs to the site CAS; verify; register locations."""
+        plan = self.plan_for(refs, adapter.name)
+        if plan.to_transfer:
+            endpoint = adapter.transfer_endpoint()
+            method = transfers.get(endpoint["method"])
+            if method is None:
+                raise WeftError(
+                    "data.transfer_failed",
+                    f"no transfer method {endpoint['method']!r} configured",
+                    stage="staging",
+                )
+            blobs = []
+            for ref in plan.to_transfer:
+                blobs.extend(self.blobs_for(ref))
+            method.transfer(blobs, self.cas, endpoint)
+            for ref in plan.to_transfer:
+                self.store.set_location(ref, adapter.name, endpoint["cas_root"])
+        return plan.to_dict()
+
+    # -- sandbox materialization --------------------------------------------
+
+    def materialize_plan(self, task: Task) -> str:
+        """TSV consumed by `weft-shim materialize` (path, sha/target, flag)."""
+        rows: list[str] = []
+        mounts = list(task.inputs) + ([task.code] if task.code else [])
+        for inp in mounts:
+            row = self.store.get_dataref(inp.ref)
+            kind = row["kind"] if row else self.cas.kind_of(inp.ref)
+            if kind is None:
+                raise WeftError(
+                    "data.missing", f"unknown ref: {inp.ref}", stage="staging",
+                    hints={"suggestion": "register the path first with data.register"},
+                )
+            if kind == "file":
+                is_exec = 1 if inp.mount_as.endswith((".sh", ".py")) else 0
+                rows.append(f"{inp.mount_as}\t{inp.ref.split(':')[-1]}\t{is_exec}")
+            else:
+                for e in self.cas.tree_manifest(inp.ref):
+                    p = f"{inp.mount_as}/{e['path']}"
+                    if e["kind"] == "link":
+                        rows.append(f"{p}\t{e['target']}\tL")
+                    else:
+                        rows.append(f"{p}\t{e['sha256']}\t{1 if e.get('exec') else 0}")
+        return "\n".join(rows) + ("\n" if rows else "")
+
+    # -- collection -----------------------------------------------------------
+
+    def collect_outputs(
+        self, adapter: SiteAdapter, jobdir_rel: str, task: Task
+    ) -> tuple[list[dict], int]:
+        """Hash declared outputs site-side, ingest into site CAS, build
+        manifest entries with previews. Returns (entries, total_bytes)."""
+        entries: list[dict] = []
+        ingest_rows: list[str] = []
+        total = 0
+        for out in task.outputs:
+            out = out.rstrip("/")
+            listing = adapter.shim(
+                ["hash-tree", "--root", adapter.path(f"{jobdir_rel}/{out}")],
+                timeout=600,
+            )
+            if listing.rc != 0:
+                # a declared output that was never produced is a task failure
+                raise WeftError(
+                    "job.nonzero_exit",
+                    f"declared output {out!r} missing from sandbox",
+                    stage="collecting",
+                    hints={"declared_outputs": task.outputs,
+                           "detail": listing.err[:300]},
+                )
+            tree_entries = []
+            for line in listing.out.splitlines():
+                kind, path, is_exec, size, digest = line.split("\t")
+                if kind == "link":
+                    tree_entries.append({"path": path, "kind": "link", "target": digest})
+                    continue
+                size = int(size)
+                tree_entries.append({
+                    "path": path, "kind": "file", "exec": is_exec == "1",
+                    "size": size, "sha256": digest,
+                })
+                ingest_rows.append(f"{out}/{path}\t{digest}")
+                total += size
+                file_ref = f"dref:{digest}"
+                self.store.put_dataref(file_ref, "file", size, meta={"origin": f"job:{jobdir_rel}"})
+                entries.append(self._entry(adapter, jobdir_rel, f"{out}/{path}", file_ref, size))
+            tree_hash = sha256_bytes(canonical_json(tree_entries))
+            tree_ref = f"dref:{tree_hash}"
+            # keep the manifest locally so later tasks can mount this tree
+            # even though its blobs only exist in the site CAS
+            self.cas.put_tree_manifest(tree_hash, tree_entries)
+            self.store.put_dataref(
+                tree_ref, "tree", sum(e.get("size", 0) for e in tree_entries),
+                meta={"origin": f"job:{jobdir_rel}", "path": out},
+            )
+            entries.append({"path": out + "/", "ref": tree_ref,
+                            "bytes": sum(e.get("size", 0) for e in tree_entries),
+                            "preview": {"kind": "tree", "files": len(tree_entries)}})
+        if ingest_rows:
+            plan_rel = f"{jobdir_rel}/ingest.tsv"
+            adapter.write_file(plan_rel, ("\n".join(ingest_rows) + "\n").encode())
+            endpoint = adapter.transfer_endpoint()
+            r = adapter.shim(
+                ["ingest", "--cas", endpoint["cas_root"],
+                 "--root", adapter.path(jobdir_rel), "--plan", adapter.path(plan_rel)],
+                timeout=600,
+            )
+            if r.rc != 0:
+                raise WeftError(
+                    "data.verify_failed", f"output ingest failed: {r.err[:300]}",
+                    stage="collecting",
+                )
+            for e in entries:
+                self.store.set_location(e["ref"], adapter.name, endpoint["cas_root"])
+        return entries, total
+
+    def _entry(
+        self, adapter: SiteAdapter, jobdir_rel: str, rel_path: str, ref: str, size: int
+    ) -> dict:
+        head = b""
+        try:
+            r = adapter.shim(
+                ["head", "--file", adapter.path(f"{jobdir_rel}/{rel_path}"),
+                 "--bytes", str(PREVIEW_HEAD_BYTES)], timeout=60,
+            )
+            head = r.out.encode("utf-8", "surrogateescape") if r.rc == 0 else b""
+        except Exception:
+            pass
+        return {
+            "path": rel_path, "ref": ref, "bytes": size,
+            "preview": preview_for(rel_path, head, size),
+        }
+
+    def fetch(self, ref: str, to_path: str | Path, adapters: dict, transfers: dict) -> dict:
+        """Bring a ref's content back to the workspace (doc 05 data.fetch)."""
+        dest = Path(to_path)
+        if not dest.is_absolute():
+            dest = self.workspace / dest
+        if self.cas.kind_of(ref) is None:
+            # find a site that has it and pull blobs back
+            locations = self.store.locations_of(ref)
+            remote = [l for l in locations if l["site"] in adapters]
+            if not remote:
+                raise WeftError(
+                    "data.missing", f"no known location holds {ref}", stage="staging",
+                )
+            loc = remote[0]
+            adapter = adapters[loc["site"]]
+            endpoint = adapter.transfer_endpoint()
+            method = transfers.get(endpoint["method"])
+            row = self.store.get_dataref(ref)
+            if row and row["kind"] == "tree":
+                raise WeftError(
+                    "data.missing",
+                    "tree refs can only be fetched from sites that still hold "
+                    "the originating job sandbox; fetch the file refs instead",
+                    stage="staging",
+                    hints={"suggestion": "fetch individual file refs from the manifest"},
+                )
+            method.fetch(
+                [(ref.split(":")[-1], row["bytes"] if row else 0)], self.cas, endpoint
+            )
+        # verify + materialize into workspace
+        if not self.cas.verify(ref):
+            raise WeftError("data.verify_failed", f"content of {ref} failed verification",
+                            stage="staging")
+        self.cas.materialize(ref, dest, mode="copy")
+        return {"ref": ref, "path": str(dest)}

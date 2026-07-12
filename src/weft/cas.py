@@ -139,6 +139,12 @@ class LocalCAS:
             raise WeftError("data.missing", f"blob not in local CAS: {ref}", stage="staging")
         return p
 
+    def put_tree_manifest(self, tree_hash: str, manifest: list[dict]) -> None:
+        """Adopt a tree manifest computed elsewhere (e.g. site-side hash-tree)."""
+        (self.root / "trees" / f"{tree_hash}.json").write_text(
+            json.dumps(manifest, indent=None, sort_keys=True)
+        )
+
     def tree_manifest(self, ref: str) -> list[dict]:
         p = self.root / "trees" / f"{self._hex(ref)}.json"
         if not p.exists():
@@ -162,7 +168,11 @@ class LocalCAS:
                     target.unlink()
                 os.symlink(entry["target"], target)
                 continue
-            self._place(self._blob_path(entry["sha256"]), target, mode)
+            # exec files are copied: chmod on a hardlink would mutate the CAS inode
+            self._place(
+                self._blob_path(entry["sha256"]), target,
+                "copy" if entry.get("exec") else mode,
+            )
             if entry.get("exec"):
                 os.chmod(target, os.stat(target).st_mode | 0o755)
 
