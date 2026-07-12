@@ -26,7 +26,8 @@ _BUILD_LOCKS_GUARD = threading.Lock()
 
 
 def env_dir_rel(env_id: str) -> str:
-    return f"envs/{env_id.removeprefix(ENVID_SCHEME)}"
+    # strip any scheme (env:v1:, env:v2:, ...) — colons don't belong in paths
+    return f"envs/{env_id.rsplit(':', 1)[-1]}"
 
 
 def _build_lock(env_id: str, site: str) -> threading.Lock:
@@ -232,7 +233,7 @@ def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
     hashed (it is, into the EnvID) but not content-pinned; specs using it
     are flagged weakly-reproducible."""
     for cmd in env_row["canonical"]["extras"].get("post_install") or []:
-        r = adapter.run_cmd(
+        r = adapter.run_activated(
             f"cd {shlex.quote(adapter.path(rel))} && . ./activate.sh && ( {cmd} )",
             timeout=3600,
         )
@@ -277,7 +278,7 @@ def _spot_check_and_mark(
     check = f". {shlex.quote(adapter.path(rel))}/activate.sh"
     if _has_package(env_row.get("canonical", {}), "python"):
         check += " && python -c 'import sys; sys.exit(0)'"
-    spot = adapter.run_cmd(f"sh -c {shlex.quote(check)}", timeout=120)
+    spot = adapter.run_activated(check, timeout=120)
     if spot.rc != 0:
         raise WeftError(
             "env.realize_failed",

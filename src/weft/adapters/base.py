@@ -118,6 +118,15 @@ class SiteAdapter(ABC):
         info["load_fraction"] = round(float(info.get("load5", 0)) / cpus, 3)
         return info
 
+    def run_activated(self, script: str, *, timeout: float = 120.0) -> ShimResult:
+        """Run a snippet that sources env activation: conda activate.d
+        hooks may contain bashisms, so prefer bash where it exists."""
+        import shlex as _sh
+        q = _sh.quote(script)
+        return self.run_cmd(
+            f"if command -v bash >/dev/null 2>&1; then bash -c {q}; "
+            f"else sh -c {q}; fi", timeout=timeout)
+
     def file_exists(self, rel: str) -> bool:
         r = self.run_cmd(f"test -e {self.path(rel)!r} && echo yes || echo no")
         return r.out.strip() == "yes"

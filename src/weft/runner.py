@@ -633,7 +633,7 @@ class JobRunner:
             full = shlex.quote(adapter.path(f"{jobdir_rel}/{path}"))
             try:
                 if path.endswith((".h5", ".hdf5")):
-                    r = adapter.run_cmd(
+                    r = adapter.run_activated(
                         activate + " && python - <<'EOF'\n"
                         "import h5py, sys\n"
                         f"f = h5py.File({adapter.path(f'{jobdir_rel}/{path}')!r}, 'r')\n"
@@ -647,7 +647,7 @@ class JobRunner:
                                         "detail": r.out[:1500]}
                         done += 1
                 elif path.endswith(".rds"):
-                    r = adapter.run_cmd(
+                    r = adapter.run_activated(
                         activate + " && Rscript - <<'EOF' 2>&1\n"
                         f'str(readRDS("{adapter.path(f"{jobdir_rel}/{path}")}"), '
                         "max.level=2)\nEOF", timeout=60)

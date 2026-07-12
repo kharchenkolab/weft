@@ -323,7 +323,7 @@ class CranSolver:
                  pkgs=", ".join(_json.dumps(x) for x in cran_names) or '""',
                  tarballs=", ".join(_json.dumps(x) for x in tarballs) or 'character(0)',
                  top=", ".join(_json.dumps(x) for x in top) or 'character(0)')
-        r = adapter.run_cmd(
+        r = adapter.run_activated(
             f". {shlex.quote(env_dir)}/activate.sh && "
             f"Rscript -e {shlex.quote(rcode)}",
             timeout=3600,
@@ -346,12 +346,141 @@ class CranSolver:
         return f"{package}: see the cran layer record (env_why returns it)"
 
 
+class JuliaSolver:
+    """Julia dependencies via Pkg — the easy ecosystem: Manifest.toml IS
+    a content-addressed lockfile (git-tree-sha1 per package). Solving runs
+    Pkg.add in a throwaway project on the controller (downloads go to a
+    weft-owned depot, like pixi's cache); realization ships
+    Project+Manifest and runs Pkg.instantiate against a shared per-site
+    depot. Refs: "DataFrames", "DataFrames ==1.6.1", "owner/Repo.jl@ref".
+    """
+
+    ecosystem = "julia"
+    conda_requirements = ("julia",)
+
+    def __init__(self, pixi_bin: str, home: Path | None = None):
+        import os
+        self.pixi_bin = pixi_bin
+        self.home = Path(home or os.environ.get(
+            "WEFT_SOLVER_HOME",
+            Path.home() / ".cache" / "weft" / "solverenvs")) / "julia"
+
+    def _ensure_solver_env(self) -> Path:
+        import subprocess
+        manifest = self.home / "pixi.toml"
+        if (self.home / ".ready").exists():
+            return manifest
+        self.home.mkdir(parents=True, exist_ok=True)
+        manifest.write_text(
+            '[workspace]\nname = "weft-julia-solver"\n'
+            'channels = ["conda-forge"]\nplatforms = ["linux-64"]\n\n'
+            '[dependencies]\njulia = "*"\n')
+        r = subprocess.run(
+            [self.pixi_bin, "install", "--manifest-path", str(manifest)],
+            capture_output=True, text=True, timeout=1800)
+        if r.returncode != 0:
+            raise WeftError(
+                "env.solve_failed",
+                "could not build the controller-side julia solver env",
+                stage="solve", retryable=True,
+                hints={"ecosystem": "julia",
+                       "solver_message": (r.stderr or r.stdout)[-1000:]})
+        (self.home / ".ready").write_text("ok\n")
+        return manifest
+
+    @staticmethod
+    def _add_expr(dep: str) -> str:
+        import json as _json
+        dep = dep.strip()
+        if "/" in dep:                     # owner/Repo.jl[@ref]
+            repo, _, ref = dep.partition("@")
+            url = _json.dumps(f"https://github.com/{repo}")
+            return (f"Pkg.add(url={url}, rev={_json.dumps(ref)})" if ref
+                    else f"Pkg.add(url={url})")
+        parts = dep.split()
+        if len(parts) == 1:
+            return f"Pkg.add({_json.dumps(parts[0])})"
+        name, constraint = parts[0], " ".join(parts[1:])
+        if constraint.startswith("=="):
+            return (f"Pkg.add(name={_json.dumps(name)}, "
+                    f"version={_json.dumps(constraint[2:].strip())})")
+        raise WeftError(
+            "task.invalid", f"julia constraint {dep!r} not supported",
+            stage="solve",
+            hints={"supported": ["Name", "Name ==X.Y.Z", "owner/Repo.jl@ref"]})
+
+    def solve(self, deps: list[str], spec, workdir: Path) -> dict:
+        import subprocess
+        workdir.mkdir(parents=True, exist_ok=True)
+        manifest = self._ensure_solver_env()
+        adds = "; ".join(self._add_expr(d) for d in deps)
+        depot = self.home / "depot"
+        r = subprocess.run(
+            [self.pixi_bin, "run", "--manifest-path", str(manifest),
+             "julia", "-e",
+             f'using Pkg; Pkg.activate("{workdir}"); {adds}'],
+            capture_output=True, text=True, timeout=1800,
+            env={**__import__("os").environ,
+                 "JULIA_DEPOT_PATH": str(depot)})
+        if r.returncode != 0 or not (workdir / "Manifest.toml").exists():
+            raise WeftError(
+                "env.solve_conflict",
+                "julia layer is unsatisfiable as pinned",
+                stage="solve",
+                hints={"ecosystem": "julia", "user_pins": deps,
+                       "solver_message": (r.stderr or r.stdout)[-1200:]})
+        import tomllib
+        man = tomllib.loads((workdir / "Manifest.toml").read_text())
+        records = []
+        for name, entries in (man.get("deps") or {}).items():
+            e = entries[0] if isinstance(entries, list) else entries
+            records.append({"name": name,
+                            "version": e.get("version", ""),
+                            "source": e.get("repo-url", "registry"),
+                            "sha256": "",
+                            "tree_sha1": e.get("git-tree-sha1", "")})
+        records.sort(key=lambda x: (x["name"], x["version"]))
+        return {"records": records,
+                "native": ((workdir / "Project.toml").read_text()
+                           + "\n###WEFT-MANIFEST###\n"
+                           + (workdir / "Manifest.toml").read_text()),
+                "from_source": [], "top_level": deps}
+
+    def realize_layer(self, layer: dict, adapter, env_rel: str) -> str:
+        import shlex
+        env_dir = adapter.path(env_rel)
+        proj, _, man = layer["native"].partition("\n###WEFT-MANIFEST###\n")
+        adapter.write_file(f"{env_rel}/julia/Project.toml", proj.encode())
+        adapter.write_file(f"{env_rel}/julia/Manifest.toml", man.encode())
+        depot = adapter.path("cache/julia-depot")
+        r = adapter.run_activated(
+            f". {shlex.quote(env_dir)}/activate.sh && "
+            f"JULIA_DEPOT_PATH={shlex.quote(depot)} "
+            f"julia --project={shlex.quote(env_dir + '/julia')} "
+            f"-e 'using Pkg; Pkg.instantiate()'",
+            timeout=3600)
+        if r.rc != 0:
+            raise WeftError(
+                "env.realize_failed", "julia layer instantiate failed on site",
+                stage="realize",
+                hints={"ecosystem": "julia",
+                       "log_tail": (r.err or r.out)[-1500:],
+                       "note": "julia realization needs network from the "
+                               "install point in v1"})
+        return (f'export JULIA_PROJECT="{env_dir}/julia"\n'
+                f'export JULIA_DEPOT_PATH="{depot}"')
+
+    def why(self, env_row: dict, package: str, workdir: Path) -> str:
+        return f"{package}: see the julia layer record (env_why returns it)"
+
+
 def default_solvers(pixi_bin: str) -> dict[str, object]:
     """The registry. Adding an ecosystem = one class + one entry here
     (or inject externally via Weft(solvers={...}))."""
     return {
         "conda": PixiSolver(pixi_bin),
         "cran": CranSolver(pixi_bin),
+        "julia": JuliaSolver(pixi_bin),
     }
 
 

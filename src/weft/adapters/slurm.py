@@ -204,6 +204,9 @@ class SlurmAdapter(SSHAdapter):
         # the source of truth, whatever the scheduler forgets
         lines += [
             "",
+            # conda activation hooks may contain bashisms
+            'if [ -z "$WEFT_BASH" ] && command -v bash >/dev/null 2>&1; then',
+            '    WEFT_BASH=1 exec bash "$0" "$@"; fi',
             f"cd {shlex.quote(jobdir)}",
             "echo $$ > pid.real",
             "[ -f activate.sh ] && . ./activate.sh",
@@ -261,6 +264,8 @@ class SlurmAdapter(SSHAdapter):
             lines.append(f"#SBATCH --account={self.account}")
         lines += [
             "",
+            'if [ -z "$WEFT_BASH" ] && command -v bash >/dev/null 2>&1; then',
+            '    WEFT_BASH=1 exec bash "$0" "$@"; fi',
             'E="el$SLURM_ARRAY_TASK_ID"',
             f'mkdir -p "$E" && cd "$E"',
             "echo $$ > pid.real",

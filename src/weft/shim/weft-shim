@@ -79,6 +79,10 @@ cmd_run() {
     env --default-signal=INT true 2>/dev/null && sigreset="env --default-signal=INT,HUP"
     cat > "$jobdir/runner.sh" <<EOF
 #!/bin/sh
+# conda activation hooks may contain bashisms — prefer bash when present
+if [ -z "\$WEFT_BASH" ] && command -v bash >/dev/null 2>&1; then
+    WEFT_BASH=1 exec bash "\$0" "\$@"
+fi
 cd "$jobdir"
 echo \$\$ > pid.real
 [ -f activate.sh ] && . ./activate.sh
