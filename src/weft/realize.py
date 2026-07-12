@@ -130,10 +130,25 @@ def ensure_realization(
             # site-side deletion (e.g. scratch purge): demote and rebuild
             store.set_realization(env_id, adapter.name, strategy, rel, "missing")
         elif adapter.file_exists(f"{rel}/.weft-ready"):
-            # site has it but store forgot (crash recovery): re-adopt
+            # site has it but store forgot (crash recovery, or another
+            # workspace/user built it): re-adopt
             store.set_realization(env_id, adapter.name, strategy, rel, "ready")
+            store.emit("realize.adopted", env_id=env_id, site=adapter.name,
+                       via="marker")
             return store.get_realization(env_id, adapter.name)
 
+        # shared roots (multiple users, one filesystem): in-process locks
+        # don't reach across users — take a site-side lease around the build
+        lease = _SiteLease(adapter, rel) \
+            if (site_config or {}).get("shared") else None
+        if lease is not None:
+            if lease.acquire_or_adopt():
+                # another user finished the build while we waited: adopt
+                store.set_realization(env_id, adapter.name, strategy, rel,
+                                      "ready")
+                store.emit("realize.adopted", env_id=env_id,
+                           site=adapter.name, via="shared-lease")
+                return store.get_realization(env_id, adapter.name)
         store.set_realization(env_id, adapter.name, strategy, rel, "building")
         modules_init = (site_config or {}).get("modules_init", "")
         try:
@@ -153,6 +168,9 @@ def ensure_realization(
                 env_id, adapter.name, strategy, rel, "failed", log=e.detail
             )
             raise
+        finally:
+            if lease is not None:
+                lease.release()
         store.set_realization(env_id, adapter.name, strategy, rel, "ready")
         return store.get_realization(env_id, adapter.name)
 
@@ -248,6 +266,55 @@ def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
                                "fetch; pin sources (e.g. dated CRAN snapshot "
                                "repos, git commit hashes) for reproducibility"},
             )
+
+
+class _SiteLease:
+    """Atomic-mkdir lease on the site filesystem — the cross-USER build
+    lock shared roots need (in-process locks only cover one controller).
+    Stale leases (holder crashed) are taken over after STALE_MIN."""
+
+    STALE_MIN = 30
+    WAIT_S = 2.0
+    MAX_WAIT_S = 3600.0
+
+    def __init__(self, adapter: SiteAdapter, rel: str):
+        self.adapter = adapter
+        self.rel = rel
+        self.lease = adapter.path(f"{rel}.lease")
+
+    def acquire_or_adopt(self) -> bool:
+        """Returns True if the env became ready while we waited (adopt it
+        instead of building); False once we hold the lease and must build."""
+        import time as _t
+        deadline = _t.time() + self.MAX_WAIT_S
+        while True:
+            r = self.adapter.run_cmd(
+                f"mkdir {shlex.quote(self.lease)} 2>/dev/null && echo got "
+                f"|| echo busy", timeout=30)
+            if "got" in r.out:
+                return False
+            # another user is building: did they finish?
+            if self.adapter.file_exists(f"{self.rel}/.weft-ready"):
+                return True
+            stale = self.adapter.run_cmd(
+                f"find {shlex.quote(self.lease)} -maxdepth 0 "
+                f"-mmin +{self.STALE_MIN} 2>/dev/null | grep -q . && "
+                f"echo stale || true", timeout=30)
+            if "stale" in stale.out:
+                self.adapter.run_cmd(f"rm -rf {shlex.quote(self.lease)}")
+                continue
+            if _t.time() > deadline:
+                raise WeftError(
+                    "state.conflict",
+                    "another user's env build held the lease too long",
+                    stage="realize",
+                    hints={"lease": self.lease,
+                           "suggestion": "inspect the shared root; remove "
+                                         "the lease dir if the builder died"})
+            _t.sleep(self.WAIT_S)
+
+    def release(self) -> None:
+        self.adapter.run_cmd(f"rm -rf {shlex.quote(self.lease)} 2>/dev/null; true")
 
 
 def _bin_dir_rel(rel: str, strategy: str) -> str:

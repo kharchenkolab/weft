@@ -20,10 +20,14 @@ SHIM_SRC = Path(__file__).resolve().parent.parent / "shim" / "weft-shim"
 class LocalAdapter(SiteAdapter):
     kind = "local"
 
-    def __init__(self, name: str, root: Path, pixi_source: str | None = None):
+    def __init__(self, name: str, root: Path, pixi_source: str | None = None,
+                 shared: bool = False):
         self.name = name
         self._root = Path(root)
         self._pixi_source = pixi_source  # local pixi binary to link into root/bin
+        self.shared = shared
+        # shared roots: subprocesses create group-usable files
+        self._preexec = (lambda: os.umask(0o002)) if shared else None
 
     @property
     def root(self) -> str:
@@ -58,6 +62,7 @@ class LocalAdapter(SiteAdapter):
         proc = subprocess.run(
             [str(self._root / "bin" / "weft-shim"), *argv],
             capture_output=True, text=True, timeout=timeout, env=self._env(),
+            preexec_fn=self._preexec,
         )
         return ShimResult(proc.returncode, proc.stdout, proc.stderr)
 
@@ -65,6 +70,7 @@ class LocalAdapter(SiteAdapter):
         proc = subprocess.run(
             ["sh", "-c", script],
             capture_output=True, text=True, timeout=timeout, env=self._env(),
+            preexec_fn=self._preexec,
         )
         return ShimResult(proc.returncode, proc.stdout, proc.stderr)
 
@@ -72,6 +78,8 @@ class LocalAdapter(SiteAdapter):
         p = self._root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
+        if self.shared:
+            mode |= 0o020  # group-writable on shared roots
         p.chmod(mode)
 
     def read_file(self, rel: str, max_bytes: int | None = None) -> bytes:

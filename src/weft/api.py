@@ -103,6 +103,7 @@ class Weft:
         if kind == "local":
             adapter = LocalAdapter(
                 name, Path(config["root"]), pixi_source=config.get("pixi_source"),
+                shared=bool(config.get("shared")),
             )
         elif kind == "ssh":
             from .adapters.ssh import SSHAdapter
@@ -112,6 +113,7 @@ class Weft:
                 ssh_opts=config.get("ssh_opts"),
                 pixi_source=config.get("pixi_source"),
                 pixi_unpack_source=config.get("pixi_unpack_source", self.pixi_unpack),
+                shared=bool(config.get("shared")),
             )
         elif kind == "slurm":
             from .adapters.slurm import SlurmAdapter
@@ -127,6 +129,7 @@ class Weft:
                 partition=sched.get("partition"),
                 partitions_allowed=policy.get("partitions_allowed"),
                 modules_init=config.get("modules_init", ""),
+                shared=bool(config.get("shared")),
             )
         elif kind == "cloud":
             from .adapters.cloud import CloudAdapter

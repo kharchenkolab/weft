@@ -57,7 +57,9 @@ class SSHAdapter(SiteAdapter):
         pixi_source: str | None = None,
         pixi_unpack_source: str | None = None,
         connect_timeout: int = 10,
+        shared: bool = False,
     ):
+        self.shared = shared
         self.name = name
         self.host = host
         self.user = user
@@ -132,7 +134,8 @@ class SSHAdapter(SiteAdapter):
         return ShimResult(proc.returncode, out, err)
 
     def _env_prefix(self) -> str:
-        return (
+        # shared roots: everything created must be group-usable
+        return (("umask 002; " if self.shared else "") +
             f"WEFT_ROOT={shlex.quote(self.root)} "
             f"PIXI_CACHE_DIR={shlex.quote(self.path('cache/pixi'))} "
             f"PIXI_HOME={shlex.quote(self.path('pixi-home'))} "
@@ -210,6 +213,8 @@ class SSHAdapter(SiteAdapter):
                          timeout=timeout)
 
     def write_file(self, rel: str, data: bytes, mode: int = 0o644) -> None:
+        if self.shared:
+            mode |= 0o020  # group-writable on shared roots
         dest = self.path(rel)
         r = self._run(
             f"mkdir -p {shlex.quote(os.path.dirname(dest))} && "
