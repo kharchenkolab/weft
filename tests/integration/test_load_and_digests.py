@@ -43,16 +43,22 @@ def test_slurm_load_view_reflects_queue_pressure(w):
     assert "load_fraction" in quiet
     assert quiet["qos"] is None  # no accounting DB on the fixture — honest
 
-    # hog the node, then queue one more: pressure must become visible
+    # hog the node, then queue one more: pressure must become visible.
+    # Submission is async and unordered — wait for the hog to actually RUN
+    # before queueing the victim, or slurm may start the small job first
+    # (this test's historical flake, finally caught in the act)
     r1 = w.task_submit({"command": "sleep 30", "resources": {"cpus": 8},
                         "site": "hpc"})
+    assert "job_id" in r1
+    for _ in range(240):
+        if w.task_status(r1["job_id"])[0]["state"] == "RUNNING":
+            break
+        time.sleep(0.25)
     r2 = w.task_submit({"command": "sleep 5", "resources": {"cpus": 4},
                         "site": "hpc"})
-    assert "job_id" in r1 and "job_id" in r2
+    assert "job_id" in r2
     for _ in range(120):
-        st = {s["state"] for s in (w.task_status(r1["job_id"])
-                                   + w.task_status(r2["job_id"]))}
-        if "RUNNING" in st and "QUEUED" in st:
+        if w.task_status(r2["job_id"])[0]["state"] == "QUEUED":
             break
         time.sleep(0.25)
     busy = w.site_load("hpc", fresh=True)
