@@ -187,8 +187,15 @@ class EnvManager:
         if not row:
             raise WeftError("task.invalid", f"unknown EnvID: {env_id}", stage="solve")
         realizations = []
+        import time as _t
         for r in self.store.realizations_for(env_id):
             entry = {k: r[k] for k in ("site", "strategy", "state", "location")}
+            # footprint + recency: the LRU/quota metadata a host policy needs
+            entry["bytes"] = r["bytes"]
+            entry["last_used"] = r["last_used"]
+            if r["last_used"]:
+                entry["idle_days"] = round(
+                    (_t.time() - r["last_used"]) / 86400, 1)
             if r["state"] == "failed" and r.get("log"):
                 entry["log_tail"] = r["log"][-800:]  # the probe, right here
             realizations.append(entry)

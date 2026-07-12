@@ -246,7 +246,8 @@ class JobRunner:
             site_config=site_row.get("config"),
             pack_tools={"pixi_pack": self.pixi_pack, "cas": self.cas,
                         "transfers": self.transfers,
-                        "solvers": self.envman.solvers},
+                        "solvers": self.envman.solvers,
+                        "store": self.store},
         )
         return (f". {shlex.quote(adapter.path(real['location']))}/activate.sh",
                 extras.get("env_vars") or {})

@@ -111,6 +111,7 @@ def ensure_realization(
         existing = store.get_realization(env_id, adapter.name)
         if existing and existing["state"] == "ready":
             if adapter.file_exists(f"{rel}/.weft-ready"):
+                store.touch_realization(env_id, adapter.name)  # LRU recency
                 # integrity fence: a tampered env (deleted tool, partial
                 # purge) must rebuild, not silently fall through to host
                 # binaries with the locked env's name on the manifest
@@ -151,6 +152,14 @@ def ensure_realization(
                 return store.get_realization(env_id, adapter.name)
         store.set_realization(env_id, adapter.name, strategy, rel, "building")
         modules_init = (site_config or {}).get("modules_init", "")
+        # an archived env rebuilds from the controller's blob — no site
+        # network, even for a `prefix`-strategy site (eviction with
+        # archive=True is the air-gapped reclamation path)
+        archive_ref = _archived_ref(store, env_id)
+        if archive_ref and not strategy.endswith("packed"):
+            strategy = ("modules+packed" if modules else "packed")
+            store.set_realization(env_id, adapter.name, strategy, rel,
+                                  "building")
         try:
             if strategy.endswith("packed"):
                 _build_packed(env_id, env_row, adapter, rel, modules,
@@ -174,7 +183,21 @@ def ensure_realization(
             if lease is not None:
                 lease.release()
         store.set_realization(env_id, adapter.name, strategy, rel, "ready")
+        store.touch_realization(env_id, adapter.name,
+                                nbytes=_prefix_bytes(adapter, rel))
         return store.get_realization(env_id, adapter.name)
+
+
+def _prefix_bytes(adapter: SiteAdapter, rel: str) -> int | None:
+    """Footprint of a realized prefix — the LRU/quota number a host policy
+    needs. Best-effort: an unreadable du must never fail a build."""
+    try:
+        r = adapter.run_cmd(
+            f"du -sb {shlex.quote(adapter.path(rel))} 2>/dev/null | cut -f1",
+            timeout=120)
+        return int(r.out.strip().split()[0]) if r.out.strip() else None
+    except (WeftError, ValueError, IndexError):
+        return None
 
 
 def _build_prefix(
@@ -292,6 +315,15 @@ def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
             )
 
 
+def _archived_ref(store: Store, env_id: str) -> str | None:
+    """Did someone evict this env with archive=True? Then the blob is the
+    fastest (and, on air-gapped sites, the only) way back."""
+    from .evict import ARCHIVE_META
+    for row in store.datarefs_with_meta(ARCHIVE_META, env_id):
+        return row["ref"]
+    return None
+
+
 class _SiteLease:
     """Atomic-mkdir lease on the site filesystem — the cross-USER build
     lock shared roots need (in-process locks only cover one controller).
@@ -405,26 +437,37 @@ def _build_packed(
             stage="realize",
             hints={"suggestion": "install pixi-pack next to pixi and pass its path"},
         )
-    plat = _site_platform(caps)
-    with tempfile.TemporaryDirectory(prefix="weft-pack-") as td:
-        tdp = Path(td)
-        (tdp / "pixi.toml").write_text(env_row["manifest"])
-        (tdp / "pixi.lock").write_text(env_row["native_lock"])
-        out_tar = tdp / "environment.tar"
-        proc = subprocess.run(
-            [pixi_pack, "--environment", "default", "--platform", plat,
-             "--output-file", str(out_tar), str(tdp)],
-            capture_output=True, text=True, timeout=1800,
-        )
-        if proc.returncode != 0 or not out_tar.exists():
-            raise WeftError(
-                "env.realize_failed",
-                "pixi-pack failed on the controller",
-                stage="realize",
-                hints={"log_tail": (proc.stderr or proc.stdout)[-1500:]},
+    # an archive from a previous eviction is already exactly this blob
+    store = pack_tools.get("store")
+    existing = _archived_ref(store, env_id) if store is not None else None
+    if existing and cas.kind_of(existing) is not None:
+        digest = existing.split(":")[-1]
+        row = store.get_dataref(existing)
+        info = type("Info", (), {"ref": existing,
+                                 "bytes": (row or {}).get("bytes", 0),
+                                 "plain_sha256": (row or {}).get("meta", {})
+                                 .get("sha256_plain")})()
+    else:
+        plat = _site_platform(caps)
+        with tempfile.TemporaryDirectory(prefix="weft-pack-") as td:
+            tdp = Path(td)
+            (tdp / "pixi.toml").write_text(env_row["manifest"])
+            (tdp / "pixi.lock").write_text(env_row["native_lock"])
+            out_tar = tdp / "environment.tar"
+            proc = subprocess.run(
+                [pixi_pack, "--environment", "default", "--platform", plat,
+                 "--output-file", str(out_tar), str(tdp)],
+                capture_output=True, text=True, timeout=1800,
             )
-        info = cas.register_file(out_tar)
-    digest = info.ref.split(":")[-1]
+            if proc.returncode != 0 or not out_tar.exists():
+                raise WeftError(
+                    "env.realize_failed",
+                    "pixi-pack failed on the controller",
+                    stage="realize",
+                    hints={"log_tail": (proc.stderr or proc.stdout)[-1500:]},
+                )
+            info = cas.register_file(out_tar)
+        digest = info.ref.split(":")[-1]
 
     # ship the archive through the ordinary data plane (dedup for free)
     endpoint = adapter.transfer_endpoint()

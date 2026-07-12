@@ -716,6 +716,31 @@ class Weft:
         from . import gc as _gc
         return _gc.sweep(self, site, confirm=confirm)
 
+    def env_evict(self, env_id: str, site: str, archive: bool = False) -> dict:
+        """Reclaim a realized environment's disk (GBs) while keeping the
+        ability to come back. Default: drop the prefix — the site's shared
+        package cache stays warm, so re-materialization is seconds and needs
+        no network. archive=True additionally packs the env and keeps the
+        blob on the CONTROLLER (reclaims ~100% of site space and rebuilds
+        with no site network — the air-gapped path). Distinct from
+        env_repair: this is reclaiming, not fixing."""
+        from . import evict as _evict
+        return _evict.evict(self, env_id, site, archive=archive)
+
+    def gc_packages(self, site: str, confirm: bool = False) -> dict:
+        """Clear the site's SHARED package cache. Consequential: after this,
+        rebuilding an evicted env needs the index (or an archive). With the
+        cache warm, rebuilds are seconds and offline."""
+        from . import evict as _evict
+        return _evict.gc_packages(self, site, confirm=confirm)
+
+    def site_footprint(self, site: str) -> dict:
+        """What occupies the site: prefixes vs shared package cache vs data
+        cache, plus per-realization bytes and idle days — the numbers a host
+        GC policy needs."""
+        from . import evict as _evict
+        return _evict.footprint(self, site)
+
     def gc_events(self, older_than_days: float = 30) -> dict:
         """Prune old events (terminal digests and failures are kept)."""
         pruned = self.store.prune_events(older_than_days)
@@ -817,7 +842,8 @@ PUBLIC_TOOLS = [
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_result", "array_retry",
     "events_poll", "doctor", "reconcile", "provenance",
-    "gc_plan", "gc_sweep", "gc_events",
+    "gc_plan", "gc_sweep", "gc_events", "gc_packages",
+    "env_evict", "site_footprint",
     "session_start", "session_exec", "session_install", "session_snapshot",
     "session_run_installer", "session_stop",
     "kernel_start", "kernel_exec", "kernel_poll", "kernel_status",

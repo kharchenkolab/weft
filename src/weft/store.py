@@ -279,6 +279,15 @@ class Store:
             "meta": json.loads(r["meta"]),
         }
 
+    def datarefs_with_meta(self, key: str, value: str) -> list[dict]:
+        rows = self._rows("SELECT ref, meta FROM datarefs")
+        out = []
+        for r in rows:
+            meta = json.loads(r["meta"] or "{}")
+            if meta.get(key) == value:
+                out.append({"ref": r["ref"], "meta": meta})
+        return out
+
     def set_location(self, ref: str, site: str, path: str, present: bool = True) -> None:
         self._write(
             "INSERT INTO locations(ref, site, path, present, verified_at)"
