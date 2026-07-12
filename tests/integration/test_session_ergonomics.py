@@ -26,7 +26,7 @@ def test_session_from_spec_in_one_call(w):
     w.session_stop(sid)
 
 
-def test_bespoke_installer_is_captured_and_carried(w):
+def test_bespoke_installer_is_captured_and_carried(w, tmp_path):
     s = w.session_start({"name": "hatch", "deps": {"conda": ["python =3.12",
                                                              "pip"]}},
                         "local")
