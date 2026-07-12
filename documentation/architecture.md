@@ -219,6 +219,52 @@ every sandbox as `WEFT_STORAGE_LARGE` / `WEFT_STORAGE_SCRATCH` /
 `WEFT_STORAGE_NODE_TMP` so agent-written commands can target the right
 filesystem tier.
 
+## Phase 3: Cloud sites
+
+`CloudAdapter` owns an ephemeral SSH site behind a `CloudProvisioner` seam
+(`launch/describe/teardown/rate_usd_per_hour`) — the SkyPilot-shaped
+boundary. Registration is free: capabilities are synthesized from the
+resource ask; nothing is provisioned until the first control-plane touch.
+Money is a hard constraint (doc 05 §6): pre-launch, rate × `max_hours`
+must fit `budget.max_usd` or the launch is refused with `budget.exceeded`
+and *nothing exists to pay for*; while running, every poll re-checks
+accrued spend and the runaway watchdog cancels, tears down, then raises —
+overrun is bounded by one poll interval. `site_teardown(name)` is the
+explicit user-level off switch; `cloud.launched`/`cloud.teardown`/
+`budget.watchdog` events carry the money numbers. Tests drive the whole
+loop against a Docker-backed mock provisioner; the real SkyPilot factory
+plugs into `Weft.provisioners["skypilot"]` (untested here — needs cloud
+credentials). Object-store cache backing (MinIO/rclone) is deferred to
+Phase 4 with Globus.
+
+## Hostile starts (userspace-only reality)
+
+Everything weft places on a site is userspace under one root; the
+bootstrap matrix tests enforce it on machines like the ones users actually
+get: RHEL8-era glibc 2.28 (works end to end), minimal Debian with no
+python/curl/wget/rsync (probe degrades honestly to `internet: false`,
+transfers fall back to `ssh-pipe` — tar over the control channel — and
+envs arrive packed), and musl/Alpine (bare tasks run; realized envs are
+refused as `env.unsatisfiable_on_site` naming musl, never a cryptic loader
+error). Sites without CA stores get the controller's bundle pushed at
+bootstrap (`etc/cacert.pem` + `SSL_CERT_FILE`), which unbreaks every
+TLS-using tool including `pixi-unpack`. Compilers are userspace too:
+conda-forge `cxx-compiler` toolchains realize on compiler-less sites,
+build artifacts chain site-side, and the realizations table is the durable
+memory of what is installed where.
+
+## Agent-in-the-loop evaluation
+
+`tests/eval/` runs a deterministic doctrine-following agent that reads
+only structured errors and applies the advertised remediation: OOM →
+right-size from `observed_peak_gb`; walltime → extend; capability
+violation → clamp to the reported max; solve conflict → relax the named
+pin; retryable staging failures → resubmit. It scores recovery rate and
+unchanged-resubmission count (must be zero). This layer tests the
+*interface*: if the 80-line policy table can't navigate a hint, a language
+model can't either — a regression here is an agent-experience bug even
+when every unit test passes.
+
 ## Deviations & decisions log
 
 | decision | rationale |

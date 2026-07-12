@@ -108,6 +108,54 @@ Read the code, use the hints:
 
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 
+### Remote sites
+
+```python
+# SSH workstation (uses your ~/.ssh config; nothing stored by weft)
+w.register_site("beamlab", "ssh", {
+    "host": "beamlab", "root": "/data/$USER/.weft",
+    "pixi_source": ".env/bin/pixi",     # pushed once, hash-verified
+})
+
+# Slurm cluster through its login node
+w.register_site("hpc", "slurm", {
+    "host": "login.hpc.example.edu", "root": "/scratch/me/.weft",
+    "pixi_source": ".env/bin/pixi",
+    "scheduler": {"account": "phys-lab", "partition": None},
+    "modules_init": "export MODULEPATH=/opt/site-modules",  # site quirk knob
+    "policy": {                                # user rules, enforced+surfaced
+        "partitions_allowed": ["standard", "short"],
+        "max_gpus": 4,
+        "max_concurrent_jobs": 50,
+        "storage": {"large": "/groups/phys/me", "scratch": "/scratch/me",
+                    "node_tmp": "/tmp"},
+        "notes": ["prefer nights/weekends for >1h jobs"],
+    },
+})
+w.module_check("hpc", ["espresso/7.2"])   # lazy module inventory
+
+# Cloud (provisioner-backed, hard budget caps)
+w.register_site("cloud-gpu", "cloud", {
+    "provisioner": "skypilot",
+    "budget": {"max_usd": 20, "max_hours": 2},   # refused if estimate exceeds
+    "resources": {"cpus": 8, "mem_gb": 32,
+                  "gpus": [{"model": "A100-40GB", "count": 1}],
+                  "cuda_driver": "12.4"},
+})
+w.env_gpu_hint("cloud-gpu")   # what cuda-version to pin for this site
+w.site_teardown("cloud-gpu")  # explicit; watchdog also tears down on overrun
+```
+
+Session environments (interactive exploration, doc 03 §7):
+
+```python
+s = w.session_start(env_id, "beamlab")           # scratch clone, unhashed
+w.session_exec(s["session_id"], "python -c 'import emcee'")   # probe
+w.session_install(s["session_id"], conda=["emcee"])           # seconds (cache)
+snap = w.session_snapshot(s["session_id"])       # minimal delta → real EnvID
+# re-run the final computation under snap["env_id"] → enters provenance
+```
+
 ### Diagnostics
 
 ```python
