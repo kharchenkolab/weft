@@ -42,6 +42,84 @@ class DataManager:
         self.store.set_location(info.ref, "@workspace", str(self.cas.root))
         return {"ref": info.ref, "kind": info.kind, "bytes": info.bytes}
 
+    def register_url(self, url: str, fetchers: dict, adapters: dict,
+                     site: str | None = None,
+                     expected_sha256: str | None = None) -> dict:
+        """Ingest a remote artifact into the data plane (design A2)."""
+        scheme = url.split("://", 1)[0].lower()
+        fetcher = fetchers.get(scheme)
+        if fetcher is None:
+            raise WeftError(
+                "task.invalid", f"no fetcher for scheme {scheme!r}",
+                stage="staging",
+                hints={"registered": sorted(set(fetchers)),
+                       "suggestion": "https URLs work everywhere"},
+            )
+        trust = "verified" if expected_sha256 else "first-fetch"
+
+        if site is None:
+            tmp = self.cas.root / "tmp-ingest"
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            digest = fetcher.fetch_to_file(url, tmp)
+            self._check_expected(url, digest, expected_sha256)
+            info = self.cas.register_file(tmp)
+            tmp.unlink(missing_ok=True)
+            self.store.put_dataref(info.ref, "file", info.bytes, info.chunks,
+                                   meta={"origin": url, "trust": trust,
+                                         **({"sha256_plain": info.plain_sha256}
+                                            if info.plain_sha256 else {})})
+            self.store.set_location(info.ref, "@workspace", str(self.cas.root))
+            return {"ref": info.ref, "kind": "file", "bytes": info.bytes,
+                    "fetched_to": "@workspace", "trust": trust}
+
+        adapter = adapters.get(site)
+        if adapter is None:
+            raise WeftError("task.invalid", f"unknown site: {site}",
+                            stage="staging",
+                            hints={"registered": sorted(adapters)})
+        import uuid as _uuid
+        tmp_rel = f"tmp/ingest-{_uuid.uuid4().hex[:10]}"
+        fetcher.fetch_on_site(adapter, url, adapter.path(tmp_rel))
+        out = adapter.run_cmd(
+            f"sha256sum {adapter.path(tmp_rel)} | cut -d' ' -f1 && "
+            f"wc -c < {adapter.path(tmp_rel)}", timeout=600)
+        parts = out.out.split()
+        if out.rc != 0 or len(parts) < 2:
+            raise WeftError("data.transfer_failed",
+                            "site-side hash of fetched artifact failed",
+                            stage="staging", retryable=True,
+                            hints={"detail": (out.err or out.out)[-300:]})
+        digest, size = parts[0], int(parts[1])
+        self._check_expected(url, digest, expected_sha256, adapter, tmp_rel)
+        endpoint = adapter.transfer_endpoint()
+        blob_dir = f"{endpoint['cas_root']}/{digest[:2]}"
+        adapter.run_cmd(
+            f"mkdir -p {blob_dir} && mv {adapter.path(tmp_rel)} "
+            f"{blob_dir}/{digest}")
+        ref = f"dref:{digest}"
+        self.store.put_dataref(ref, "file", size,
+                               meta={"origin": url, "trust": trust,
+                                     "site_direct": site})
+        self.store.set_location(ref, site, endpoint["cas_root"])
+        return {"ref": ref, "kind": "file", "bytes": size,
+                "fetched_to": site, "trust": trust,
+                "note": "bytes live in the site CAS; data_fetch brings "
+                        "them to the workspace if ever needed"}
+
+    def _check_expected(self, url, digest, expected, adapter=None,
+                        tmp_rel=None) -> None:
+        if expected and digest != expected:
+            if adapter is not None and tmp_rel:
+                adapter.run_cmd(f"rm -f {adapter.path(tmp_rel)}")
+            raise WeftError(
+                "data.verify_failed",
+                "fetched content does not match expected_sha256",
+                stage="staging",
+                hints={"source": url, "expected": expected, "got": digest,
+                       "suggestion": "wrong URL/version, or the publisher's "
+                                     "checksum is for a different encoding"},
+            )
+
     def describe(self, ref: str) -> dict:
         row = self.store.get_dataref(ref)
         if not row:

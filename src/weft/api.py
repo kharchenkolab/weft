@@ -324,7 +324,22 @@ class Weft:
 
     # -- data -----------------------------------------------------------------
 
-    def data_register(self, path: str) -> dict:
+    def data_register(self, path: str, site: str | None = None,
+                      expected_sha256: str | None = None) -> dict:
+        """Hash a workspace path — or ingest a URL (http/s/s3/gs/azure) —
+        into a DataRef. With site=, a URL is fetched straight into that
+        site's CAS (hashed site-side; no controller detour). Pass
+        expected_sha256 to verify against a published checksum; otherwise
+        hash-on-arrival is the identity (meta.trust = "first-fetch")."""
+        if "://" in path:
+            if not hasattr(self, "_fetchers"):
+                from .sources import default_fetchers
+                rclone = Path(self.pixi_bin).parent / "rclone"
+                self._fetchers = default_fetchers(
+                    str(rclone) if rclone.exists() else None)
+            return self.dataman.register_url(
+                path, self._fetchers, self.adapters, site=site,
+                expected_sha256=expected_sha256)
         p = Path(path)
         if not p.is_absolute():
             p = self.workspace / p
