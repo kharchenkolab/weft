@@ -112,6 +112,7 @@ class Weft:
                 name, config["host"], config["root"],
                 user=config.get("user"), port=config.get("port"),
                 ssh_opts=config.get("ssh_opts"),
+                jump=config.get("jump"),
                 pixi_source=config.get("pixi_source"),
                 pixi_unpack_source=config.get("pixi_unpack_source", self.pixi_unpack),
                 shared=bool(config.get("shared")),
@@ -124,6 +125,7 @@ class Weft:
                 name, config["host"], config["root"],
                 user=config.get("user"), port=config.get("port"),
                 ssh_opts=config.get("ssh_opts"),
+                jump=config.get("jump"),
                 pixi_source=config.get("pixi_source"),
                 pixi_unpack_source=config.get("pixi_unpack_source", self.pixi_unpack),
                 account=sched.get("account"),
@@ -207,6 +209,87 @@ class Weft:
             return {"site": name,
                     "note": "not a scheduler site — no association model"}
         return {"site": name, **adapter.associations()}
+
+    def site_probe_deep(self, name: str, partitions: list[str] | None = None,
+                        wait_s: int = 180) -> dict:
+        """COMPUTE-NODE truth: submit the shim's own probe as a minimal
+        job per partition and record what the nodes actually are (GPUs,
+        glibc, arch — and MEASURED egress: 'login has internet' says
+        nothing about the nodes). Fills per-partition `compute` records in
+        capabilities:v2; the default partition's record becomes the site's
+        `compute` view, which realization strategy keys on."""
+        import uuid as _uuid
+        adapter = self._adapter(name)
+        if not hasattr(adapter, "submit") or \
+                not hasattr(adapter, "_probe_partitions"):
+            return {"site": name,
+                    "note": "not a scheduler site — the direct probe "
+                            "already describes where jobs run"}
+        row = self.store.get_site(name) or {}
+        caps = row.get("capabilities") or {}
+        known = {p["name"]: p
+                 for p in (caps.get("scheduler") or {}).get("partitions", [])}
+        targets = partitions or [n for n, p in known.items()
+                                 if p.get("available", True)]
+        results, submitted = {}, []
+        for part in targets:
+            jd = f"jobs/probe-{part}-{_uuid.uuid4().hex[:8]}"
+            adapter.run_cmd(f"mkdir -p {shlex.quote(adapter.path(jd))}")
+            adapter.write_file(
+                f"{jd}/cmd.sh",
+                b'"$WEFT_ROOT/bin/weft-shim" probe > probe.json\n')
+            try:
+                handle = adapter.submit(jd, {
+                    "command": "probe", "resources": {
+                        "cpus": 1, "walltime": "00:05:00",
+                        "partition": part}})
+                submitted.append((part, jd, handle))
+            except WeftError as e:
+                results[part] = {"ok": False, "error": e.detail[:200]}
+        deadline = time.time() + wait_s
+        for part, jd, handle in submitted:
+            jid = handle.split(":", 1)[-1]
+            probe = None
+            while time.time() < deadline:
+                if adapter.file_exists(f"{jd}/exit_code"):
+                    try:
+                        import json as _json
+                        probe = _json.loads(
+                            adapter.read_file(f"{jd}/probe.json").decode())
+                    except (ValueError, WeftError):
+                        probe = None
+                    break
+                time.sleep(2)
+            if probe is None:
+                adapter.run_cmd(f"scancel {shlex.quote(jid)} 2>/dev/null; true")
+                results[part] = {
+                    "ok": False,
+                    "note": f"no result within {wait_s}s (queue busy?) — "
+                            "re-run when the partition drains"}
+                continue
+            from .capability import normalize_probe
+            rec = normalize_probe(probe)
+            if part in known:
+                known[part]["compute"] = rec
+            results[part] = {
+                "ok": True, "node": rec["hostname"],
+                "internet": rec["internet"], "glibc": rec["glibc"],
+                "gpus": rec["gpus"], "cuda_driver": rec["cuda_driver"],
+            }
+            adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(jd))}")
+        # the default (or first probed) partition's node record becomes
+        # the site's compute view — what strategy selection reasons over
+        for part in targets:
+            rec = known.get(part, {}).get("compute")
+            if rec:
+                caps["compute"] = rec
+                break
+        self.store.set_capabilities(name, caps)
+        self.store.emit("site.probed_deep", site=name,
+                        partitions=list(results))
+        return {"site": name, "partitions": results,
+                "note": "per-partition compute records saved; realization "
+                        "strategy now keys on MEASURED node egress"}
 
     def site_probe(self, name: str) -> dict:
         """Re-probe on demand (capability drift, doc 02 §7)."""
@@ -718,22 +801,64 @@ class Weft:
                             stage="infra")
         return {"group": group, **self.runner.group_rollup(group)}
 
-    def site_exec(self, name: str, cmd: str, why: str) -> dict:
-        """Guarded diagnostic shell (doc 05 §5): audited, deny-listed, scoped."""
+    def _check_denied(self, actor_action: str, site: str, cmd: str,
+                      why: str) -> None:
         if not why or not why.strip():
             raise WeftError(
-                "task.invalid", "site_exec requires a non-empty why", stage="infra",
-                hints={"reason": "every diagnostic command is audited with its rationale"},
+                "task.invalid", f"{actor_action} requires a non-empty why",
+                stage="infra",
+                hints={"reason": "every diagnostic command is audited with "
+                                 "its rationale"},
             )
         for pat in DENY_PATTERNS:
             if pat.search(cmd):
-                self.store.audit_log("agent", "site.exec.DENIED", site=name,
-                                     command=cmd, why=why)
+                self.store.audit_log("agent", f"{actor_action}.DENIED",
+                                     site=site, command=cmd, why=why)
                 raise WeftError(
                     "task.invalid",
-                    "command matches the deny list; ask the user to run it manually",
+                    "command matches the deny list; ask the user to run it "
+                    "manually",
                     stage="infra", hints={"pattern": pat.pattern},
                 )
+
+    def job_node_exec(self, job_id: str, cmd: str, why: str,
+                      timeout: float = 60.0) -> dict:
+        """Run a diagnostic INSIDE a running job's allocation — live
+        nvidia-smi/ps/df on the node MY job occupies (the login→node hop
+        as a verb). Audited and deny-listed like site_exec. On non-
+        scheduler sites the job runs on the host itself: the command runs
+        in the job's directory instead."""
+        job = self.store.get_job(job_id)
+        if not job:
+            raise WeftError("task.invalid", f"unknown job: {job_id}",
+                            stage="infra")
+        if job["state"] != "RUNNING":
+            raise WeftError(
+                "task.invalid",
+                f"job {job_id} is {job['state']}, not RUNNING",
+                stage="infra",
+                hints={"suggestion": "node access rides the job's "
+                                     "allocation — it exists only while "
+                                     "the job runs; check task_logs for "
+                                     "finished jobs"})
+        site = job["site"]
+        self._check_denied("job.node_exec", site, cmd, why)
+        adapter = self._adapter(site)
+        handle = job.get("sched_handle") or ""
+        if hasattr(adapter, "node_exec") and handle.startswith("slurm:"):
+            r = adapter.node_exec(handle, cmd, timeout=timeout)
+        else:
+            r = adapter.run_cmd(
+                f"cd {shlex.quote(adapter.path(f'jobs/{job_id}'))} "
+                f"&& ( {cmd} )", timeout=timeout)
+        self.store.audit_log("agent", "job.node_exec", site=site,
+                             command=cmd, why=why, result=f"rc={r.rc}")
+        return {"job_id": job_id, "rc": r.rc,
+                "stdout": r.out[-8000:], "stderr": r.err[-4000:]}
+
+    def site_exec(self, name: str, cmd: str, why: str) -> dict:
+        """Guarded diagnostic shell (doc 05 §5): audited, deny-listed, scoped."""
+        self._check_denied("site.exec", name, cmd, why)
         adapter = self._adapter(name)
         scoped = f"cd {shlex.quote(adapter.root)} && ( {cmd} )"
         r = adapter.run_cmd(scoped, timeout=120)
@@ -750,7 +875,16 @@ class Weft:
                 v = adapter.shim(["version"], timeout=15).json()
                 checks.append({"site": name, "shim": v.get("shim_version"), "ok": True})
             except Exception as e:
-                checks.append({"site": name, "ok": False, "error": str(e)[:200]})
+                entry = {"site": name, "ok": False, "error": str(e)[:200]}
+                if getattr(adapter, "jump", None) and \
+                        hasattr(adapter, "hop_check"):
+                    # multi-hop site: say WHICH hop died, not just "down"
+                    entry["hops"] = adapter.hop_check()
+                    dead = next((h["hop"] for h in entry["hops"]
+                                 if h["ok"] is False), None)
+                    if dead:
+                        entry["diagnosis"] = f"chain breaks at {dead}"
+                checks.append(entry)
                 self.store.set_health(name, "unreachable")
         pending = self.store.nonterminal_jobs()
         idle_kernels = [
@@ -924,8 +1058,8 @@ class Weft:
 # exactly what the MCP server exposes. One list, one source of truth.
 PUBLIC_TOOLS = [
     "register_site", "sites_list", "sites_describe", "site_probe",
-    "site_load", "site_associations", "module_check", "module_list",
-    "site_exec", "site_teardown",
+    "site_probe_deep", "site_load", "site_associations", "module_check",
+    "module_list", "site_exec", "job_node_exec", "site_teardown",
     "env_ensure", "env_status", "env_why", "env_repair", "env_gpu_hint",
     "env_revise", "env_find_near",
     "data_register", "data_describe", "data_fetch",

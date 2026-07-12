@@ -130,6 +130,17 @@ w.register_site("beamlab", "ssh", {
     "pixi_source": ".env/bin/pixi",     # pushed once, hash-verified
 })
 
+# host reachable only from inside (bastion → target): model the hops.
+# weft renders nested ProxyCommand chains (your keys/options apply at
+# EVERY hop, which plain -J does not do), multiplexes the connection,
+# self-heals a wedged multiplexer after a hop restart, and `doctor`
+# reports which hop died ("chain breaks at me@bastion")
+w.register_site("inner", "ssh", {
+    "host": "node7.internal", "root": "/data/me/.weft",
+    "jump": ["me@bastion.univ.edu"],
+    "pixi_source": ".env/bin/pixi",
+})
+
 # Slurm cluster through its login node
 w.register_site("hpc", "slurm", {
     "host": "login.hpc.example.edu", "root": "/scratch/me/.weft",

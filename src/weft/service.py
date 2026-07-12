@@ -162,6 +162,10 @@ class ServiceManager:
             proc = subprocess.Popen(
                 ["ssh", *adapter.ssh_transport_opts(), "-f", "-N",
                  "-o", "ExitOnForwardFailure=yes",
+                 # multi-hop links drop; a dead tunnel must EXIT (so the
+                 # liveness check sees it) rather than hang half-open
+                 "-o", "ServerAliveInterval=15",
+                 "-o", "ServerAliveCountMax=3",
                  "-L", f"127.0.0.1:{lp}:{target}:{p}",
                  adapter.destination()],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -197,12 +201,24 @@ class ServiceManager:
                     started_at=time.time(), scheduler=False, lease="service"))
             if not self._tunnels.get(service_id):
                 out["endpoints"] = self._establish_endpoints(service_id)
+            elif not self._tunnels_alive(service_id):
+                # a hop dropped and the keepalive killed the tunnel:
+                # SELF-HEAL on status, loudly — a stale endpoint that
+                # hangs is worse than a moment of reconnection
+                self.store.emit("service.tunnel_lost", service=service_id,
+                                site=s["site"])
+                self._close_tunnels(service_id)
+                out["endpoints"] = self._establish_endpoints(service_id)
+                self.store.emit("service.tunnel_restored",
+                                service=service_id, site=s["site"])
+                out["tunnel_note"] = "tunnel dropped and was re-established"
             else:
                 s2 = self._tunnels[service_id]
                 out["endpoints"] = [
                     {"port": p, "local_port": t["local_port"],
                      "url": f"http://127.0.0.1:{t['local_port']}"}
                     for p, t in zip(s["ports"], s2)]
+            out["tunnels_alive"] = True
         else:
             out["log_tail"] = self.runner.tail_log(
                 self._adapter(s["site"]), s["jobdir"], 30)
@@ -228,6 +244,20 @@ class ServiceManager:
                                 outputs=len(entries), output_bytes=total)
         self.store.emit("service.stopped", service=service_id)
         return out
+
+    def _tunnels_alive(self, service_id: str) -> bool:
+        """Is a local listener still up for every tunnel? (The -f tunnels
+        daemonize; ServerAlive kills them on a dead link, which frees the
+        local port — exactly what this detects.)"""
+        import socket
+        for t in self._tunnels.get(service_id, []):
+            try:
+                with socket.create_connection(
+                        ("127.0.0.1", t["local_port"]), timeout=2):
+                    pass
+            except OSError:
+                return False
+        return True
 
     def _close_tunnels(self, service_id: str) -> None:
         # -f tunnels daemonize; close by targeting their forwarded port

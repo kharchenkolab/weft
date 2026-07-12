@@ -54,6 +54,7 @@ class SSHAdapter(SiteAdapter):
         user: str | None = None,
         port: int | None = None,
         ssh_opts: list[str] | None = None,
+        jump: list[str] | None = None,
         pixi_source: str | None = None,
         pixi_unpack_source: str | None = None,
         connect_timeout: int = 10,
@@ -66,6 +67,11 @@ class SSHAdapter(SiteAdapter):
         self.port = port
         self._root = root.rstrip("/")
         self.extra_opts = list(ssh_opts or [])
+        # multi-hop: ["user@bastion:port", ...] — rendered as ProxyJump.
+        # The target is often only reachable from inside (alien clusters:
+        # internet OUT, ssh-only IN); hops are modeled so diagnostics can
+        # say WHICH hop died, not just "unreachable".
+        self.jump = list(jump or [])
         self.pixi_source = pixi_source
         self.pixi_unpack_source = pixi_unpack_source
         self.connect_timeout = connect_timeout
@@ -74,7 +80,9 @@ class SSHAdapter(SiteAdapter):
         self.poll_timeout = 20.0
         sock_dir = Path(tempfile.gettempdir()) / f"weft-ssh-{os.getuid()}"
         sock_dir.mkdir(mode=0o700, exist_ok=True)
-        tag = hashlib.sha256(f"{user}@{host}:{port}".encode()).hexdigest()[:16]
+        tag = hashlib.sha256(
+            f"{user}@{host}:{port}:{','.join(self.jump)}".encode()
+        ).hexdigest()[:16]
         self._control_path = str(sock_dir / tag)
 
     @property
@@ -84,6 +92,33 @@ class SSHAdapter(SiteAdapter):
     def destination(self) -> str:
         return f"{self.user}@{self.host}" if self.user else self.host
 
+    def _chain_proxy(self, hops: list[str]) -> str | None:
+        """Nested ProxyCommand for a hop chain. NOT `-J`: ssh does not pass
+        command-line options (keys, host-key policy) down to ProxyJump
+        sub-connections, so site-scoped opts would silently not apply at
+        the hops — ProxyCommand chains carry them explicitly at every
+        level."""
+        pc = None
+        for hop in hops:
+            dest, _, port = hop.partition(":")
+            cmd = ["ssh", "-o", "BatchMode=yes",
+                   "-o", f"ConnectTimeout={self.connect_timeout}",
+                   *self.extra_opts]
+            if pc:
+                # ssh percent-expands the WHOLE ProxyCommand value at each
+                # level — escape the embedded chain so inner %h:%p tokens
+                # survive to the level that owns them
+                cmd += ["-o", f"ProxyCommand={pc.replace('%', '%%')}"]
+            if port:
+                cmd += ["-p", port]
+            cmd += ["-W", "%h:%p", dest]
+            pc = " ".join(shlex.quote(c) for c in cmd)
+        return pc
+
+    def _jump_opts(self) -> list[str]:
+        pc = self._chain_proxy(self.jump)
+        return ["-o", f"ProxyCommand={pc}"] if pc else []
+
     def _ssh_base(self) -> list[str]:
         opts = [
             "-o", "BatchMode=yes",
@@ -91,10 +126,15 @@ class SSHAdapter(SiteAdapter):
             "-o", "ControlMaster=auto",
             "-o", f"ControlPath={self._control_path}",
             "-o", "ControlPersist=120",
+            # a master whose LINK died (bastion restart, VPN blip) must
+            # exit, or every muxed command fails through it until
+            # ControlPersist expires — the classic wedged-mux failure
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=2",
         ]
         if self.port:
             opts += ["-p", str(self.port)]
-        opts += self.extra_opts
+        opts += self._jump_opts() + self.extra_opts
         return ["ssh", *opts, self.destination()]
 
     def ssh_transport_opts(self) -> list[str]:
@@ -105,8 +145,43 @@ class SSHAdapter(SiteAdapter):
         ]
         if self.port:
             opts += ["-p", str(self.port)]
-        opts += self.extra_opts
+        opts += self._jump_opts() + self.extra_opts
         return opts
+
+    def hop_check(self, timeout: int = 6) -> list[dict]:
+        """Walk the connection chain hop by hop and report WHERE it dies —
+        'bastion up, login refused' is actionable; 'unreachable' is not.
+        Each hop is reached through the hops before it, like the real
+        connection would."""
+        chain = [*self.jump, self.destination()
+                 + (f":{self.port}" if self.port else "")]
+        results = []
+        for i, hop in enumerate(chain):
+            dest, _, port = hop.partition(":")
+            cmd = ["ssh", "-o", "BatchMode=yes",
+                   "-o", f"ConnectTimeout={timeout}"]
+            pc = self._chain_proxy(chain[:i])
+            if pc:
+                cmd += ["-o", f"ProxyCommand={pc}"]
+            if port:
+                cmd += ["-p", port]
+            cmd += self.extra_opts + [dest, "echo weft-hop-ok"]
+            import subprocess as _sp
+            try:
+                r = _sp.run(cmd, capture_output=True, text=True,
+                            timeout=timeout * (i + 2))
+                ok = "weft-hop-ok" in r.stdout
+                results.append({
+                    "hop": hop, "ok": ok,
+                    **({} if ok else {"error": (r.stderr or "")[-200:]})})
+            except _sp.TimeoutExpired:
+                results.append({"hop": hop, "ok": False, "error": "timeout"})
+            if not results[-1]["ok"]:
+                for rest in chain[i + 1:]:
+                    results.append({"hop": rest, "ok": None,
+                                    "note": "not tried (earlier hop failed)"})
+                break
+        return results
 
     def _run(
         self, remote_cmd: str, *, input_bytes: bytes | None = None,
@@ -126,10 +201,19 @@ class SSHAdapter(SiteAdapter):
         out = proc.stdout.decode("utf-8", "replace")
         err = proc.stderr.decode("utf-8", "replace")
         if proc.returncode == 255:
+            # a stale mux master (link died under it) poisons every retry
+            # until ControlPersist expires — evict it so the NEXT attempt
+            # builds a fresh connection instead of failing through the corpse
+            subprocess.run(
+                ["ssh", "-o", f"ControlPath={self._control_path}",
+                 "-O", "exit", self.destination()],
+                capture_output=True, timeout=10)
             raise WeftError(
                 "site.unreachable", f"ssh transport to {self.name} failed",
                 stage="infra", retryable=True,
-                hints={"host": self.host, "stderr": err[-500:]},
+                hints={"host": self.host, "stderr": err[-500:],
+                       "note": "connection multiplexer reset; a retry "
+                               "builds a fresh connection"},
             )
         return ShimResult(proc.returncode, out, err)
 

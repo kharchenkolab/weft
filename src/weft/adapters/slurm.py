@@ -306,6 +306,16 @@ class SlurmAdapter(SSHAdapter):
                 "note": "scheduler gave no estimate (rejected ask or busy)",
                 "raw": r.out.strip()[:300]}
 
+    def node_exec(self, handle: str, cmd: str, timeout: float = 60.0):
+        """Run a diagnostic INSIDE a running job's allocation — the
+        login→node hop as a verb. `srun --overlap` joins the job's
+        existing allocation (no new resources, works wherever srun does;
+        direct node ssh is often blocked or pam_slurm_adopt-gated)."""
+        jid = handle.split(":", 1)[-1]
+        return self.run_cmd(
+            f"srun --overlap --jobid {shlex.quote(jid)} -N1 -n1 "
+            f"sh -c {shlex.quote(cmd)} 2>&1", timeout=timeout)
+
     def module_system_status(self) -> str:
         """'ok' | 'not_initialized' — distinguishes "module missing" from
         "module command itself unavailable in non-interactive shells"."""
@@ -374,8 +384,9 @@ class SlurmAdapter(SSHAdapter):
             lines.append(f"#SBATCH --time={res['walltime']}")
         if res.get("gpus"):
             lines.append(f"#SBATCH --gres=gpu:{res['gpus']}")
-        if self.partition:
-            lines.append(f"#SBATCH --partition={self.partition}")
+        if res.get("partition") or self.partition:
+            lines.append(
+                f"#SBATCH --partition={res.get('partition') or self.partition}")
         if self.account:
             lines.append(f"#SBATCH --account={self.account}")
         # same epilogue contract as the shim's detached runner: files are

@@ -14,6 +14,16 @@ w.register_site("beamlab", "ssh", {
     "pixi_source": "/path/to/pixi",     # pushed once, hash-verified
 })
 
+# hosts reachable only from inside (the usual alien-cluster shape:
+# internet OUT, ssh-only IN) — model the hops, don't hide them in
+# ssh_opts: weft carries your keys/options to EVERY hop and `doctor`
+# reports WHICH hop died ("chain breaks at user@bastion")
+w.register_site("inner", "ssh", {
+    "host": "node7.cluster.internal", "root": "/data/me/.weft",
+    "jump": ["me@bastion.univ.edu", "me@login.cluster.edu"],
+    "pixi_source": "...",
+})
+
 w.register_site("hpc", "slurm", {
     "host": "login.hpc.example.edu", "root": "/scratch/me/.weft",
     "pixi_source": "...",
