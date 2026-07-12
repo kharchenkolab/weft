@@ -24,6 +24,23 @@ from .store import Store
 from .task import Task
 from .transfer.local_link import LocalLink
 
+def tool(fn):
+    """The API contract (uniform, by rule): every public Weft method
+    returns JSON-shaped data; failures come back as error payloads
+    (WeftError.to_dict()); nothing raises across this boundary. Internals
+    raise WeftError freely — this decorator is the boundary."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except WeftError as e:
+            return e.to_dict()
+    wrapper._weft_tool = True
+    return wrapper
+
+
 DENY_PATTERNS = [
     re.compile(r"\brm\s+(-[a-zA-Z]*\s+)*/(?!\S*weft)"),   # recursive rm outside weft root
     re.compile(r"\b(scontrol|sacctmgr)\s+(update|delete|modify)"),
@@ -663,3 +680,23 @@ class Weft:
         self.store.audit_log("user", "site.teardown", site=name)
         adapter.teardown()
         return {"site": name, "state": "terminated"}
+
+
+# The public tool surface: uniformly wrapped (returns, never raises) and
+# exactly what the MCP server exposes. One list, one source of truth.
+PUBLIC_TOOLS = [
+    "register_site", "sites_list", "sites_describe", "site_probe",
+    "site_load", "module_check", "site_exec", "site_teardown",
+    "env_ensure", "env_status", "env_why", "env_repair", "env_gpu_hint",
+    "data_register", "data_describe", "data_fetch",
+    "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
+    "array_status", "array_result", "array_retry",
+    "events_poll", "doctor", "reconcile", "provenance",
+    "session_start", "session_exec", "session_install", "session_snapshot",
+    "session_stop",
+    "kernel_start", "kernel_exec", "kernel_poll", "kernel_status",
+    "kernel_transcript", "kernel_interrupt", "kernel_restart", "kernel_stop",
+]
+
+for _name in PUBLIC_TOOLS:
+    setattr(Weft, _name, tool(getattr(Weft, _name)))

@@ -181,22 +181,13 @@ def test_capability_violation_hints(weft):
 def test_guarded_shell(weft):
     out = weft.site_exec("local", "ls -la", why="inspect weft root layout")
     assert out["rc"] == 0 and "envs" in out["stdout"]
-    bad = None
-    try:
-        weft.site_exec("local", "rm -rf /etc", why="oops")
-    except Exception as e:
-        bad = e
-    assert bad is not None
-    # denial is audited
+    # uniform contract: failures come back as error payloads, never raises
+    bad = weft.site_exec("local", "rm -rf /etc", why="oops")
+    assert bad["error"] == "task.invalid"
     tail = weft.store.audit_tail()
     assert any(a["action"] == "site.exec.DENIED" for a in tail)
     # why is mandatory
-    try:
-        weft.site_exec("local", "ls", why="")
-        raised = False
-    except Exception:
-        raised = True
-    assert raised
+    assert weft.site_exec("local", "ls", why="")["error"] == "task.invalid"
 
 
 @pytest.mark.solver
