@@ -10,6 +10,7 @@ WEFT_SHIM_VERSION=1
 json_bool() { if [ "$1" = "0" ]; then echo true; else echo false; fi; }
 
 cmd_probe() {
+    set +e   # a probe must survive whatever it finds; fallbacks are explicit
     os=$(uname -s | tr 'A-Z' 'a-z')
     arch=$(uname -m)
     host=$(hostname 2>/dev/null || echo unknown)
@@ -20,9 +21,11 @@ cmd_probe() {
     free_kb=$(df -Pk "$(dirname "$root")" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
     free_gb=$((free_kb / 1048576))
     if command -v curl >/dev/null 2>&1; then
-        curl -fsm 5 -o /dev/null https://conda.anaconda.org 2>/dev/null; net=$?
+        if curl -fsm 5 -o /dev/null https://conda.anaconda.org 2>/dev/null
+        then net=0; else net=1; fi
     elif command -v wget >/dev/null 2>&1; then
-        wget -q -T 5 -O /dev/null https://conda.anaconda.org 2>/dev/null; net=$?
+        if wget -q -T 5 -O /dev/null https://conda.anaconda.org 2>/dev/null
+        then net=0; else net=1; fi
     else
         net=1
     fi
@@ -34,7 +37,12 @@ cmd_probe() {
     modules=1; command -v modulecmd >/dev/null 2>&1 && modules=0
     [ -n "${LMOD_CMD:-}" ] && modules=0
     type module >/dev/null 2>&1 && modules=0
-    glibc=$(ldd --version 2>/dev/null | head -1 | grep -o '[0-9][0-9.]*$' || echo "")
+    rsync_ok=1; command -v rsync >/dev/null 2>&1 && rsync_ok=0
+    if ldd --version 2>&1 | grep -qi musl; then
+        glibc="musl"
+    else
+        glibc=$(ldd --version 2>/dev/null | head -1 | grep -o '[0-9][0-9.]*$' || echo "")
+    fi
     gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort | uniq -c \
         | awk '{n=$1; $1=""; sub(/^ /,""); printf "%s{\"model\":\"%s\",\"count\":%d}", sep, $0, n; sep=","}' || true)
     cuda_driver=$(nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9.]*' | awk '{print $3}' | head -1 || true)
@@ -43,7 +51,7 @@ cmd_probe() {
  "os": "$os", "arch": "$arch", "hostname": "$host",
  "cpus": $cpus, "mem_gb": $mem_gb, "glibc": "$glibc",
  "internet": $(json_bool $net),
- "runtimes": {"apptainer": "${apptainer_v:-}", "docker": $(json_bool $docker_ok)},
+ "runtimes": {"apptainer": "${apptainer_v:-}", "docker": $(json_bool $docker_ok), "rsync": $(json_bool $rsync_ok)},
  "scheduler": {"type": "$sched"},
  "module_system": $(json_bool $modules),
  "gpus": [${gpus:-}], "cuda_driver": "${cuda_driver:-}",

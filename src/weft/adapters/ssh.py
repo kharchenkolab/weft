@@ -23,7 +23,22 @@ from ..errors import WeftError
 from .base import ShimResult, SiteAdapter
 
 SHIM_SRC = Path(__file__).resolve().parent.parent / "shim" / "weft-shim"
-BOOTSTRAP_VERSION = 1
+BOOTSTRAP_VERSION = 2  # v2: CA bundle pushed for cert-less sites
+
+
+def _controller_ca_bundle() -> Path | None:
+    for cand in (
+        os.environ.get("SSL_CERT_FILE", ""),
+        "/etc/ssl/certs/ca-certificates.crt",
+        "/etc/pki/tls/cert.pem",
+    ):
+        if cand and Path(cand).is_file():
+            return Path(cand)
+    try:
+        import certifi
+        return Path(certifi.where())
+    except ImportError:
+        return None
 
 
 class SSHAdapter(SiteAdapter):
@@ -120,6 +135,9 @@ class SSHAdapter(SiteAdapter):
             f"WEFT_ROOT={shlex.quote(self.root)} "
             f"PIXI_CACHE_DIR={shlex.quote(self.path('cache/pixi'))} "
             f"PIXI_HOME={shlex.quote(self.path('pixi-home'))} "
+            # sites without a system CA store (minimal images) break every
+            # TLS-using tool; the bootstrap pushes the controller's bundle
+            f"SSL_CERT_FILE={shlex.quote(self.path('etc/cacert.pem'))} "
             f"PATH={shlex.quote(self.path('bin'))}:$PATH "
         )
 
@@ -147,6 +165,9 @@ class SSHAdapter(SiteAdapter):
                 stage="infra", hints={"root": self.root},
             )
         self.write_file("bin/weft-shim", SHIM_SRC.read_bytes(), mode=0o755)
+        ca = _controller_ca_bundle()
+        if ca is not None:
+            self.write_file("etc/cacert.pem", ca.read_bytes())
         if self.pixi_source and not self.file_exists("bin/pixi"):
             self._push_binary(Path(self.pixi_source), "bin/pixi")
         if self.pixi_unpack_source and not self.file_exists("bin/pixi-unpack"):
@@ -166,7 +187,8 @@ class SSHAdapter(SiteAdapter):
         dest = self.path(rel)
         r = self._run(
             f"cat > {shlex.quote(dest)}.tmp && "
-            f"echo {digest}  {shlex.quote(dest)}.tmp | sha256sum -c --quiet && "
+            # busybox sha256sum has no --quiet; discard the OK lines instead
+            f"echo {digest}  {shlex.quote(dest)}.tmp | sha256sum -c >/dev/null && "
             f"chmod 755 {shlex.quote(dest)}.tmp && mv {shlex.quote(dest)}.tmp {shlex.quote(dest)}",
             input_bytes=local.read_bytes(), timeout=600,
         )
@@ -207,8 +229,15 @@ class SSHAdapter(SiteAdapter):
         return r.out.encode("utf-8", "surrogateescape")
 
     def transfer_endpoint(self) -> dict:
+        if not hasattr(self, "_remote_rsync"):
+            local = subprocess.run(["sh", "-c", "command -v rsync"],
+                                   capture_output=True).returncode == 0
+            remote = self.run_cmd("command -v rsync >/dev/null 2>&1 && echo yes"
+                                  ).out.strip() == "yes"
+            self._remote_rsync = local and remote
         return {
-            "method": "rsync-ssh",
+            # tar-over-ssh fallback keeps bare sites usable (no rsync there)
+            "method": "rsync-ssh" if self._remote_rsync else "ssh-pipe",
             "destination": self.destination(),
             "cas_root": self.path("cas"),
             "ssh_opts": self.ssh_transport_opts(),

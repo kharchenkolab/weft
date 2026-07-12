@@ -67,7 +67,7 @@ class RsyncSSH:
         )
         proc = subprocess.run(
             ["ssh", *endpoint["ssh_opts"], endpoint["destination"],
-             f"cd {shlex.quote(endpoint['cas_root'])} && sha256sum -c --quiet"],
+             f"cd {shlex.quote(endpoint['cas_root'])} && sha256sum -c >/dev/null"],
             input=checklist.encode(), capture_output=True, timeout=1800,
         )
         if proc.returncode != 0:

@@ -34,7 +34,7 @@ class DataManager:
         info = self.cas.register(Path(path))
         self.store.put_dataref(
             info.ref, info.kind, info.bytes, info.chunks,
-            meta={"origin": str(path)},
+            meta={"origin": str(path), "exec": info.exec},
         )
         # "@workspace" is a reserved pseudo-site: the local CAS itself
         self.store.set_location(info.ref, "@workspace", str(self.cas.root))
@@ -113,7 +113,12 @@ class DataManager:
                     hints={"suggestion": "register the path first with data.register"},
                 )
             if kind == "file":
-                is_exec = 1 if inp.mount_as.endswith((".sh", ".py")) else 0
+                # exec-ness travels in the ref's metadata; extension is a
+                # fallback for refs registered before we recorded it
+                if row and "exec" in row.get("meta", {}):
+                    is_exec = 1 if row["meta"]["exec"] else 0
+                else:
+                    is_exec = 1 if inp.mount_as.endswith((".sh", ".py")) else 0
                 rows.append(f"{inp.mount_as}\t{inp.ref.split(':')[-1]}\t{is_exec}")
             else:
                 for e in self.cas.tree_manifest(inp.ref):
@@ -163,7 +168,10 @@ class DataManager:
                 ingest_rows.append(f"{out}/{path}\t{digest}")
                 total += size
                 file_ref = f"dref:{digest}"
-                self.store.put_dataref(file_ref, "file", size, meta={"origin": f"job:{jobdir_rel}"})
+                self.store.put_dataref(
+                    file_ref, "file", size,
+                    meta={"origin": f"job:{jobdir_rel}", "exec": is_exec == "1"},
+                )
                 entries.append(self._entry(adapter, jobdir_rel, f"{out}/{path}", file_ref, size))
             tree_hash = sha256_bytes(canonical_json(tree_entries))
             tree_ref = f"dref:{tree_hash}"

@@ -52,7 +52,9 @@ class Weft:
         self.dataman = DataManager(self.store, self.cas, self.workspace)
         self.adapters: dict[str, SiteAdapter] = {}
         from .transfer.rsync_ssh import RsyncSSH
-        self.transfers = {"local-link": LocalLink(), "rsync-ssh": RsyncSSH()}
+        from .transfer.ssh_pipe import SshPipe
+        self.transfers = {"local-link": LocalLink(), "rsync-ssh": RsyncSSH(),
+                          "ssh-pipe": SshPipe()}
         self.runner = JobRunner(
             self.store, self.cas, self.envman, self.dataman,
             self.adapters, self.transfers, pixi_pack=self.pixi_pack,

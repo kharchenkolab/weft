@@ -77,6 +77,19 @@ def ensure_realization(
     """
     from .strategy import select_strategy
 
+    from .capability import compute_view
+    libc = compute_view(caps or {}).get("glibc", "")
+    if libc == "musl":
+        raise WeftError(
+            "env.unsatisfiable_on_site",
+            "site libc is musl; conda-forge linux-64 packages need glibc",
+            stage="realize",
+            hints={
+                "site": adapter.name,
+                "suggestion": "run env-less tasks here, or use a glibc site "
+                              "for anything needing a realized environment",
+            },
+        )
     extras = env_row["canonical"]["extras"]
     modules = extras.get("modules") or []
     strategy = select_strategy(

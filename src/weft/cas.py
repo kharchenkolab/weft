@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import WeftError
-from .ids import DREF_SCHEME, canonical_json, data_ref, hash_file, hash_tree, sha256_bytes
+from .ids import (DREF_SCHEME, _is_exec, canonical_json, data_ref, hash_file,
+                  hash_tree, sha256_bytes)
 
 
 @dataclass
@@ -28,6 +29,7 @@ class DataRefInfo:
     kind: str  # "file" | "tree"
     bytes: int
     chunks: list[str] | None = None
+    exec: bool = False  # file refs only; trees carry per-entry exec bits
 
 
 class LocalCAS:
@@ -82,12 +84,14 @@ class LocalCAS:
         ):
             hexdigest = cached[3]
             if self._blob_path(hexdigest).exists():
-                return DataRefInfo(data_ref(hexdigest), "file", st.st_size)
+                return DataRefInfo(data_ref(hexdigest), "file", st.st_size,
+                                   exec=_is_exec(st.st_mode))
         digest = hash_file(path)
         self._store_blob(path, digest.sha256)
         self._fast_path_index[str(path)] = (st.st_mtime_ns, st.st_size, st.st_ino, digest.sha256)
         self._save_index()
-        return DataRefInfo(data_ref(digest.sha256), "file", digest.size, digest.chunks)
+        return DataRefInfo(data_ref(digest.sha256), "file", digest.size,
+                           digest.chunks, exec=_is_exec(st.st_mode))
 
     def register_tree(self, path: Path) -> DataRefInfo:
         path = Path(path).resolve()
