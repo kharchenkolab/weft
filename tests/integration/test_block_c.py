@@ -16,7 +16,7 @@ def w(tmp_path, pixi_bin):
     return w
 
 
-def _age(w, days=1.0):
+def _age(w, days=15.0):
     """Backdate every timestamp the GC consults (test-only surgery)."""
     cutoff = time.time() - days * 86400
     with w.store._lock, w.store._conn:
