@@ -21,8 +21,10 @@ what is actually built (and where it deviates) in
   `module load`s layered in. Identical resolutions are never rebuilt,
   anywhere. Everything is userspace: no root, no docker, no daemons on
   remote machines — one inspectable directory, removable in one command.
-- **Content-addressed data.** Inputs stage to a site at most once; outputs
-  chain site-side (a dependent task moves 0 bytes); results come back as
+- **Content-addressed data.** Inputs stage to a site at most once —
+  including remote sources (`https://`, object stores) ingested straight
+  into the site's cache without a controller detour; outputs chain
+  site-side (a dependent task moves 0 bytes); results come back as
   manifests with previews, bulk data only on request; identical tasks
   memoize. Every result traces back to exact command + locked env +
   input hashes.
@@ -31,12 +33,15 @@ what is actually built (and where it deviates) in
   backlog, GPU utilization, scheduler start ETAs), per-site user policy
   (partition allowlists, GPU caps, storage roles, free-form guidance),
   and placement that weighs cache warmth and current load — with reasons.
-- **Interactive when you need it.** Persistent kernels (Python/R/Julia)
-  execute code blocks incrementally with live interpreter state — over
-  plain SSH, no sockets — with interrupt, crash diagnosis (which block
-  killed it), and transcript replay; sessions and snapshots turn
-  exploration into locked, citable environments; `provenance()` walks any
-  result back to exact commands, locked envs, and input hashes.
+- **Three execution shapes, one model.** *Tasks* run to a manifest;
+  *kernels* (Python/R/Julia) execute blocks incrementally against live
+  interpreter state — over plain SSH, no sockets — with interrupt, crash
+  diagnosis, transcript replay, and honest promotion into the record;
+  *services* run until stopped and publish a **tunneled endpoint next to
+  the data** (dashboards, notebook servers, query APIs). All three share
+  the same environments, staging, supervision, and provenance.
+  `provenance()` walks any result back to exact commands, locked envs, and
+  input hashes, labeled by a reproducibility ladder.
 - **Built for agents.** Structured errors with remediation hints
   (`job.oom` carries observed peak vs asked; queue reasons name why a job
   pends), plans before effects, coalesced event digests for 1000-element
