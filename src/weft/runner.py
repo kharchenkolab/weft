@@ -304,8 +304,31 @@ class JobRunner:
         scheduler = scheduler_type(
             (self.store.get_site(adapter.name) or {}).get("capabilities") or {}
         ) != "none"
+        outage_since: float | None = None
+        backoff = self.poll_interval
         while True:
-            status = adapter.poll_job(handle, jobdir_rel)
+            try:
+                status = adapter.poll_job(handle, jobdir_rel)
+            except WeftError as e:
+                if e.code != "site.unreachable":
+                    raise
+                # transient connectivity loss must not fail a detached job:
+                # remote state is the source of truth (doc 01 §6)
+                if outage_since is None:
+                    outage_since = time.time()
+                    self.store.set_health(adapter.name, "unreachable")
+                    self.store.emit("site.unreachable", job_id=job_id,
+                                    site=adapter.name)
+                backoff = min(backoff * 2, 30.0)
+                time.sleep(backoff)
+                continue
+            if outage_since is not None:
+                self.store.set_health(adapter.name, "ok")
+                self.store.emit("site.reachable", job_id=job_id,
+                                site=adapter.name,
+                                outage_s=round(time.time() - outage_since, 1))
+                outage_since = None
+                backoff = self.poll_interval
             state = status.get("state")
             if state == "exited":
                 break

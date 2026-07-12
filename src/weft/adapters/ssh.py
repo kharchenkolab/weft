@@ -1,0 +1,233 @@
+"""SSH adapter: the shim over the user's own ssh (doc 02 §5).
+
+Weft never stores keys or reimplements transport — it invokes the system
+`ssh`, inheriting aliases, ProxyJump, agents, and MFA. A ControlMaster
+socket multiplexes every control call over one authenticated connection
+(politeness on shared login nodes; MFA answered once per session).
+
+Exit code 255 from ssh is a *transport* failure and maps to
+`site.unreachable` (retryable); anything else is the remote command's own
+exit status.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import shlex
+import subprocess
+import tempfile
+from pathlib import Path
+
+from ..errors import WeftError
+from .base import ShimResult, SiteAdapter
+
+SHIM_SRC = Path(__file__).resolve().parent.parent / "shim" / "weft-shim"
+BOOTSTRAP_VERSION = 1
+
+
+class SSHAdapter(SiteAdapter):
+    kind = "ssh"
+
+    def __init__(
+        self,
+        name: str,
+        host: str,
+        root: str,
+        *,
+        user: str | None = None,
+        port: int | None = None,
+        ssh_opts: list[str] | None = None,
+        pixi_source: str | None = None,
+        connect_timeout: int = 10,
+    ):
+        self.name = name
+        self.host = host
+        self.user = user
+        self.port = port
+        self._root = root.rstrip("/")
+        self.extra_opts = list(ssh_opts or [])
+        self.pixi_source = pixi_source
+        self.connect_timeout = connect_timeout
+        sock_dir = Path(tempfile.gettempdir()) / f"weft-ssh-{os.getuid()}"
+        sock_dir.mkdir(mode=0o700, exist_ok=True)
+        tag = hashlib.sha256(f"{user}@{host}:{port}".encode()).hexdigest()[:16]
+        self._control_path = str(sock_dir / tag)
+
+    @property
+    def root(self) -> str:
+        return self._root
+
+    def destination(self) -> str:
+        return f"{self.user}@{self.host}" if self.user else self.host
+
+    def _ssh_base(self) -> list[str]:
+        opts = [
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={self.connect_timeout}",
+            "-o", "ControlMaster=auto",
+            "-o", f"ControlPath={self._control_path}",
+            "-o", "ControlPersist=120",
+        ]
+        if self.port:
+            opts += ["-p", str(self.port)]
+        opts += self.extra_opts
+        return ["ssh", *opts, self.destination()]
+
+    def ssh_transport_opts(self) -> list[str]:
+        """Options for other ssh-family tools (rsync -e) to share the socket."""
+        opts = [
+            "-o", "BatchMode=yes",
+            "-o", f"ControlPath={self._control_path}",
+        ]
+        if self.port:
+            opts += ["-p", str(self.port)]
+        opts += self.extra_opts
+        return opts
+
+    def _run(
+        self, remote_cmd: str, *, input_bytes: bytes | None = None,
+        timeout: float = 120.0,
+    ) -> ShimResult:
+        try:
+            proc = subprocess.run(
+                [*self._ssh_base(), remote_cmd],
+                input=input_bytes, capture_output=True, timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise WeftError(
+                "site.unreachable", f"ssh to {self.name} timed out after {timeout}s",
+                stage="infra", retryable=True,
+                hints={"host": self.host, "command": remote_cmd[:120]},
+            ) from e
+        out = proc.stdout.decode("utf-8", "replace")
+        err = proc.stderr.decode("utf-8", "replace")
+        if proc.returncode == 255:
+            raise WeftError(
+                "site.unreachable", f"ssh transport to {self.name} failed",
+                stage="infra", retryable=True,
+                hints={"host": self.host, "stderr": err[-500:]},
+            )
+        return ShimResult(proc.returncode, out, err)
+
+    def _env_prefix(self) -> str:
+        return (
+            f"WEFT_ROOT={shlex.quote(self.root)} "
+            f"PIXI_CACHE_DIR={shlex.quote(self.path('cache/pixi'))} "
+            f"PIXI_HOME={shlex.quote(self.path('pixi-home'))} "
+            f"PATH={shlex.quote(self.path('bin'))}:$PATH "
+        )
+
+    # -- SiteAdapter interface ------------------------------------------------
+
+    def ensure_bootstrap(self) -> None:
+        marker = self.run_cmd(f"cat {shlex.quote(self.path('.weft-site'))} 2>/dev/null")
+        if marker.rc == 0 and f'"bootstrap_version": {BOOTSTRAP_VERSION}' in marker.out:
+            shim_ok = self.run_cmd(
+                f"sha256sum {shlex.quote(self.path('bin/weft-shim'))} 2>/dev/null"
+            )
+            local_hash = hashlib.sha256(SHIM_SRC.read_bytes()).hexdigest()
+            if shim_ok.rc == 0 and shim_ok.out.split()[0] == local_hash:
+                return
+        r = self.run_cmd(
+            f"mkdir -p {shlex.quote(self.root)}/bin "
+            f"{shlex.quote(self.root)}/envs {shlex.quote(self.root)}/cas "
+            f"{shlex.quote(self.root)}/jobs {shlex.quote(self.root)}/tmp "
+            f"{shlex.quote(self.root)}/cache"
+        )
+        if r.rc != 0:
+            raise WeftError(
+                "site.bootstrap_failed",
+                f"cannot create weft root on {self.name}: {r.err[:300]}",
+                stage="infra", hints={"root": self.root},
+            )
+        self.write_file("bin/weft-shim", SHIM_SRC.read_bytes(), mode=0o755)
+        if self.pixi_source and not self.file_exists("bin/pixi"):
+            self._push_binary(Path(self.pixi_source), "bin/pixi")
+        smoke = self.shim(["version"])
+        if smoke.rc != 0:
+            raise WeftError(
+                "site.bootstrap_failed", f"shim smoke test failed: {smoke.err[:300]}",
+                stage="infra",
+            )
+        self.write_file(
+            ".weft-site", f'{{"bootstrap_version": {BOOTSTRAP_VERSION}}}\n'.encode()
+        )
+
+    def _push_binary(self, local: Path, rel: str) -> None:
+        digest = hashlib.sha256(local.read_bytes()).hexdigest()
+        dest = self.path(rel)
+        r = self._run(
+            f"cat > {shlex.quote(dest)}.tmp && "
+            f"echo {digest}  {shlex.quote(dest)}.tmp | sha256sum -c --quiet && "
+            f"chmod 755 {shlex.quote(dest)}.tmp && mv {shlex.quote(dest)}.tmp {shlex.quote(dest)}",
+            input_bytes=local.read_bytes(), timeout=600,
+        )
+        if r.rc != 0:
+            raise WeftError(
+                "site.bootstrap_failed", f"failed to push {rel}: {r.err[:300]}",
+                stage="infra", retryable=True,
+            )
+
+    def shim(self, argv: list[str], *, timeout: float = 60.0) -> ShimResult:
+        cmd = self._env_prefix() + shlex.join(
+            [self.path("bin/weft-shim"), *argv]
+        )
+        return self._run(cmd, timeout=timeout)
+
+    def run_cmd(self, script: str, *, timeout: float = 120.0) -> ShimResult:
+        return self._run(self._env_prefix() + "sh -c " + shlex.quote(script),
+                         timeout=timeout)
+
+    def write_file(self, rel: str, data: bytes, mode: int = 0o644) -> None:
+        dest = self.path(rel)
+        r = self._run(
+            f"mkdir -p {shlex.quote(os.path.dirname(dest))} && "
+            f"cat > {shlex.quote(dest)} && chmod {mode:o} {shlex.quote(dest)}",
+            input_bytes=data, timeout=120,
+        )
+        if r.rc != 0:
+            raise WeftError(
+                "site.unreachable", f"write_file {rel} failed: {r.err[:300]}",
+                stage="infra", retryable=True,
+            )
+
+    def read_file(self, rel: str, max_bytes: int | None = None) -> bytes:
+        capped = f"head -c {max_bytes} " if max_bytes else "cat "
+        r = self._run(capped + shlex.quote(self.path(rel)), timeout=120)
+        if r.rc != 0:
+            raise WeftError("data.missing", f"no such file on site: {rel}", stage="infra")
+        return r.out.encode("utf-8", "surrogateescape")
+
+    def transfer_endpoint(self) -> dict:
+        return {
+            "method": "rsync-ssh",
+            "destination": self.destination(),
+            "cas_root": self.path("cas"),
+            "ssh_opts": self.ssh_transport_opts(),
+        }
+
+    def submit(self, jobdir_rel: str, task: dict) -> str:
+        r = self.shim(["run", "--dir", self.path(jobdir_rel)])
+        if r.rc != 0:
+            raise WeftError(
+                "job.nonzero_exit", f"shim run failed: {(r.err or r.out)[:300]}",
+                stage="submit",
+            )
+        return f"pid:{r.json().get('pid', 0)}"
+
+    def poll_job(self, handle: str, jobdir_rel: str) -> dict:
+        return self.shim(["status", "--dir", self.path(jobdir_rel)]).json()
+
+    def cancel(self, handle: str, jobdir_rel: str) -> None:
+        if handle.startswith("pid:"):
+            pid = handle[4:]
+            self.run_cmd(f"kill -TERM -{shlex.quote(pid)} 2>/dev/null; true")
+
+    def close_control(self) -> None:
+        """Drop the multiplexed connection (used by chaos tests)."""
+        subprocess.run(
+            ["ssh", "-o", f"ControlPath={self._control_path}",
+             "-O", "exit", self.destination()],
+            capture_output=True,
+        )

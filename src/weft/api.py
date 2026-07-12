@@ -44,7 +44,8 @@ class Weft:
         self.envman = EnvManager(self.store, data_dir / "solve", self.pixi_bin)
         self.dataman = DataManager(self.store, self.cas, self.workspace)
         self.adapters: dict[str, SiteAdapter] = {}
-        self.transfers = {"local-link": LocalLink()}
+        from .transfer.rsync_ssh import RsyncSSH
+        self.transfers = {"local-link": LocalLink(), "rsync-ssh": RsyncSSH()}
         self.runner = JobRunner(
             self.store, self.cas, self.envman, self.dataman,
             self.adapters, self.transfers,
@@ -65,10 +66,18 @@ class Weft:
             adapter = LocalAdapter(
                 name, Path(config["root"]), pixi_source=config.get("pixi_source"),
             )
+        elif kind == "ssh":
+            from .adapters.ssh import SSHAdapter
+            adapter = SSHAdapter(
+                name, config["host"], config["root"],
+                user=config.get("user"), port=config.get("port"),
+                ssh_opts=config.get("ssh_opts"),
+                pixi_source=config.get("pixi_source"),
+            )
         else:
             raise WeftError(
                 "task.invalid", f"unknown site kind: {kind}", stage="infra",
-                hints={"known": ["local"]},
+                hints={"known": ["local", "ssh"]},
             )
         self.adapters[name] = adapter
         return adapter
