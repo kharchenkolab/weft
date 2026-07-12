@@ -95,7 +95,7 @@ class KernelManager:
             job_id=kernel_id, handle=handle, jobdir_rel=jobdir_rel,
             task=Task.from_dict({"command": f"[kernel {lang}]",
                                  "resources": {"walltime": ""}}),
-            started_at=time.time(), scheduler=False, kernel=True))
+            started_at=time.time(), scheduler=False, lease="kernel"))
         return {"kernel_id": kernel_id, "site": site, "lang": lang,
                 "env_id": env_id,
                 "note": "exploration only — assemble successful blocks into "

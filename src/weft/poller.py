@@ -43,7 +43,7 @@ class Watch:
     last_reason: str = ""        # last scheduler pending-reason recorded
     lost_strikes: int = 0
     cancelled: bool = False
-    kernel: bool = False         # kernel watches report deaths, not results
+    lease: str | None = None     # "kernel"|"service": report deaths, not results
 
 
 class SitePoller:
@@ -173,8 +173,8 @@ class SitePoller:
             self._unregister(w.job_id)
             return
         state = status.get("state")
-        if w.kernel:
-            self._kernel_transition(w, state, status)
+        if w.lease:
+            self._lease_transition(w, state, status)
             return
 
         if state == "exited":
@@ -254,14 +254,27 @@ class SitePoller:
                        "suggestion": "raise resources.walltime or shrink the task"},
             )
 
-    def _kernel_transition(self, w: Watch, state: str, status: dict) -> None:
-        """Kernels have no COLLECTING: an exit is either a requested stop
-        or a death — and the *block that killed it* is the diagnostic."""
+    def _lease_transition(self, w: Watch, state: str, status: dict) -> None:
+        """Leases (kernels, services) have no COLLECTING: an exit is a
+        requested stop or a death — reported, with diagnostics."""
         if state in ("exited", "lost", "missing"):
             w.lost_strikes += 1
             if state != "exited" and w.lost_strikes < LOST_STRIKES:
                 return
             self._unregister(w.job_id)
+            if w.lease == "service":
+                s = self.runner.store.get_service(w.job_id)
+                if not s or s["state"] not in ("starting", "ready"):
+                    return  # clean stop already recorded
+                log_tail = self.runner.tail_log(self.adapter, w.jobdir_rel, 30)
+                self.runner.store.update_service(w.job_id, state="exited")
+                self.runner.store.emit(
+                    "service.exited", service=w.job_id, site=self.site,
+                    exit_code=status.get("exit_code"),
+                    log_tail=log_tail[-800:],
+                    suggestion="service_status shows the record; "
+                               "service_start again after fixing the cause")
+                return
             k = self.runner.store.get_kernel(w.job_id)
             if not k or k["state"] != "running":
                 return  # clean stop already recorded
@@ -283,6 +296,8 @@ class SitePoller:
             )
             return
         w.lost_strikes = 0
+        if w.lease == "service":
+            return  # services are bounded by walltime, not idleness
         # idle auto-stop, if the site owner asked for it (policy knob)
         row = self.runner.store.get_site(self.site) or {}
         idle_cap = ((row.get("config") or {}).get("policy")

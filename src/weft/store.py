@@ -88,6 +88,12 @@ class Store:
             "CREATE INDEX IF NOT EXISTS metrics_by_key ON metrics(site, key)"
         )
         self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS services("
+            "service_id TEXT PRIMARY KEY, site TEXT, jobdir TEXT,"
+            "handle TEXT, ports TEXT, state TEXT, task TEXT,"
+            "created_at REAL)"
+        )
+        self._conn.execute(
             "CREATE TABLE IF NOT EXISTS kernels("
             "kernel_id TEXT PRIMARY KEY, site TEXT, lang TEXT, env_id TEXT,"
             "jobdir TEXT, handle TEXT, state TEXT, blocks_run INTEGER,"
@@ -489,6 +495,35 @@ class Store:
                 f"DELETE FROM events WHERE ts < ? AND kind NOT IN ({placeholders})",
                 (cutoff, *keep_kinds))
             return cur.rowcount
+
+    # -- services --------------------------------------------------------------
+
+    def put_service(self, service_id: str, site: str, jobdir: str,
+                    handle: str, ports: list[int], task: dict) -> None:
+        self._write("INSERT INTO services VALUES(?,?,?,?,?,?,?,?)",
+                    (service_id, site, jobdir, handle, _j(ports), "starting",
+                     _j(task), time.time()))
+
+    def get_service(self, service_id: str) -> dict | None:
+        r = self._row("SELECT * FROM services WHERE service_id=?",
+                      (service_id,))
+        if not r:
+            return None
+        d = dict(r)
+        d["ports"] = json.loads(d["ports"])
+        d["task"] = json.loads(d["task"])
+        return d
+
+    def update_service(self, service_id: str, *, state: str) -> None:
+        self._write("UPDATE services SET state=? WHERE service_id=?",
+                    (state, service_id))
+
+    def list_services(self, state: str | None = None) -> list[dict]:
+        q, vals = "SELECT service_id FROM services", ()
+        if state:
+            q += " WHERE state=?"; vals = (state,)
+        return [self.get_service(r["service_id"])
+                for r in self._rows(q + " ORDER BY created_at", vals)]
 
     # -- kernels ---------------------------------------------------------------
 

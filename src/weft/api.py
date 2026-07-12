@@ -85,6 +85,9 @@ class Weft:
         self.sessions = SessionManager(self.store, self.envman)
         from .kernel import KernelManager
         self.kernels = KernelManager(self.store, self.adapters, self.runner)
+        from .service import ServiceManager
+        self.services = ServiceManager(self.store, self.adapters,
+                                       self.runner, self.dataman)
         self._restore_sites()
 
     # -- site management ---------------------------------------------------
@@ -512,6 +515,31 @@ class Weft:
     def kernel_stop(self, kernel_id: str) -> dict:
         return self.kernels.stop(kernel_id)
 
+    # -- services (endpoint-publishing long-lived processes) ----------------------
+
+    def service_start(self, site: str, task: dict, ports: list[int],
+                      ready_timeout: float = 60.0) -> dict:
+        """Start a long-lived process whose result is a live endpoint (a
+        dashboard, notebook server, colocated query API). The command must
+        bind 127.0.0.1 on $WEFT_PORT; weft tunnels it back and returns
+        local URLs. Same env/staging/provenance as tasks; runs until
+        service_stop (or its walltime)."""
+        self.store.audit_log("agent", "service.start", site=site,
+                             command=str(task.get("command", ""))[:200])
+        return self.services.start(site, task, ports, ready_timeout)
+
+    def service_status(self, service_id: str) -> dict:
+        """State + live endpoints (tunnels re-established if needed —
+        also re-hooks monitoring after a controller restart)."""
+        return self.services.status(service_id)
+
+    def service_stop(self, service_id: str, collect: bool = False) -> dict:
+        """Stop the service and close its tunnels. collect=True harvests
+        the task's declared outputs into refs (the service's side-products
+        enter the record)."""
+        self.store.audit_log("agent", "service.stop", command=service_id)
+        return self.services.stop(service_id, collect=collect)
+
     # -- events / diagnostics -----------------------------------------------------
 
     def events_subscribe(self, callback) -> dict:
@@ -766,6 +794,7 @@ PUBLIC_TOOLS = [
     "session_stop",
     "kernel_start", "kernel_exec", "kernel_poll", "kernel_status",
     "kernel_transcript", "kernel_interrupt", "kernel_restart", "kernel_stop",
+    "service_start", "service_status", "service_stop",
 ]
 
 for _name in PUBLIC_TOOLS:
