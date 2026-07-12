@@ -22,7 +22,9 @@ RUN mkdir -p /var/spool/slurmctld /var/spool/slurmd /var/log/slurm \
 # shadows the real binaries, which would only error without a DB
 COPY fake-sacctmgr /usr/local/bin/sacctmgr
 COPY fake-sshare /usr/local/bin/sshare
-RUN chmod +x /usr/local/bin/sacctmgr /usr/local/bin/sshare
+COPY fake-nvidia-smi /usr/local/bin/nvidia-smi
+RUN chmod +x /usr/local/bin/sacctmgr /usr/local/bin/sshare \
+    /usr/local/bin/nvidia-smi
 
 # a site-licensed "module" the tests can require (doc scenario S4)
 COPY modulefiles /opt/site-modules

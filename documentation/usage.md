@@ -255,7 +255,12 @@ w.provenance("dref:…")   # who produced this artifact, all the way down
 
 ```python
 w.doctor()                                  # shim health per site, stale jobs
+                                            # (multi-hop sites: which hop died)
 w.site_exec("local", "df -h .", why="check quota before big staging")
+w.job_node_exec(job_id, "nvidia-smi; free -m",
+                why="job looks stuck")      # INSIDE the job's allocation
+w.site_probe_deep("hpc", partitions=["gpu"])  # compute-node truth via
+                                            # probe jobs (measured egress)
 w.store.audit_tail(50)                      # what ran where, and why
 w.reconcile()                               # after a controller crash/restart
 ```

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Fake GPU telemetry for node-diagnostic tests (no hardware in docker).
+# Shapes match real nvidia-smi query output for the calls weft makes.
+case "$*" in
+    *"--query-gpu=name --format=csv,noheader"*)
+        printf 'Fake A100\nFake A100\n'
+        ;;
+    *"--query-gpu=utilization.gpu,memory.used,memory.total"*)
+        printf '37 %%, 8123 MiB, 40960 MiB\n12 %%, 102 MiB, 40960 MiB\n'
+        ;;
+    *)
+        cat <<'EOF'
++-----------------------------------------------------------------------------+
+| NVIDIA-SMI 550.00       Driver Version: 550.00       CUDA Version: 12.4     |
++-----------------------------------------------------------------------------+
+EOF
+        ;;
+esac

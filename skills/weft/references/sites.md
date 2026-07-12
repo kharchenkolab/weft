@@ -59,6 +59,17 @@ w.register_site("cloud-gpu", "cloud", {
   means conda-forge envs are impossible there. `overridden_fields` names
   facts that came from config, not measurement.
 - `site_probe(name)` — re-probe after drift (quota moved, module renamed).
+- **`site_probe_deep(name, partitions=[...])`** — COMPUTE-NODE truth: runs
+  the probe as a tiny job on each partition and records what the nodes
+  actually are (GPUs, glibc, **measured egress** — "login has internet"
+  says nothing about nodes). Fills per-partition `compute` records;
+  realization strategy then keys on measured node egress. Run it once
+  after registering a cluster; re-run on drift.
+- **`job_node_exec(job_id, cmd, why=...)`** — run a diagnostic INSIDE your
+  running job's allocation (`srun --overlap`): live `nvidia-smi` on the
+  node your job occupies, `ps`/`free` when it looks stuck, peek at
+  node-local scratch. Audited + deny-listed like site_exec; only while
+  the job RUNS (the allocation is the access).
 - **`site_associations(name)`** — what am *I* allowed to ask for: my
   accounts, allowed/default QOS per partition, structured QOS ceilings
   (`limits_per_user`: cpu/gpu/mem), fairshare factor. All None when the

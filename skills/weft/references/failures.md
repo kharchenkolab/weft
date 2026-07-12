@@ -35,3 +35,15 @@ patterns matched. From any finished result, `provenance(job_id | dref)`
 reconstructs the full chain (command, exact env layers/SHAs/snapshots,
 inputs, producing jobs) — use it before asserting anything about how an
 artifact was made.
+
+## Live-job triage (the node hop)
+
+A RUNNING job that looks stuck is diagnosable from INSIDE its allocation:
+`job_node_exec(job_id, "ps -o pid,etime,comm -u $USER; free -m", why=...)`
+joins the job's node via `srun --overlap` — live GPU telemetry
+(`nvidia-smi`), memory pressure, node-local scratch. Audited and
+deny-listed like `site_exec`; works only while the job runs. Triage order:
+`task_logs` (cheap, from the shared FS) → `job_node_exec` (the node's own
+view) → `task_cancel` with cause. If several jobs on one PARTITION act up,
+`site_probe_deep(site, partitions=[...])` re-measures what its nodes
+actually are (egress, GPUs, glibc) — capability drift shows up there.
