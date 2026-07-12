@@ -454,8 +454,13 @@ class _SiteLease:
         instead of building); False once we hold the lease and must build."""
         import time as _t
         deadline = _t.time() + self.MAX_WAIT_S
+        parent = self.lease.rsplit("/", 1)[0]
         while True:
+            # -p the PARENT only: the lease mkdir itself must stay atomic,
+            # but a missing parent dir must read as "create it", not as
+            # "someone else holds the lease" (a spin-until-timeout bug)
             r = self.adapter.run_cmd(
+                f"mkdir -p {shlex.quote(parent)} 2>/dev/null; "
                 f"mkdir {shlex.quote(self.lease)} 2>/dev/null && echo got "
                 f"|| echo busy", timeout=30)
             if "got" in r.out:
