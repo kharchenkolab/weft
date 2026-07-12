@@ -55,6 +55,28 @@ def _dep_line(dep: str) -> str:
     return f"{_toml_str(name)} = {_toml_str(_normalize_constraint(constraint))}"
 
 
+def parent_pins(parent_canonical: dict, platform: str = "linux-64") -> list[str]:
+    """Every package of a resolved parent, as an exact (version, build) pin.
+
+    Feeding these back to the solver makes the child's resolution a SUPERSET
+    of the parent's by construction — no base drift, so an overlay
+    realization is coherent — and collapses the search space, so "add one
+    package" solves in a moment instead of re-deriving the whole world.
+    """
+    pins = []
+    for p in parent_canonical.get("platforms", {}).get(platform, []):
+        if p["kind"] != "conda":
+            continue                    # pypi pins go in the pypi section
+        pins.append(f'{p["name"]} =={p["version"]} {p["build"]}')
+    return pins
+
+
+def parent_pypi_pins(parent_canonical: dict, platform: str = "linux-64") -> list[str]:
+    return [f'{p["name"]} =={p["version"]}'
+            for p in parent_canonical.get("platforms", {}).get(platform, [])
+            if p["kind"] == "pypi"]
+
+
 def render_pixi_manifest(spec: EnvSpec) -> str:
     lines = [
         "[workspace]",

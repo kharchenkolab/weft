@@ -15,6 +15,26 @@ from .spec import EnvSpec, resolve_extends
 from .store import Store
 
 
+def _satisfies(version: str, constraint: str) -> bool:
+    """Does the parent's pinned version satisfy the delta's constraint?
+    Conda's fuzzy '=3.12' means '3.12.*'; the rest is PEP440-ish."""
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+    from packaging.version import InvalidVersion, Version
+
+    from .lock import _normalize_constraint
+    c = _normalize_constraint(constraint.strip())
+    if not c or c == "*":
+        return True
+    if not c[0] in "<>=!~":
+        c = "==" + c                       # bare version means exactly that
+    if c.endswith(".*") and c.startswith("=="):
+        pass                               # SpecifierSet handles ==X.Y.*
+    try:
+        return Version(version) in SpecifierSet(c)
+    except (InvalidSpecifier, InvalidVersion):
+        return False                       # can't prove it: treat as a move
+
+
 def diff_envs(old_canonical: dict, new_canonical: dict) -> dict:
     """Package-level delta between two resolved envs — what an agent (and a
     user) needs to judge whether the near-match is acceptable."""
@@ -50,6 +70,66 @@ class EnvManager:
     def _lookup_spec(self, spec_hash: str) -> EnvSpec | None:
         body = self.store.get_spec(spec_hash)
         return EnvSpec.from_dict(body) if body else None
+
+    @staticmethod
+    def _pin_to_parent(spec: EnvSpec, parent_env: dict) -> EnvSpec:
+        """Freeze the base: parent's exact packages + the child's delta.
+
+        A delta constraint on a package the parent already has is either
+        redundant (the pinned version satisfies it — we drop it and keep the
+        pin) or a request to MOVE THE BASE, which `extends_env` exists to
+        prevent: that is an immediate env.layer_conflict, never a silent
+        version change.
+        """
+        from copy import deepcopy
+
+        from .lock import parent_pins, parent_pypi_pins
+        from .spec import split_constraint
+        out = deepcopy(spec)
+        plat = spec.platforms[0] if spec.platforms else "linux-64"
+        canonical = parent_env["canonical"]
+
+        def resolve(pins: list[str], delta: list[str], kind: str) -> list[str]:
+            pinned = {split_constraint(p)[0]: split_constraint(p)[1]
+                      for p in pins}
+            keep_delta = []
+            for dep in delta:
+                name, constraint = split_constraint(dep)
+                if name not in pinned:
+                    keep_delta.append(dep)
+                    continue
+                version = pinned[name].lstrip("=").split()[0]
+                if constraint == "*" or _satisfies(version, constraint):
+                    continue      # redundant: the frozen base already has it
+                raise WeftError(
+                    "env.layer_conflict",
+                    f"the delta asks for {kind} {name} {constraint}, but the "
+                    f"parent has it pinned at {version}",
+                    stage="solve",
+                    hints={
+                        "parent": spec.extends_env, "package": name,
+                        "parent_version": version, "requested": constraint,
+                        "suggestion": "`extends_env` freezes the base on "
+                                      "purpose. To move it, re-ensure with "
+                                      "`extends` (the parent's SPEC hash) for "
+                                      "a free re-solve and a full prefix.",
+                    })
+            return pins + keep_delta
+
+        out.conda = resolve(parent_pins(canonical, plat), spec.conda, "conda")
+        out.pypi = resolve(parent_pypi_pins(canonical, plat), spec.pypi, "pypi")
+        # the parent's own extras carry over (modules, env_vars, …)
+        extras = canonical.get("extras", {})
+        out.modules = extras.get("modules") or out.modules
+        out.env_vars = {**(extras.get("env_vars") or {}), **out.env_vars}
+        # parent's language layers are inherited; the child adds to them
+        for eco, layer in (canonical.get("layers") or {}).items():
+            parent_deps = layer.get("top_level") or []
+            out.deps_extra[eco] = [
+                d for d in parent_deps
+                if d not in out.deps_extra.get(eco, [])
+            ] + out.deps_extra.get(eco, [])
+        return out
 
     def _solve_forgiving(self, merged: EnvSpec, workdir: Path, relax: str):
         """Solve as written; under relax="soft", greedily drop SOFT
@@ -136,8 +216,45 @@ class EnvManager:
                 return {"env_id": cached, "status": "cached",
                         "summary": self._summary(self.store.get_env(cached))}
 
+        # extends_env: pin the parent's resolution, solve only the delta
+        parent_env = None
+        if merged.extends_env:
+            parent_env = self.store.get_env(merged.extends_env)
+            if not parent_env:
+                raise WeftError(
+                    "task.invalid",
+                    f"unknown parent EnvID: {merged.extends_env}",
+                    stage="solve",
+                    hints={"suggestion": "extends_env takes a resolved EnvID; "
+                                         "use `extends` for a spec hash"})
+            merged = self._pin_to_parent(merged, parent_env)
+
         workdir = self.solve_dir / merged_hash.split(":")[-1][:16]
-        result, relaxed = self._solve_forgiving(merged, workdir, relax)
+        try:
+            result, relaxed = self._solve_forgiving(merged, workdir, relax)
+        except WeftError as e:
+            if parent_env is None or e.code != "env.solve_conflict":
+                raise
+            # the delta cannot be satisfied with the base frozen: that IS the
+            # signal to free-solve (and give up the overlay), and the agent
+            # should make that call, not us
+            raise WeftError(
+                "env.layer_conflict",
+                "the delta does not fit on this parent without moving base "
+                "package versions",
+                stage="solve",
+                hints={
+                    "parent": merged.extends_env,
+                    "delta": merged.conda + merged.pypi
+                    + [d for deps in merged.deps_extra.values() for d in deps],
+                    "solver_message": e.hints.get("solver_message", ""),
+                    "suggestion": "re-ensure with `extends` (the parent's SPEC "
+                                  "hash) instead of `extends_env`: that frees "
+                                  "the base to move, costs a full solve and a "
+                                  "full prefix, and is the right call when the "
+                                  "delta genuinely needs a newer base",
+                },
+            ) from e
         if relaxed:
             # the relaxed spec is what actually got solved — store it as the
             # identity (the lock is exact; adaptiveness was in the *path*)
@@ -174,6 +291,21 @@ class EnvManager:
                "summary": self._summary(self.store.get_env(eid))}
         if layer_summaries:
             out["layers"] = layer_summaries
+        if parent_env:
+            from .overlay import classify_delta
+            delta = classify_delta(parent_env["canonical"], canonical)
+            self.store.set_env_parent(eid, merged.extends_env,
+                                      layerable=delta["layerable"])
+            out["extends_env"] = merged.extends_env
+            out["delta"] = delta
+            out["note"] = (
+                "solved against the parent's frozen resolution: the base is "
+                "unchanged, so this can realize as an O(delta) overlay on "
+                "the parent's prefix"
+                if delta["layerable"] else
+                "solved against the parent's frozen resolution, but the delta "
+                "touches the conda layer, so it realizes as a full prefix "
+                f"({delta['why']})")
         if relaxed:
             # transparent: what weft gave up to get you a working env
             out["relaxed"] = relaxed

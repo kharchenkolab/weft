@@ -20,7 +20,9 @@ from typing import Callable
 from .errors import WeftError
 from .ids import spec_id
 
-_NAME_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(.*)$")
+# conda package names may start with an underscore (_openmp_mutex,
+# _libgcc_mutex) — which only bites when a full lock is fed back as pins
+_NAME_RE = re.compile(r"^\s*([A-Za-z0-9_][A-Za-z0-9._-]*)\s*(.*)$")
 
 DEFAULT_PLATFORMS = ["linux-64"]
 DEFAULT_CHANNELS = ["conda-forge"]
@@ -95,6 +97,11 @@ class EnvSpec:
     # filesystem. Hashed into the EnvID (they are refs; that is honest).
     post_install_inputs: list[dict] = field(default_factory=list)
     extends: str | None = None  # "spec:v1:<sha256>" of the parent spec
+    # Extend a RESOLVED env: every package in the parent's lock becomes an
+    # exact pin, so the child's lock is a superset BY CONSTRUCTION (no base
+    # drift) — which is what makes an overlay realization safe and a
+    # "just add one package" solve fast. Hashed: it changes the resolution.
+    extends_env: str | None = None   # "env:vN:<sha256>"
     # pixi [system-requirements]: lets a CUDA stack solve on a GPU-less
     # controller by asserting what the *target* provides (e.g. {"cuda": "12.4"})
     system_requirements: dict[str, str] = field(default_factory=dict)
@@ -115,7 +122,7 @@ class EnvSpec:
             "name", "platforms", "channels", "deps", "variants", "modules",
             "container_base", "env_vars", "post_install", "extends",
             "system_requirements", "notes", "step_notes",
-            "post_install_inputs",
+            "post_install_inputs", "extends_env",
         }
         if unknown:
             raise WeftError(
@@ -126,7 +133,8 @@ class EnvSpec:
                     "name", "platforms", "channels", "deps.<ecosystem>",
                     "variants", "modules", "container_base", "env_vars",
                     "post_install", "post_install_inputs", "extends",
-                    "system_requirements", "notes", "step_notes",
+                    "extends_env", "system_requirements", "notes",
+                    "step_notes",
                 ]},
             )
         variants = {
@@ -149,6 +157,7 @@ class EnvSpec:
             post_install_inputs=[dict(x) for x in
                                  (d.get("post_install_inputs") or [])],
             extends=d.get("extends"),
+            extends_env=d.get("extends_env"),
             system_requirements={
                 k: str(v) for k, v in (d.get("system_requirements") or {}).items()
             },
@@ -172,6 +181,7 @@ class EnvSpec:
             "post_install": self.post_install,
             "post_install_inputs": self.post_install_inputs,
             "extends": self.extends,
+            "extends_env": self.extends_env,
             "system_requirements": self.system_requirements,
             "notes": self.notes,
             "step_notes": self.step_notes,
@@ -217,6 +227,7 @@ class EnvSpec:
             post_install_inputs=parent.post_install_inputs
             + self.post_install_inputs,
             extends=None,  # fully merged specs stand alone
+            extends_env=self.extends_env or parent.extends_env,
             system_requirements={**parent.system_requirements,
                                  **self.system_requirements},
             notes=parent.notes + self.notes,

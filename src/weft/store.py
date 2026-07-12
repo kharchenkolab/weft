@@ -88,6 +88,10 @@ class Store:
         for col, ddl in _SESSION_MIGRATIONS:
             if col not in scols:
                 self._conn.execute(ddl)
+        ecols = {r[1] for r in self._conn.execute("PRAGMA table_info(envs)")}
+        if "parent_env_id" not in ecols:
+            self._conn.execute("ALTER TABLE envs ADD COLUMN parent_env_id TEXT")
+            self._conn.execute("ALTER TABLE envs ADD COLUMN layerable INTEGER")
         rcols = {r[1] for r in
                  self._conn.execute("PRAGMA table_info(realizations)")}
         if "bytes" not in rcols:
@@ -188,7 +192,9 @@ class Store:
         manifest: str, platforms: list[str], weakly_reproducible: bool = False,
     ) -> None:
         self._write(
-            "INSERT OR IGNORE INTO envs VALUES(?,?,?,?,?,?,?,?)",
+            "INSERT OR IGNORE INTO envs(env_id, spec_hash, canonical,"
+            " native_lock, manifest, platforms, weakly_reproducible,"
+            " created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 env_id, spec_hash, _j(canonical), native_lock, manifest,
                 _j(platforms), int(weakly_reproducible), time.time(),
@@ -204,7 +210,21 @@ class Store:
             "canonical": json.loads(r["canonical"]), "native_lock": r["native_lock"],
             "manifest": r["manifest"], "platforms": json.loads(r["platforms"]),
             "weakly_reproducible": bool(r["weakly_reproducible"]),
+            "parent_env_id": r["parent_env_id"] if "parent_env_id" in r.keys()
+            else None,
+            "layerable": bool(r["layerable"]) if "layerable" in r.keys()
+            and r["layerable"] is not None else False,
         }
+
+    def set_env_parent(self, env_id: str, parent_env_id: str,
+                       layerable: bool) -> None:
+        self._write(
+            "UPDATE envs SET parent_env_id=?, layerable=? WHERE env_id=?",
+            (parent_env_id, int(layerable), env_id))
+
+    def children_of_env(self, parent_env_id: str) -> list[str]:
+        return [r["env_id"] for r in self._rows(
+            "SELECT env_id FROM envs WHERE parent_env_id=?", (parent_env_id,))]
 
     def replace_env_lock(self, env_id: str, native_lock: str,
                          manifest: str) -> None:
