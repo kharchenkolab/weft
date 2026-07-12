@@ -127,6 +127,11 @@ def ensure_realization(
             else:
                 _build_prefix(env_id, env_row, adapter, rel, modules,
                               modules_init)
+            _realize_layers(env_id, env_row, adapter, rel,
+                            (pack_tools or {}).get("solvers") or {},
+                            store.emit)
+            _run_post_install(env_row, adapter, rel)
+            _spot_check_and_mark(env_id, env_row, adapter, rel, strategy)
         except WeftError as e:
             store.set_realization(
                 env_id, adapter.name, strategy, rel, "failed", log=e.detail
@@ -174,8 +179,35 @@ def _build_prefix(
         activate += module_prelude(modules, modules_init) + "\n"
     activate += hook.out
     adapter.write_file(f"{rel}/activate.sh", activate.encode())
-    _run_post_install(env_row, adapter, rel)
-    _spot_check_and_mark(env_id, env_row, adapter, rel, "prefix")
+
+
+def _realize_layers(env_id: str, env_row: dict, adapter: SiteAdapter,
+                    rel: str, solvers: dict, emit) -> None:
+    """Non-conda layers (cran, julia, …) install on top of the base env,
+    each appending its activation lines. One progress event per layer —
+    source builds can be slow and the agent should see where time goes."""
+    import time as _t
+    layers = env_row["canonical"].get("layers") or {}
+    for eco, layer in sorted(layers.items()):
+        solver = solvers.get(eco)
+        if solver is None:
+            raise WeftError(
+                "env.realize_failed",
+                f"env has a {eco!r} layer but no such solver is registered",
+                stage="realize",
+                hints={"registered": sorted(solvers),
+                       "suggestion": "enable the solver on this controller"},
+            )
+        t0 = _t.time()
+        emit("realize.layer", env_id=env_id, site=adapter.name,
+             layer=eco, packages=len(layer.get("records", [])))
+        lines = solver.realize_layer(layer, adapter, rel)
+        if lines:
+            current = adapter.read_file(f"{rel}/activate.sh").decode()
+            adapter.write_file(f"{rel}/activate.sh",
+                               (current + "\n" + lines + "\n").encode())
+        emit("realize.layer.done", env_id=env_id, site=adapter.name,
+             layer=eco, elapsed_s=round(_t.time() - t0, 1))
 
 
 def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
@@ -304,8 +336,6 @@ def _build_packed(
         activate += module_prelude(modules, modules_init) + "\n"
     activate += f". {shlex.quote(dest)}/activate.inner.sh\n"
     adapter.write_file(f"{rel}/activate.sh", activate.encode())
-    _run_post_install(env_row, adapter, rel)
-    _spot_check_and_mark(env_id, env_row, adapter, rel, "packed")
 
 
 def _site_platform(caps: dict | None) -> str:

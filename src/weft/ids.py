@@ -106,7 +106,10 @@ def hash_tree(root: Path) -> tuple[str, list[dict]]:
 
 
 def env_id(canonical_lock: dict) -> str:
-    return ENVID_SCHEME + sha256_bytes(canonical_json(canonical_lock))
+    # v2 only when non-conda layers exist — conda-only EnvIDs (and their
+    # realization caches) stay valid across the solver generalization
+    scheme = "env:v2:" if canonical_lock.get("layers") else ENVID_SCHEME
+    return scheme + sha256_bytes(canonical_json(canonical_lock))
 
 
 def data_ref(hex_digest: str) -> str:

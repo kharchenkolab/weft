@@ -63,6 +63,9 @@ class EnvSpec:
     channels: list[str] = field(default_factory=lambda: list(DEFAULT_CHANNELS))
     conda: list[str] = field(default_factory=list)
     pypi: list[str] = field(default_factory=list)
+    # further ecosystems (cran, julia, ...) resolved by registered Solvers;
+    # kept separate so conda/pypi-only specs hash exactly as before
+    deps_extra: dict[str, list[str]] = field(default_factory=dict)
     # platform -> {"conda": [...], "pypi": [...]}
     variants: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     modules: list[str] = field(default_factory=list)
@@ -106,6 +109,8 @@ class EnvSpec:
             channels=list(d.get("channels") or DEFAULT_CHANNELS),
             conda=[str(x) for x in deps.get("conda", [])],
             pypi=[str(x) for x in deps.get("pypi", [])],
+            deps_extra={k: [str(x) for x in v] for k, v in deps.items()
+                        if k not in ("conda", "pypi") and v},
             variants=variants,
             modules=list(d.get("modules") or []),
             container_base=d.get("container_base"),
@@ -118,11 +123,13 @@ class EnvSpec:
         )
 
     def to_dict(self) -> dict:
+        deps: dict = {"conda": self.conda, "pypi": self.pypi}
+        deps.update({k: v for k, v in sorted(self.deps_extra.items()) if v})
         return {
             "name": self.name,
             "platforms": self.platforms,
             "channels": self.channels,
-            "deps": {"conda": self.conda, "pypi": self.pypi},
+            "deps": deps,
             "variants": self.variants,
             "modules": self.modules,
             "container_base": self.container_base,
@@ -153,6 +160,11 @@ class EnvSpec:
             channels=_prepend_unique(self.channels, parent.channels),
             conda=_merge_deps(parent.conda, self.conda),
             pypi=_merge_deps(parent.pypi, self.pypi),
+            deps_extra={
+                eco: _merge_deps(parent.deps_extra.get(eco, []),
+                                 self.deps_extra.get(eco, []))
+                for eco in {**parent.deps_extra, **self.deps_extra}
+            },
             variants=variants,
             modules=parent.modules + [m for m in self.modules if m not in parent.modules],
             container_base=self.container_base or parent.container_base,

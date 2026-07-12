@@ -327,7 +327,8 @@ class JobRunner:
                 caps=site_row.get("capabilities"),
                 site_config=site_row.get("config"),
                 pack_tools={"pixi_pack": self.pixi_pack, "cas": self.cas,
-                            "transfers": self.transfers},
+                            "transfers": self.transfers,
+                            "solvers": self.envman.solvers},
             )
             activate_line = f". {shlex.quote(adapter.path(real['location']))}/activate.sh"
 

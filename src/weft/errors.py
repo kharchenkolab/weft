@@ -14,6 +14,7 @@ from typing import Any
 #               collecting | infra
 CODES = {
     "env.solve_conflict": "unsatisfiable spec; hints list the conflicting requirements",
+    "env.layer_conflict": "one dependency layer's requirements contradict another's; hints name both sides and the fix",
     "env.solve_failed": "solver infrastructure failure (network, index); retryable",
     "env.realize_failed": "environment build/unpack failed on site",
     "env.unsatisfiable_on_site": "spec needs something this site lacks; hints list alternative sites",

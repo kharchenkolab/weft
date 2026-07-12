@@ -246,14 +246,38 @@ class Weft:
 
     # -- environments ---------------------------------------------------------
 
-    def env_ensure(self, spec_or_id, *, update: bool = False) -> dict:
+    def env_ensure(self, spec_or_id, *, update: bool = False,
+                   dry_run: bool = False) -> dict:
         try:
-            return self.envman.ensure(spec_or_id, update=update)
+            return self.envman.ensure(spec_or_id, update=update,
+                                      dry_run=dry_run)
         except WeftError as e:
             return e.to_dict()
 
     def env_status(self, env_id: str) -> dict:
         return self.envman.status(env_id)
+
+    def env_why(self, env_id: str, package: str) -> dict:
+        """Reverse-dependency probe: what pulls `package` in, per layer."""
+        row = self.store.get_env(env_id)
+        if not row:
+            raise WeftError("task.invalid", f"unknown EnvID: {env_id}",
+                            stage="solve")
+        for eco, layer in (row["canonical"].get("layers") or {}).items():
+            for rec in layer.get("records", []):
+                if rec.get("name", "").lower() == package.lower():
+                    return {"ecosystem": eco, "record": rec,
+                            "explanation": f"{package} is in the {eco} layer "
+                                           f"({rec.get('version')})"}
+        why = self.envman.solvers["conda"].why(
+            row, package, self.workspace / ".weft" / "why")
+        return {"ecosystem": "conda", "explanation": why}
+
+    def env_ensure_dry_run(self, spec: dict) -> dict:
+        try:
+            return self.envman.ensure(spec, dry_run=True)
+        except WeftError as e:
+            return e.to_dict()
 
     def env_repair(self, env_id: str, site: str) -> dict:
         """Force-rebuild lever: clears a realization the marker still claims
