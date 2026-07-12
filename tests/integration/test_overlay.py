@@ -110,11 +110,15 @@ def test_cran_overlay_with_compile_cache(w):
     parent = w.env_ensure(R_BASE)["env_id"]
     _realize(w, parent, "Rscript -e 'library(jsonlite)'")
 
+    # NOTE no cran_snapshot here: the child must inherit the parent's
+    # (a re-solve at "today" would move the parent's R packages — the
+    # silent base drift the reviewers caught)
     child = w.env_ensure({"name": "rbase+glue", "extends_env": parent,
-                          "deps": {"cran": ["glue"]},
-                          "system_requirements": {"cran_snapshot": "2026-07-01"}})
+                          "deps": {"cran": ["glue"]}})
     assert child["delta"]["layerable"] is True
     assert child["delta"]["layers_added"]["cran"] == ["glue"]
+    child_layer = w.store.get_env(child["env_id"])["canonical"]["layers"]["cran"]
+    assert "2026-07-01" in child_layer["snapshot"]     # inherited, not today
 
     _realize(w, child["env_id"], "Rscript -e 'cat(glue::glue(\"ok-{1+1}\"))'")
     real = w.store.get_realization(child["env_id"], "local")
@@ -171,6 +175,30 @@ def test_github_source_delta_builds_with_the_weft_toolchain(w):
         assert "toolchain" not in cc["preview"]["lines"][0]
 
 
+def test_github_parent_pins_by_sha_in_children(w):
+    """A github package in the parent must stay THAT build in every child —
+    inheriting a bare name would silently substitute the same-versioned
+    CRAN release; inheriting @main would follow the branch."""
+    parent = w.env_ensure({"name": "gh-parent",
+                           "deps": {"conda": ["r-base =4.4"],
+                                    "cran": ["tidyverse/glue@main"]},
+                           "system_requirements": {
+                               "cran_snapshot": "2026-07-01"}})["env_id"]
+    p_rec = next(r for r in w.store.get_env(parent)["canonical"]["layers"]
+                 ["cran"]["records"] if r["name"] == "glue")
+    assert p_rec.get("remote_sha")
+
+    child = w.env_ensure({"name": "gh-child", "extends_env": parent,
+                          "deps": {"pypi": ["emcee"]}})
+    assert "env_id" in child, child
+    assert child["delta"]["layerable"] is True
+    c_rec = next(r for r in w.store.get_env(child["env_id"])["canonical"]
+                 ["layers"]["cran"]["records"] if r["name"] == "glue")
+    # same artifact: same commit, still a github source
+    assert c_rec.get("remote_sha") == p_rec["remote_sha"]
+    assert c_rec["source"].startswith("github:")
+
+
 def test_verification_failure_falls_back_to_a_full_prefix(w, monkeypatch):
     """The safety valve: if the composed env fails its load checks, the
     overlay is abandoned and the SAME EnvID realizes as a full prefix —
@@ -193,6 +221,62 @@ def test_verification_failure_falls_back_to_a_full_prefix(w, monkeypatch):
     events = w.events_poll(0, 900, compact=False)["events"]
     fb = next(e for e in events if e["kind"] == "realize.overlay_fallback")
     assert "simulated composition failure" in fb["reason"]
+
+
+def test_evicting_a_parent_with_live_overlays_refuses_then_cascades(w):
+    """Reclaiming the parent's GBs must not silently break the children
+    stacked on it: refuse with the dependents named, cascade on request."""
+    parent = w.env_ensure(PY_BASE)["env_id"]
+    _realize(w, parent)
+    child = w.env_ensure({"name": "dep", "extends_env": parent,
+                          "deps": {"pypi": ["emcee"]}})["env_id"]
+    _realize(w, child, "python -c 'import emcee'")
+
+    r = w.env_evict(parent, "local")
+    assert r["error"] == "env.evict_blocked"
+    assert child in r["hints"]["dependents"]
+    assert "cascade" in r["hints"]["suggestion"]
+    # still intact after the refusal
+    assert w.store.get_realization(child, "local")["state"] == "ready"
+
+    # an overlay child alone evicts freely — it owns only its delta
+    r2 = w.env_evict(child, "local")
+    assert r2["state"] == "evicted"
+    assert w.store.get_realization(parent, "local")["state"] == "ready"
+    # and comes back as an overlay (the parent is still here)
+    _realize(w, child, "python -c 'import emcee'")
+    assert w.store.get_realization(child, "local")["strategy"] == "overlay"
+
+    r = w.env_evict(parent, "local", cascade=True)
+    assert r["state"] == "evicted"
+    assert [c["env_id"] for c in r["cascaded"]] == [child]
+    assert w.store.get_realization(child, "local")["state"] == "evicted"
+
+    # with the parent gone, the same EnvID comes back as a FULL prefix —
+    # an honest strategy switch, not a broken overlay
+    j = _realize(w, child, "python -c 'import emcee'")
+    assert j["state"] == "DONE"
+    assert w.store.get_realization(child, "local")["strategy"] == "prefix"
+
+
+def test_session_on_an_overlay_env(w):
+    """Interactive sessions — the whole reason layering exists — run on an
+    overlay-realized env like on any other."""
+    parent = w.env_ensure(PY_BASE)["env_id"]
+    _realize(w, parent)
+    child = w.env_ensure({"name": "interactive", "extends_env": parent,
+                          "deps": {"pypi": ["emcee"]}})["env_id"]
+
+    s = w.session_start(child, "local")
+    sid = s["session_id"]
+    try:
+        r = w.session_exec(sid, "python -c 'import emcee; "
+                                "print(emcee.__version__)'")
+        assert r["rc"] == 0, r
+        assert w.store.get_realization(child, "local")["strategy"] \
+            == "overlay"
+    finally:
+        w.session_stop(sid)
 
 
 def test_parent_tamper_rebuilds_the_child(w):

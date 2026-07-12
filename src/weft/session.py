@@ -74,17 +74,18 @@ class SessionManager:
                 pack_tools={"pixi_pack": self.runner.pixi_pack,
                             "cas": self.runner.cas,
                             "transfers": self.runner.transfers,
-                            "solvers": self.envman.solvers})
+                            "solvers": self.envman.solvers,
+                            "store": self.store,
+                            "dataman": self.runner.dataman})
         session_id = "ses_" + uuid.uuid4().hex[:10]
         rel = f"sessions/{session_id}"
-        # clone the *project* (manifest + lock); the install is a fresh
-        # hardlink forest from the shared package cache — cheap, and the
-        # base realization stays immutable
+        # clone the *project* (manifest + lock) from the STORE, not the
+        # realization dir — an overlay realization has no pixi files of its
+        # own. The install is a fresh hardlink forest from the shared
+        # package cache — cheap, and the base realization stays immutable
+        adapter.write_file(f"{rel}/pixi.toml", env_row["manifest"].encode())
+        adapter.write_file(f"{rel}/pixi.lock", env_row["native_lock"].encode())
         r = adapter.run_cmd(
-            f"mkdir -p {shlex.quote(adapter.path(rel))} && "
-            f"cp {shlex.quote(adapter.path(base_rel))}/pixi.toml "
-            f"{shlex.quote(adapter.path(base_rel))}/pixi.lock "
-            f"{shlex.quote(adapter.path(rel))}/ && "
             f"{shlex.quote(adapter.pixi_bin)} install "
             f"--manifest-path {shlex.quote(adapter.path(rel))}/pixi.toml",
             timeout=900,
@@ -341,18 +342,19 @@ def _pixi_spec(dep: str) -> str:
 
 
 def _unportable_paths(installers: list[dict]) -> list[str]:
-    """Tokens in an installer command that name a path this controller has
-    but the env does not carry — the difference between an escape hatch that
-    travels and one that quietly depends on one filesystem."""
-    from pathlib import Path as _P
+    """Tokens in an installer command that name a filesystem path the env
+    does not carry — the difference between an escape hatch that travels
+    and one that quietly depends on one filesystem. Path-SHAPED is enough:
+    the session ran on a site whose filesystem this controller cannot
+    stat, so existence here proves nothing either way."""
     out = []
     for inst in installers:
         if inst.get("input"):
             continue          # its source travels with the env
         for token in inst["cmd"].split():
             token = token.strip("'\"")
-            if token.startswith(("-", "http://", "https://")):
+            if token.startswith(("-", "http://", "https://", "git+")):
                 continue
-            if ("/" in token or token.startswith(".")) and _P(token).exists():
+            if token.startswith(("/", "./", "../", "~")):
                 out.append(token)
     return out

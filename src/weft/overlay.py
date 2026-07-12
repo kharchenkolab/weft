@@ -43,9 +43,19 @@ def _pypi_map(canonical: dict) -> dict[str, str]:
     }
 
 
-def _layer_map(canonical: dict, eco: str) -> dict[str, str]:
+def _layer_map(canonical: dict, eco: str) -> dict[str, tuple]:
+    """name → full identity. Version alone is not identity: a github build
+    and the release of the same version are different artifacts."""
     layer = (canonical.get("layers") or {}).get(eco) or {}
-    return {r["name"]: r["version"] for r in layer.get("records", [])}
+    out = {}
+    for r in layer.get("records", []):
+        src = r.get("source", "")
+        sha = r.get("remote_sha") or r.get("tree_sha1") or ""
+        if src.startswith("github:") and sha:
+            src = src.split("@")[0]     # the SHA is the identity, not the
+                                        # ref spelling (@main vs @<sha>)
+        out[r["name"]] = (r["version"], src, sha)
+    return out
 
 
 def classify_delta(parent_canonical: dict, child_canonical: dict) -> dict:

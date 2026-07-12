@@ -292,6 +292,33 @@ class CranSolver:
                 "top_level": sorted({p["name"] for p in cran_direct}
                                     | gh_names)}
 
+    @staticmethod
+    def inherit_pins(layer: dict) -> tuple[list[str], dict[str, str]]:
+        """Exact pins that reproduce this layer's top-level set in a child
+        solve (extends_env): github packages pin to the resolved COMMIT SHA
+        (a re-solved branch ref would move — and a bare name would silently
+        become the same-versioned CRAN release), the rest pin exact versions;
+        the snapshot date carries over so the transitive closure re-resolves
+        identically."""
+        import re
+        by_name = {r["name"]: r for r in layer.get("records", [])}
+        pins = []
+        for name in layer.get("top_level", []):
+            rec = by_name.get(name)
+            if rec is None:
+                continue
+            src = rec.get("source", "")
+            if src.startswith("github:") and rec.get("remote_sha"):
+                repo = src[len("github:"):].split("@")[0]
+                pins.append(f'{repo}@{rec["remote_sha"]}')
+            else:
+                pins.append(f'{name} =={rec["version"]}')
+        sysreq = {}
+        m = re.search(r"(\d{4}-\d{2}-\d{2})", layer.get("snapshot") or "")
+        if m:
+            sysreq["cran_snapshot"] = m.group(1)
+        return pins, sysreq
+
     def realize_layer(self, layer: dict, adapter, env_rel: str) -> str:
         import json as _json
         import shlex
@@ -381,7 +408,11 @@ class CranSolver:
         key = compile_cache_key(
             {"records": [{k: r.get(k) for k in ("name", "version", "source",
                                                 "remote_sha")} for r in recs],
-             "snapshot": layer.get("snapshot")},
+             "snapshot": layer.get("snapshot"),
+             # what actually compiled and linked the artifact: the resolved
+             # toolchain and the parent prefix embedded in its rpath
+             "toolchain_lock": pack_tools.get("toolchain_fingerprint"),
+             "parent_prefix": pack_tools.get("parent_prefix")},
             parent_env_id, "linux-64")
         hit = cached_build(store, key) if store is not None else None
         adapter.run_cmd(f"mkdir -p {shlex.quote(rlib)}")
@@ -672,6 +703,26 @@ class JuliaSolver:
                            + (workdir / "Manifest.toml").read_text()),
                 "from_source": [], "top_level": deps}
 
+    @staticmethod
+    def inherit_pins(layer: dict) -> tuple[list[str], dict[str, str]]:
+        """Exact pins for a child solve: registry packages pin to the
+        resolved version; git refs are kept verbatim (their identity lives
+        in the Manifest's tree-sha — a moved branch will surface as base
+        drift in classify_delta, not silently)."""
+        by_name = {r["name"]: r for r in layer.get("records", [])}
+        pins = []
+        for dep in layer.get("top_level", []):
+            if "/" in dep:
+                pins.append(dep)
+                continue
+            name = dep.split()[0].split("=")[0].strip()
+            rec = by_name.get(name)
+            if rec and rec.get("version"):
+                pins.append(f'{name} =={rec["version"]}')
+            else:
+                pins.append(dep)
+        return pins, {}
+
     def realize_layer(self, layer: dict, adapter, env_rel: str) -> str:
         import shlex
         env_dir = adapter.path(env_rel)
@@ -693,6 +744,37 @@ class JuliaSolver:
                        "log_tail": (r.err or r.out)[-1500:],
                        "note": "julia realization needs network from the "
                                "install point in v1"})
+        return (f'export JULIA_PROJECT="{env_dir}/julia"\n'
+                f'export JULIA_DEPOT_PATH="{depot}"')
+
+    def realize_overlay(self, layer: dict, parent_layer: dict | None,
+                        added: list[str], adapter, env_rel: str,
+                        parent_rel: str, prelude: str, pack_tools: dict,
+                        parent_env_id: str) -> str:
+        """Julia layers on itself: the shared per-site depot already holds
+        the parent's packages and JULIA_PROJECT is per-env by design — the
+        overlay is just the child's Project/Manifest instantiated against
+        the same depot (only the delta downloads). No compile cache needed:
+        the depot IS one, keyed by git-tree-sha1."""
+        import shlex
+        env_dir = adapter.path(env_rel)
+        parent_dir = adapter.path(parent_rel)
+        proj, _, man = layer["native"].partition("\n###WEFT-MANIFEST###\n")
+        adapter.write_file(f"{env_rel}/julia/Project.toml", proj.encode())
+        adapter.write_file(f"{env_rel}/julia/Manifest.toml", man.encode())
+        depot = adapter.path("cache/julia-depot")
+        r = adapter.run_activated(
+            f". {shlex.quote(parent_dir)}/activate.sh && "
+            f"JULIA_DEPOT_PATH={shlex.quote(depot)} "
+            f"julia --project={shlex.quote(env_dir + '/julia')} "
+            f"-e 'using Pkg; Pkg.instantiate()'",
+            timeout=3600)
+        if r.rc != 0:
+            raise WeftError(
+                "env.realize_failed",
+                "julia overlay instantiate failed on site", stage="realize",
+                hints={"ecosystem": "julia",
+                       "log_tail": (r.err or r.out)[-1500:]})
         return (f'export JULIA_PROJECT="{env_dir}/julia"\n'
                 f'export JULIA_DEPOT_PATH="{depot}"')
 

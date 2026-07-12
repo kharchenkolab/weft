@@ -43,23 +43,49 @@ def ensure_toolchain(adapter: SiteAdapter, pixi_bin: str,
     """Materialize the build toolchain on the site (once). Returns its
     prefix, or None if it cannot be built (the caller then falls back to a
     full prefix realization rather than guessing)."""
+    from .realize import _SiteLease, _build_lock
     rel = f"{TOOLCHAIN_REL}/{toolchain_id(platform)}"
     if adapter.file_exists(f"{rel}/.weft-ready"):
         return adapter.path(rel)
-    manifest = (
-        '[workspace]\nname = "weft-toolchain"\n'
-        'channels = ["conda-forge"]\n'
-        f'platforms = ["{platform}"]\n\n[dependencies]\n'
-        + "".join(f'"{p}" = "*"\n' for p in TOOLCHAIN_SPEC)
-    )
-    adapter.write_file(f"{rel}/pixi.toml", manifest.encode())
+    # one build per site — across threads (in-process lock) and across
+    # users on a shared root (site-side lease): concurrent pixi installs
+    # into one dir corrupt it
+    with _build_lock(f"toolchain/{toolchain_id(platform)}", adapter.name):
+        if adapter.file_exists(f"{rel}/.weft-ready"):
+            return adapter.path(rel)
+        lease = _SiteLease(adapter, rel)
+        if lease.acquire_or_adopt():
+            return adapter.path(rel)      # another user built it meanwhile
+        try:
+            manifest = (
+                '[workspace]\nname = "weft-toolchain"\n'
+                'channels = ["conda-forge"]\n'
+                f'platforms = ["{platform}"]\n\n[dependencies]\n'
+                + "".join(f'"{p}" = "*"\n' for p in TOOLCHAIN_SPEC)
+            )
+            adapter.write_file(f"{rel}/pixi.toml", manifest.encode())
+            r = adapter.run_cmd(
+                f"{shlex.quote(adapter.pixi_bin)} install --manifest-path "
+                f"{shlex.quote(adapter.path(rel))}/pixi.toml 2>&1",
+                timeout=3600)
+            if r.rc != 0:
+                return None
+            adapter.write_file(f"{rel}/.weft-ready", b'{"kind": "toolchain"}\n')
+            return adapter.path(rel)
+        finally:
+            lease.release()
+
+
+def toolchain_fingerprint(adapter: SiteAdapter,
+                          platform: str = "linux-64") -> str | None:
+    """Identity of the toolchain AS RESOLVED on this site (its lockfile),
+    not as requested: two sites solving 'c-compiler = *' a year apart get
+    different gcc — their build artifacts must not share a cache key."""
+    rel = f"{TOOLCHAIN_REL}/{toolchain_id(platform)}"
     r = adapter.run_cmd(
-        f"{shlex.quote(adapter.pixi_bin)} install --manifest-path "
-        f"{shlex.quote(adapter.path(rel))}/pixi.toml 2>&1", timeout=3600)
-    if r.rc != 0:
-        return None
-    adapter.write_file(f"{rel}/.weft-ready", b'{"kind": "toolchain"}\n')
-    return adapter.path(rel)
+        f"sha256sum {shlex.quote(adapter.path(rel))}/pixi.lock 2>/dev/null "
+        f"| cut -d' ' -f1", timeout=60)
+    return r.out.strip() or None
 
 
 def build_env_prelude(adapter: SiteAdapter, toolchain_prefix: str,

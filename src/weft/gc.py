@@ -20,7 +20,10 @@ DEFAULT_IDLE_DAYS = 14.0
 
 
 def _pinned_refs(store) -> set[str]:
-    """Every ref any job touched: inputs, code, outputs. Conservative."""
+    """Every ref the record depends on: job provenance (inputs, code,
+    outputs), eviction archives, captured installer inputs, compile-cache
+    artifacts. Conservative — losing any of these silently breaks a
+    rebuild-anywhere or reproduce-this claim the record already made."""
     pinned: set[str] = set()
     for j in store.jobs_where():
         task = j["task"]
@@ -30,6 +33,19 @@ def _pinned_refs(store) -> set[str]:
             pinned.add(task["code"]["ref"])
         for o in (j["manifest"] or {}).get("outputs", []):
             pinned.add(o["ref"])
+    # blobs referenced only from dataref meta, not job provenance
+    for r in store.all_datarefs():
+        meta = r.get("meta") or {}
+        if ("archived_blob" in meta or "compile_cache" in meta
+                or str(meta.get("origin", "")).startswith("post_install:")):
+            pinned.add(r["ref"])
+    # captured post_install inputs, referenced from env specs
+    for row in store.list_envs():
+        env = store.get_env(row["env_id"])
+        extras = (env.get("canonical") or {}).get("extras", {}) if env else {}
+        for inp in extras.get("post_install_inputs") or []:
+            if inp.get("ref"):
+                pinned.add(inp["ref"])
     return pinned
 
 
@@ -68,9 +84,13 @@ def plan(weft, site: str | None = None) -> dict:
         cutoff = now - idle_days * 86400
         realizations = [
             {"env_id": r["env_id"], "location": r["location"],
-             "idle_days": round((now - r["updated_at"]) / 86400, 1)}
+             "idle_days": round(
+                 (now - max(r["updated_at"], r["last_used"] or 0)) / 86400, 1)}
             for r in weft.store.realizations_for_site(name)
-            if r["state"] == "ready" and r["updated_at"] < cutoff
+            if r["state"] == "ready"
+            # recency = actual use, not last state change: an env realized
+            # long ago but used hourly is HOT, not idle
+            and max(r["updated_at"], r["last_used"] or 0) < cutoff
         ]
         stale_refs = []
         for ref in weft.store.refs_present_at(name):
@@ -116,14 +136,18 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
         return {"site": site, "evicted_bytes": evicted,
                 "note": "unpinned workspace refs removed; pinned provenance "
                         "content untouched"}
+    evicted_envs, skipped = 0, []
+    for r in p["evictable_realizations"]:
+        # through evict(), NOT a raw rm: the in-use and overlay-dependent
+        # guards apply to a sweep exactly as to an explicit evict
+        from . import evict as _evict
+        try:
+            _evict.evict(weft, r["env_id"], site, cascade=False)
+            evicted_envs += 1
+        except WeftError as e:
+            skipped.append({"env_id": r["env_id"], "why": e.code})
     adapter = weft.adapters[site]
     import shlex
-    evicted_envs = 0
-    for r in p["evictable_realizations"]:
-        adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(r['location']))}")
-        weft.store.set_realization(r["env_id"], site, "?", r["location"],
-                                   "evicted", log="gc sweep")
-        evicted_envs += 1
     evicted_bytes = 0
     endpoint = adapter.transfer_endpoint()
     for r in p["evictable_refs"]:
@@ -136,7 +160,12 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
                          result=f"envs={evicted_envs} bytes={evicted_bytes}")
     weft.store.emit("gc.swept", site=site, realizations=evicted_envs,
                     bytes=evicted_bytes)
-    return {"site": site, "evicted_realizations": evicted_envs,
-            "evicted_bytes": evicted_bytes,
-            "note": "evicted content re-stages/rebuilds automatically on "
-                    "next use — correctness is unaffected"}
+    out = {"site": site, "evicted_realizations": evicted_envs,
+           "evicted_bytes": evicted_bytes,
+           "note": "evicted content re-stages/rebuilds automatically on "
+                   "next use — correctness is unaffected"}
+    if skipped:
+        out["skipped"] = skipped
+        out["note"] += ("; skipped envs are in live use or under overlay "
+                        "children (evict them explicitly to see the details)")
+    return out

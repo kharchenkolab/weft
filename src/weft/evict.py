@@ -35,12 +35,62 @@ from .realize import env_dir_rel
 ARCHIVE_META = "archived_blob"
 
 
-def evict(weft, env_id: str, site: str, archive: bool = False) -> dict:
+def evict(weft, env_id: str, site: str, archive: bool = False,
+          cascade: bool = False) -> dict:
     real = weft.store.get_realization(env_id, site)
     if not real or real["state"] != "ready":
         return {"env_id": env_id, "site": site,
                 "state": (real or {}).get("state", "absent"),
                 "note": "nothing realized here to evict"}
+
+    # live work first: a queued/running job, an open session/kernel, or a
+    # running service will activate this exact prefix — evicting it under
+    # them kills work loudly and pointlessly. (Same-store visibility only:
+    # another controller's jobs are invisible here, as everywhere.)
+    in_use = []
+    for j in weft.store.jobs_where(site=site):
+        if j["state"] in ("PENDING", "QUEUED", "RUNNING") \
+                and (j.get("task") or {}).get("env") == env_id:
+            in_use.append({"kind": "job", "id": j["job_id"],
+                           "state": j["state"]})
+    for s in weft.store.list_sessions(site):
+        if s["state"] == "active" and s.get("base_env_id") == env_id:
+            in_use.append({"kind": "session", "id": s["session_id"]})
+    for k in weft.store.list_kernels(state="running"):
+        if k.get("env_id") == env_id and k.get("site") == site:
+            in_use.append({"kind": "kernel", "id": k["kernel_id"]})
+    if in_use:
+        raise WeftError(
+            "env.evict_blocked",
+            f"{len(in_use)} live job(s)/session(s)/kernel(s) on {site} use "
+            "this env right now", stage="infra",
+            hints={"in_use": in_use,
+                   "suggestion": "wait for or cancel/stop them first "
+                                 "(task_cancel / session_stop / "
+                                 "kernel_stop), then evict"})
+
+    # an overlay child borrows this prefix's bytes at runtime: evicting the
+    # parent out from under it would break a "ready" env. Refuse by default;
+    # cascade=True evicts the dependents first (they rebuild in seconds).
+    dependents = [
+        c for c in weft.store.children_of_env(env_id)
+        if (cr := weft.store.get_realization(c, site))
+        and cr["strategy"] == "overlay"
+        and cr["state"] in ("ready", "building")
+    ]
+    if dependents and not cascade:
+        raise WeftError(
+            "env.evict_blocked",
+            f"{len(dependents)} overlay env(s) on {site} stack on this "
+            "prefix and would break",
+            stage="infra",
+            hints={"dependents": dependents,
+                   "suggestion": "evict the dependents first, or pass "
+                                 "cascade=True to evict them with the parent "
+                                 "(all rebuild cache-warm in seconds)"})
+    cascaded = [evict(weft, c, site, archive=False, cascade=True)
+                for c in dependents]
+
     adapter = weft.adapters[site]
     rel = env_dir_rel(env_id)
 
@@ -53,9 +103,16 @@ def evict(weft, env_id: str, site: str, archive: bool = False) -> dict:
     # what the filesystem gets back (live-agent eval: 2.4x overstatement)
     before = _free_bytes(adapter)
     apparent = real["bytes"] or 0
-    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))}")
+    rm = adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
+                         f"echo WEFT_RM_OK")
+    if "WEFT_RM_OK" not in (rm.out or ""):
+        raise WeftError(
+            "env.realize_failed",
+            f"eviction rm failed on {site} (permissions? busy mount?)",
+            stage="infra", hints={"log_tail": (rm.err or rm.out)[-500:]})
     after = _free_bytes(adapter)
-    freed = max(0, after - before) if (before and after) else apparent
+    measured = bool(before and after)
+    freed = max(0, after - before) if measured else apparent
     weft.store.set_realization(
         env_id, site, real["strategy"], rel, "evicted",
         log=f"evicted {'with archive' if archived else '(cache-warm rebuild)'}")
@@ -66,17 +123,57 @@ def evict(weft, env_id: str, site: str, archive: bool = False) -> dict:
     out = {
         "env_id": env_id, "site": site, "state": "evicted",
         "freed_bytes": freed,
+        # honest accounting or honest labels — never a du number wearing a
+        # df caption (and the df window can catch concurrent writes: it is
+        # a measurement, not a ledger)
+        "freed_measurement": "filesystem (df delta; concurrent activity "
+                             "lands in the same window)" if measured
+        else "apparent size (df unavailable — likely overstated: most "
+             "prefix bytes are hardlinks into the shared cache)",
         "apparent_bytes": apparent,
         "note": "freed_bytes is measured from the filesystem; apparent_bytes "
                 "is the prefix's size, most of which is hardlinked from the "
                 "shared package cache and therefore not reclaimed by this"
-        if apparent > freed else None,
+        if measured and apparent > freed else None,
         "rebuild": "seconds, offline (site package cache is warm)"
         if not archived else "offline from the controller's archive",
     }
     if archived:
+        caveats = _archive_caveats(weft, env_id)
+        if caveats:
+            out["rebuild"] = ("from the controller's archive; NOT fully "
+                              "offline: " + "; ".join(caveats))
+            out["archive_caveats"] = caveats
+    if archived:
         out["archive_ref"] = archived
+    if cascaded:
+        out["cascaded"] = [{"env_id": c["env_id"],
+                            "freed_bytes": c["freed_bytes"]}
+                           for c in cascaded]
     return out
+
+
+def _archive_caveats(weft, env_id: str) -> list[str]:
+    """What the archive blob does NOT freeze. The blob holds pixi-pack's
+    conda/pypi artifacts; anything outside that re-executes or re-packs at
+    rebuild time — say so instead of overpromising 'offline'."""
+    env_row = weft.store.get_env(env_id) or {}
+    extras = (env_row.get("canonical") or {}).get("extras", {})
+    caveats = []
+    if extras.get("post_install"):
+        n_inputs = len(extras.get("post_install_inputs") or [])
+        n_steps = len(extras["post_install"])
+        if n_inputs < n_steps:
+            caveats.append(
+                f"{n_steps} post_install step(s) re-execute on the site at "
+                "rebuild and may fetch from the network "
+                f"({n_inputs} have captured inputs)")
+    layers = (env_row.get("canonical") or {}).get("layers") or {}
+    if layers:
+        caveats.append(
+            f"{sorted(layers)} layer(s) re-pack from the controller's index "
+            "at rebuild (the archive covers conda/pypi only)")
+    return caveats
 
 
 def _free_bytes(adapter) -> int:
@@ -117,11 +214,9 @@ def _archive_to_controller(weft, env_id: str, site: str, adapter) -> str | None:
     import subprocess
     import tempfile
     from pathlib import Path
-    from .capability import compute_view
+    from .realize import _site_platform
     caps = (weft.store.get_site(site) or {}).get("capabilities") or {}
-    view = compute_view(caps)
-    plat = "linux-aarch64" if view.get("arch") in ("arm64", "aarch64") \
-        else "linux-64"
+    plat = _site_platform(caps)
     with tempfile.TemporaryDirectory(prefix="weft-archive-") as td:
         tdp = Path(td)
         (tdp / "pixi.toml").write_text(env_row["manifest"])
@@ -137,9 +232,15 @@ def _archive_to_controller(weft, env_id: str, site: str, adapter) -> str | None:
                 stage="realize",
                 hints={"log_tail": (r.stderr or r.stdout)[-1000:]})
         info = weft.cas.register_file(out_tar)
+    meta = {"origin": f"archive:{env_id}", ARCHIVE_META: env_id,
+            "platform": plat}
+    # without the plain hash, remote transfers of chunked (>64MB) blobs
+    # verify against the merkle root and always fail — every real env
+    # archive is chunked
+    if info.plain_sha256:
+        meta["sha256_plain"] = info.plain_sha256
     weft.store.put_dataref(info.ref, "file", info.bytes, info.chunks,
-                           meta={"origin": f"archive:{env_id}",
-                                 ARCHIVE_META: env_id})
+                           meta=meta)
     weft.store.set_location(info.ref, "@workspace", str(weft.cas.root))
     return info.ref
 
@@ -160,20 +261,37 @@ def gc_packages(weft, site: str, confirm: bool = False) -> dict:
              if x["state"] == "ready"]
     if not confirm:
         return {
-            "site": site, "cache_bytes": cache_bytes,
+            "site": site,
+            "cache_bytes": cache_bytes,
+            "cache_bytes_note": "apparent (du): blocks still hardlinked by "
+                                "realized prefixes are NOT freed by clearing",
             "ready_realizations": len(ready),
             "note": "pass confirm=true to clear the shared package cache. "
                     "WARNING: rebuilds of evicted envs will then need index "
                     "access (or an archived blob) — with the cache warm they "
                     "take seconds and no network.",
         }
+    building = [x["env_id"] for x in weft.store.realizations_for_site(site)
+                if x["state"] == "building"]
+    if building:
+        raise WeftError(
+            "state.conflict",
+            f"{len(building)} env build(s) on {site} are hardlinking from "
+            "this cache right now", stage="infra",
+            hints={"building": building,
+                   "suggestion": "wait for the builds to finish, then re-run"})
+    before = _free_bytes(adapter)
     adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path('cache/pixi'))}")
+    after = _free_bytes(adapter)
+    freed = max(0, after - before) if (before and after) else cache_bytes
     weft.store.audit_log("user", "gc.packages", site=site,
-                         result=f"freed={cache_bytes}")
-    weft.store.emit("gc.packages", site=site, freed_bytes=cache_bytes)
-    return {"site": site, "freed_bytes": cache_bytes,
+                         result=f"freed={freed}")
+    weft.store.emit("gc.packages", site=site, freed_bytes=freed)
+    return {"site": site, "freed_bytes": freed,
+            "apparent_bytes": cache_bytes,
             "note": "shared cache cleared; realized envs still work (they "
-                    "hardlink), but rebuilds now need the index"}
+                    "hardlink — which is why freed_bytes can be far below "
+                    "apparent_bytes), but rebuilds now need the index"}
 
 
 def footprint(weft, site: str) -> dict:
@@ -195,9 +313,10 @@ def footprint(weft, site: str) -> dict:
     reals = []
     known = set()
     for x in weft.store.realizations_for_site(site):
+        if x["state"] in ("ready", "building"):
+            known.add(x["env_id"].rsplit(":", 1)[-1])
         if x["state"] != "ready":
             continue
-        known.add(x["env_id"].rsplit(":", 1)[-1])
         reals.append({
             "env_id": x["env_id"], "bytes": x["bytes"],
             "last_used": x["last_used"],
@@ -209,23 +328,58 @@ def footprint(weft, site: str) -> dict:
         })
     reals.sort(key=lambda r: r["last_used"] or 0)
 
+    from .policy import site_policy
+    site_row = weft.store.get_site(site) or {}
+    shared = bool(((site_row.get("config")) or {}).get("shared"))
+    grace_min = float(site_policy(site_row).get("orphan_grace_minutes", 60))
+
+    def recently_touched(rel: str) -> bool:
+        # concurrent work this store can't see (another workspace's build,
+        # a neighbor's session) shows up as fresh mtimes — grace it
+        if grace_min <= 0:
+            return False
+        r = adapter.run_cmd(
+            f"find {shlex.quote(adapter.path(rel))} "
+            f"-newermt '-{int(grace_min)} minutes' "
+            f"2>/dev/null | head -1", timeout=60)
+        return bool(r.out.strip())
+
     # dirs weft left behind that no record claims (crashed sessions, stale
     # kernels): the live-agent eval found 174 MB of these unreclaimable
     orphans = []
-    for area, live in (
-        ("envs", known),
+    session_names = {s["location"].rsplit("/", 1)[-1]
+                     for s in weft.store.list_sessions(site)}
+    kernel_names = {k["jobdir"].rsplit("/", 1)[-1]
+                    for k in weft.store.list_kernels()}
+    for area, live, ours in (
+        ("envs", known, None),
         ("sessions", {s["location"].rsplit("/", 1)[-1]
                       for s in weft.store.list_sessions(site)
-                      if s["state"] == "active"}),
+                      if s["state"] == "active"}, session_names),
         ("kernels", {k["jobdir"].rsplit("/", 1)[-1]
-                     for k in weft.store.list_kernels(state="running")}),
+                     for k in weft.store.list_kernels(state="running")},
+         kernel_names),
     ):
         r = adapter.run_cmd(
             f"ls {shlex.quote(adapter.path(area))} 2>/dev/null", timeout=60)
         for entry in r.out.split():
-            if entry.rstrip("/") not in live and not entry.endswith(".lease"):
-                orphans.append({"area": area, "name": entry,
-                                "bytes": du(f"{area}/{entry}")})
+            name = entry.rstrip("/")
+            if name in live or name.endswith(".lease"):
+                continue
+            if area == "envs":
+                # a marker is a valid claim by SOMEONE (adoptable by content
+                # address — never garbage); no marker + recent writes is a
+                # build in progress from a store we can't see
+                if adapter.file_exists(f"envs/{name}/.weft-ready"):
+                    continue
+            elif shared and ours is not None and name not in ours:
+                # a shared root holds other users' sessions/kernels — not
+                # ours to judge, and not counted as reclaimable
+                continue
+            if recently_touched(f"{area}/{name}"):
+                continue
+            orphans.append({"area": area, "name": name,
+                            "bytes": du(f"{area}/{name}")})
     orphan_bytes = sum(o["bytes"] for o in orphans)
 
     return {
@@ -233,6 +387,9 @@ def footprint(weft, site: str) -> dict:
         "free_bytes": _free_bytes(adapter),
         "prefixes_bytes": envs, "package_cache_bytes": cache,
         "data_cache_bytes": cas,
+        "bytes_note": "area sizes are apparent (du) and share hardlinked "
+                      "blocks — they sum to MORE than the disk they occupy; "
+                      "free_bytes is the filesystem's own number",
         "orphan_bytes": orphan_bytes, "orphans": orphans[:20],
         "realizations": reals,
         "note": "every ready realization is evictable (env_evict) — rebuilds "

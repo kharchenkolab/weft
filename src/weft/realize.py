@@ -107,9 +107,10 @@ def ensure_realization(
         strategy = strategy.replace("container", "packed")
 
     # overlay: reuse an already-realized parent's prefix and materialize only
-    # the delta (O(delta) instead of O(env)). Falls back to a full prefix on
-    # any doubt — the fallback is correct, just slower.
-    overlay_parent = _overlay_parent(env_row, adapter, store)
+    # the delta (O(delta) instead of O(env)). Falls back on any doubt — to
+    # whatever strategy capabilities selected, which is correct, just slower.
+    base_strategy = strategy
+    overlay_parent = _overlay_parent(env_row, adapter, store, caps)
     if overlay_parent:
         strategy = "overlay"
 
@@ -122,12 +123,11 @@ def ensure_realization(
                 # integrity fence: a tampered env (deleted tool, partial
                 # purge) must rebuild, not silently fall through to host
                 # binaries with the locked env's name on the manifest
-                import json as _json
-                try:
-                    marker = _json.loads(
-                        adapter.read_file(f"{rel}/.weft-ready").decode())
-                except (ValueError, WeftError):
-                    marker = {}
+                marker = _marker(adapter, rel)
+                if marker.get("parent"):
+                    # a hot overlay keeps its parent hot: GC recency must
+                    # never see a load-bearing parent as idle
+                    store.touch_realization(marker["parent"], adapter.name)
                 recorded = marker.get("bin_digest")
                 marked_strategy = marker.get("strategy", strategy)
                 ok = not recorded or recorded == _bin_digest(
@@ -151,8 +151,13 @@ def ensure_realization(
             store.set_realization(env_id, adapter.name, strategy, rel, "missing")
         elif adapter.file_exists(f"{rel}/.weft-ready"):
             # site has it but store forgot (crash recovery, or another
-            # workspace/user built it): re-adopt
-            store.set_realization(env_id, adapter.name, strategy, rel, "ready")
+            # workspace/user built it): re-adopt — with the strategy the
+            # marker RECORDS, not the one we would have picked: an overlay
+            # built elsewhere must stay an overlay in our books, or the
+            # parent-eviction guard cannot see the dependency
+            store.set_realization(env_id, adapter.name,
+                                  _marker(adapter, rel).get("strategy")
+                                  or strategy, rel, "ready")
             store.emit("realize.adopted", env_id=env_id, site=adapter.name,
                        via="marker")
             return store.get_realization(env_id, adapter.name)
@@ -164,8 +169,9 @@ def ensure_realization(
         if lease is not None:
             if lease.acquire_or_adopt():
                 # another user finished the build while we waited: adopt
-                store.set_realization(env_id, adapter.name, strategy, rel,
-                                      "ready")
+                store.set_realization(env_id, adapter.name,
+                                      _marker(adapter, rel).get("strategy")
+                                      or strategy, rel, "ready")
                 store.emit("realize.adopted", env_id=env_id,
                            site=adapter.name, via="shared-lease")
                 return store.get_realization(env_id, adapter.name)
@@ -173,9 +179,12 @@ def ensure_realization(
         modules_init = (site_config or {}).get("modules_init", "")
         # an archived env rebuilds from the controller's blob — no site
         # network, even for a `prefix`-strategy site (eviction with
-        # archive=True is the air-gapped reclamation path)
-        archive_ref = _archived_ref(store, env_id)
-        if archive_ref and not strategy.endswith("packed"):
+        # archive=True is the air-gapped reclamation path). An eligible
+        # overlay still wins: it is cheaper than shipping the blob.
+        archive_ref = _archived_ref(store, env_id,
+                                    platform=_site_platform(caps))
+        if archive_ref and strategy != "overlay" \
+                and not strategy.endswith("packed"):
             strategy = ("modules+packed" if modules else "packed")
             store.set_realization(env_id, adapter.name, strategy, rel,
                                   "building")
@@ -187,11 +196,13 @@ def ensure_realization(
                 except WeftError as e:
                     # composition didn't verify (ABI, shadowing, a build that
                     # needed something the parent lacks): the user still gets a
-                    # working env — we just pay for a full prefix and say so.
+                    # working env — we just pay for a full build and say so.
                     store.emit("realize.overlay_fallback", env_id=env_id,
                                site=adapter.name, parent=overlay_parent,
                                reason=e.detail[:300])
-                    strategy = "modules+prefix" if modules else "prefix"
+                    strategy = base_strategy
+                    if archive_ref and not strategy.endswith("packed"):
+                        strategy = "modules+packed" if modules else "packed"
                     overlay_parent = None
                     store.set_realization(env_id, adapter.name, strategy, rel,
                                           "building")
@@ -207,8 +218,12 @@ def ensure_realization(
                                 store.emit,
                                 offline=strategy.endswith("packed"),
                                 pack_tools=pack_tools)
-            _stage_post_install_inputs(env_row, adapter, rel, pack_tools or {})
-            _run_post_install(env_row, adapter, rel)
+                # overlays skip post_install by construction: eligibility
+                # requires the child's steps to equal the parent's, whose
+                # prefix (sourced first) already carries their products
+                _stage_post_install_inputs(env_row, adapter, rel,
+                                           pack_tools or {})
+                _run_post_install(env_row, adapter, rel)
             _spot_check_and_mark(env_id, env_row, adapter, rel, strategy,
                                  parent=overlay_parent)
         except WeftError as e:
@@ -223,6 +238,15 @@ def ensure_realization(
         store.touch_realization(env_id, adapter.name,
                                 nbytes=_prefix_bytes(adapter, rel))
         return store.get_realization(env_id, adapter.name)
+
+
+def _marker(adapter: SiteAdapter, rel: str) -> dict:
+    """The .weft-ready marker's contents, {} if unreadable."""
+    import json as _json
+    try:
+        return _json.loads(adapter.read_file(f"{rel}/.weft-ready").decode())
+    except (ValueError, WeftError):
+        return {}
 
 
 def _prefix_bytes(adapter: SiteAdapter, rel: str) -> int | None:
@@ -397,11 +421,16 @@ def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
             )
 
 
-def _archived_ref(store: Store, env_id: str) -> str | None:
+def _archived_ref(store: Store, env_id: str,
+                  platform: str | None = None) -> str | None:
     """Did someone evict this env with archive=True? Then the blob is the
-    fastest (and, on air-gapped sites, the only) way back."""
+    fastest (and, on air-gapped sites, the only) way back. Archives are
+    platform-specific artifacts — never reuse one across platforms."""
     from .evict import ARCHIVE_META
     for row in store.datarefs_with_meta(ARCHIVE_META, env_id):
+        blob_plat = (row.get("meta") or {}).get("platform")
+        if platform and blob_plat and blob_plat != platform:
+            continue
         return row["ref"]
     return None
 
@@ -455,17 +484,30 @@ class _SiteLease:
         self.adapter.run_cmd(f"rm -rf {shlex.quote(self.lease)} 2>/dev/null; true")
 
 
-def _overlay_parent(env_row: dict, adapter: SiteAdapter, store: Store) -> str | None:
+def _overlay_parent(env_row: dict, adapter: SiteAdapter, store: Store,
+                    caps: dict | None = None) -> str | None:
     """Is this env an overlay candidate ON THIS SITE right now?"""
     parent = env_row.get("parent_env_id")
     if not parent or not env_row.get("layerable"):
         return None
+    from .capability import compute_view
+    if not compute_view(caps or {}).get("internet", True):
+        return None      # the delta installs from indexes, site-side —
+                         # air-gapped sites go packed/archive instead
     p_real = store.get_realization(parent, adapter.name)
     if not p_real or p_real["state"] != "ready":
         return None      # parent not realized here: nothing to stack on
-    if p_real["strategy"] == "overlay":
-        return None      # depth 1 only in v1: chains multiply the failure
-                         # surface and the eviction bookkeeping
+    if p_real["strategy"] not in ("prefix", "modules+prefix"):
+        return None      # depth 1 only, and only on a pixi-prefix layout:
+                         # packed parents lay out env/ differently and the
+                         # toolchain prelude / parent fence assume .pixi
+    parent_row = store.get_env(parent)
+    pe = ((parent_row or {}).get("canonical") or {}).get("extras", {})
+    ce = (env_row.get("canonical") or {}).get("extras", {})
+    for key in ("modules", "post_install"):
+        if (pe.get(key) or []) != (ce.get(key) or []):
+            return None  # an extras delta is not materialized by layer
+                         # composition — a full prefix realizes it correctly
     if not adapter.file_exists(f"{env_dir_rel(parent)}/.weft-ready"):
         return None
     return parent
@@ -498,9 +540,17 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     # brings its own, on PATH for the build only
     prelude = ""
     if delta.get("layers_added") or delta.get("pypi_added"):
+        from .toolchain import toolchain_fingerprint
         tc = ensure_toolchain(adapter, adapter.pixi_bin)
         if tc:
             prelude = build_env_prelude(adapter, tc, parent_dir)
+            # the compile cache must key on what ACTUALLY builds and links:
+            # the resolved toolchain (not its requested spec) and the parent
+            # prefix path the artifacts carry in their rpath
+            pack_tools = {**pack_tools,
+                          "toolchain_fingerprint":
+                              toolchain_fingerprint(adapter),
+                          "parent_prefix": parent_dir}
 
     activation = [f". {shlex.quote(parent_dir)}/activate.sh"]
     solvers = pack_tools.get("solvers") or {}
@@ -544,8 +594,12 @@ def _verify_overlay(env_row: dict, parent_row: dict, adapter: SiteAdapter,
         checks.append(f"julia -e 'using {name}'")
     py_delta = [n for n in delta.get("pypi_added", [])]
     if py_delta:
-        mods = ", ".join(n.replace("-", "_") for n in py_delta)
-        checks.append(f"python -c 'import {mods}'")
+        # by DISTRIBUTION name, not a guessed import name (scikit-learn's
+        # module is sklearn): metadata visibility proves the composed path
+        names = ", ".join(f'"{n}"' for n in py_delta)
+        checks.append(
+            "python -c 'import importlib.metadata as m; "
+            f"[m.version(n) for n in ({names},)]'")
     # shadowing check: the parent's own top-level packages must still load
     parent_layers = parent_row["canonical"].get("layers") or {}
     for name in (parent_layers.get("cran", {}).get("top_level") or [])[:3]:
@@ -571,17 +625,36 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
     """Install ONLY the delta wheels into the child's own site dir, at the
     exact versions the lock pinned, with no dependency resolution (the lock
     already did it) — then compose via PYTHONPATH/PATH."""
-    pins = {p["name"]: p["version"]
+    recs = {p["name"]: p
             for plat in env_row["canonical"]["platforms"].values()
             for p in plat if p["kind"] == "pypi"}
-    specs = " ".join(shlex.quote(f"{n}=={pins[n]}") for n in added if n in pins)
+    picked = [recs[n] for n in added if n in recs]
+    # the lock knows the artifact hashes: pin them, so the overlay installs
+    # the same bytes a full-prefix `pixi install --frozen` would
+    req_lines = [f'{r["name"]}=={r["version"]}'
+                 + (f' --hash=sha256:{r["sha256"]}' if r.get("sha256") else "")
+                 for r in picked]
+    all_hashed = all(r.get("sha256") for r in picked)
+    adapter.write_file(f"{rel}/pylib-requirements.txt",
+                       ("\n".join(req_lines) + "\n").encode())
+    req = f"{adapter.path(rel)}/pylib-requirements.txt"
     pylib = f"{adapter.path(rel)}/pylib"
-    r = adapter.run_activated(
-        prelude +
-        f". {shlex.quote(parent_dir)}/activate.sh && "
-        f"mkdir -p {shlex.quote(pylib)} && "
-        f"python -m pip install --no-deps --no-input --target {shlex.quote(pylib)} "
-        f"{specs} 2>&1", timeout=1800)
+
+    def install(flags: str):
+        return adapter.run_activated(
+            prelude +
+            f". {shlex.quote(parent_dir)}/activate.sh && "
+            f"mkdir -p {shlex.quote(pylib)} && "
+            f"python -m pip install --no-deps --no-input {flags} "
+            f"--target {shlex.quote(pylib)} -r {shlex.quote(req)} 2>&1",
+            timeout=1800)
+
+    r = install("--require-hashes" if all_hashed else "")
+    if r.rc != 0 and all_hashed:
+        # the canonical lock keeps ONE artifact hash per (name, version);
+        # pip may prefer a different (equally locked-version) wheel. Retry
+        # unhashed rather than paying a full-prefix rebuild — but say so.
+        r = install("")
     if r.rc != 0:
         raise WeftError(
             "env.realize_failed",

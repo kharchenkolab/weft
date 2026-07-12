@@ -74,7 +74,10 @@ def grade_env(canonical: dict) -> dict:
     if extras.get("post_install"):
         # portability is the question that actually matters: does this
         # rebuild anywhere, or does it secretly depend on one filesystem?
-        portable = bool(extras.get("post_install_inputs"))
+        # EVERY step needs its sources captured — one uncaptured step is
+        # one missing filesystem, and "portable" is an all-or-nothing claim
+        n_inputs = len(extras.get("post_install_inputs") or [])
+        portable = n_inputs >= len(extras["post_install"])
         components.append({
             "component": "post_install", "grade": "escape-hatch",
             "portable": portable,

@@ -35,14 +35,35 @@ def _satisfies(version: str, constraint: str) -> bool:
         return False                       # can't prove it: treat as a move
 
 
+def _pep503(name: str) -> str:
+    """PEP-503 normalization: the lock stores 'typing-extensions', a spec
+    may say 'typing_extensions' — same package."""
+    import re
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _layer_dep_name(dep: str) -> str:
+    """The package name a layer dep string refers to: 'glue ==1.7.0' →
+    glue, 'tidyverse/glue@abc123' → glue, 'owner/Repo.jl@ref' → Repo."""
+    if "/" in dep:
+        tail = dep.split("/", 1)[1].split("@")[0]
+        return tail[:-3] if tail.endswith(".jl") else tail
+    from .spec import split_constraint
+    return split_constraint(dep)[0]
+
+
 def diff_envs(old_canonical: dict, new_canonical: dict) -> dict:
     """Package-level delta between two resolved envs — what an agent (and a
     user) needs to judge whether the near-match is acceptable."""
     def flat(c):
+        # key by (platform, kind, name): multi-platform envs can move a
+        # package on one platform only, and a conda and pypi package can
+        # legitimately share a name — neither may mask the other
         out = {}
-        for plat in c.get("platforms", {}).values():
-            for p in plat:
-                out[p["name"]] = p["version"]
+        for plat, pkgs in c.get("platforms", {}).items():
+            for p in pkgs:
+                out[f"{plat}/{p.get('kind', 'pkg')}:{p['name']}"] = \
+                    p["version"]
         for eco, layer in (c.get("layers") or {}).items():
             for r in layer.get("records", []):
                 out[f"{eco}:{r['name']}"] = r["version"]
@@ -71,8 +92,7 @@ class EnvManager:
         body = self.store.get_spec(spec_hash)
         return EnvSpec.from_dict(body) if body else None
 
-    @staticmethod
-    def _pin_to_parent(spec: EnvSpec, parent_env: dict) -> EnvSpec:
+    def _pin_to_parent(self, spec: EnvSpec, parent_env: dict) -> EnvSpec:
         """Freeze the base: parent's exact packages + the child's delta.
 
         A delta constraint on a package the parent already has is either
@@ -118,17 +138,65 @@ class EnvManager:
 
         out.conda = resolve(parent_pins(canonical, plat), spec.conda, "conda")
         out.pypi = resolve(parent_pypi_pins(canonical, plat), spec.pypi, "pypi")
-        # the parent's own extras carry over (modules, env_vars, …)
+        # the parent's extras carry over and MERGE with the child's: the
+        # child's identity must account for everything the parent's does
+        # (post_install products, modules), or the same child EnvID behaves
+        # differently as an overlay vs a full prefix
         extras = canonical.get("extras", {})
-        out.modules = extras.get("modules") or out.modules
+        out.modules = list(extras.get("modules") or []) + [
+            m for m in out.modules if m not in (extras.get("modules") or [])]
         out.env_vars = {**(extras.get("env_vars") or {}), **out.env_vars}
-        # parent's language layers are inherited; the child adds to them
+        n_parent_steps = len(extras.get("post_install") or [])
+        out.post_install = list(extras.get("post_install") or []) \
+            + out.post_install
+        out.step_notes = {(str(int(k) + n_parent_steps)
+                           if k.isdigit() else k): v
+                          for k, v in out.step_notes.items()}
+        seen_inputs = {i.get("sha256") for i in out.post_install_inputs}
+        out.post_install_inputs = [
+            i for i in (extras.get("post_install_inputs") or [])
+            if i.get("sha256") not in seen_inputs] + out.post_install_inputs
+
+        # parent's language layers are inherited AS EXACT PINS — inheriting
+        # bare names would re-solve them against a fresh snapshot/registry
+        # and silently move the base (and a github build would silently
+        # become the same-versioned release from the index)
         for eco, layer in (canonical.get("layers") or {}).items():
-            parent_deps = layer.get("top_level") or []
-            out.deps_extra[eco] = [
-                d for d in parent_deps
-                if d not in out.deps_extra.get(eco, [])
-            ] + out.deps_extra.get(eco, [])
+            solver = self.solvers.get(eco)
+            if solver is not None and hasattr(solver, "inherit_pins"):
+                pins, sysreq = solver.inherit_pins(layer)
+                for k, v in sysreq.items():
+                    out.system_requirements.setdefault(k, v)
+            else:
+                pins = list(layer.get("top_level") or [])
+            child = out.deps_extra.get(eco, [])
+            merged, pinned_names = [], {}
+            for p in pins:
+                pinned_names[_layer_dep_name(p)] = p
+                merged.append(p)
+            for dep in child:
+                name = _layer_dep_name(dep)
+                if name not in pinned_names:
+                    merged.append(dep)
+                    continue
+                pin = pinned_names[name]
+                if dep == pin or split_constraint(dep)[1] == "*":
+                    continue          # redundant: the frozen base has it
+                if _satisfies(pin.split("==")[-1].strip(),
+                              split_constraint(dep)[1]) \
+                        and "/" not in dep:
+                    continue
+                raise WeftError(
+                    "env.layer_conflict",
+                    f"the delta asks for {eco} {dep}, but the parent has "
+                    f"{pin} frozen", stage="solve",
+                    hints={"parent": spec.extends_env, "package": name,
+                           "parent_pin": pin, "requested": dep,
+                           "suggestion": "`extends_env` freezes the base on "
+                                         "purpose. To move it, re-ensure "
+                                         "with `extends` for a free re-solve "
+                                         "and a full prefix."})
+            out.deps_extra[eco] = merged
         return out
 
     def _solve_forgiving(self, merged: EnvSpec, workdir: Path, relax: str):
@@ -163,13 +231,19 @@ class EnvManager:
                                 "relaxed_to": deps[i]})
                 try:
                     result = solve(merged, workdir, self.pixi_bin)
-                except WeftError:
+                except WeftError as e:
+                    if e.code != "env.solve_conflict":
+                        raise    # network/index trouble is NOT "still
+                                 # conflicting" — misdiagnosing a transient
+                                 # failure as unsatisfiable sends the agent
+                                 # down the wrong repair path
                     continue     # still conflicting: relax the next one too
                 for r in relaxed:
+                    want = _pep503(r["relaxed_to"])
                     r["got"] = next(
                         (p["version"] for plat in
                          result.canonical["platforms"].values()
-                         for p in plat if p["name"] == r["relaxed_to"]), None)
+                         for p in plat if _pep503(p["name"]) == want), None)
                 return result, relaxed
             first.hints["tried_relaxing"] = [r["dep"] for r in relaxed]
             first.hints["suggestion"] = (
@@ -195,6 +269,10 @@ class EnvManager:
         spec = EnvSpec.from_dict(spec_or_id)
         merged = resolve_extends(spec, self._lookup_spec)
         merged_hash = merged.spec_hash()
+        # capture the body NOW: _pin_to_parent rewrites deps in place below,
+        # and the stored body must hash to its key (notes may differ — they
+        # are identity-neutral by design, and last-write-wins is the point)
+        merged_body, merged_name = merged.to_dict(), merged.name
 
         # unknown ecosystems fail before any solving is paid for
         unknown = set(merged.deps_extra) - set(self.solvers)
@@ -210,6 +288,11 @@ class EnvManager:
         if not update and not dry_run:
             cached = self.store.env_for_spec(merged_hash)
             if cached:
+                # persist identity-neutral annotations even on a cache hit —
+                # "annotate without forking the EnvID" must actually store
+                self.store.put_spec(spec.spec_hash(), spec.name,
+                                    spec.to_dict())
+                self.store.put_spec(merged_hash, merged_name, merged_body)
                 return {"env_id": cached, "status": "cached",
                         "summary": self._summary(self.store.get_env(cached))}
 
@@ -257,10 +340,15 @@ class EnvManager:
                                   "delta genuinely needs a newer base",
                 },
             ) from e
+        soft_hash = None
         if relaxed:
             # the relaxed spec is what actually got solved — store it as the
-            # identity (the lock is exact; adaptiveness was in the *path*)
+            # identity (the lock is exact; adaptiveness was in the *path*).
+            # The ORIGINAL soft spec aliases to the same env, so re-ensuring
+            # it is a cache hit, not another conflict-relax-solve cycle
+            soft_hash = merged_hash
             merged_hash = merged.spec_hash()
+            merged_body, merged_name = merged.to_dict(), merged.name
         canonical = result.canonical
         layer_summaries = {}
         for eco, deps in sorted(merged.deps_extra.items()):
@@ -283,12 +371,14 @@ class EnvManager:
             return out
 
         self.store.put_spec(spec.spec_hash(), spec.name, spec.to_dict())
-        self.store.put_spec(merged_hash, merged.name, merged.to_dict())
+        self.store.put_spec(merged_hash, merged_name, merged_body)
         self.store.put_env(
             eid, merged_hash, canonical, result.native_lock,
             result.manifest, result.platforms,
             weakly_reproducible=merged.weakly_reproducible(),
         )
+        if soft_hash:
+            self.store.put_spec_alias(soft_hash, eid)
         out = {"env_id": eid, "status": "solved",
                "summary": self._summary(self.store.get_env(eid))}
         if layer_summaries:
@@ -388,8 +478,33 @@ class EnvManager:
         # would defeat the point (put_env is insert-or-ignore by design)
         merged = resolve_extends(EnvSpec.from_dict(spec_body),
                                  self._lookup_spec)
+        parent_env = None
+        if merged.extends_env:
+            # the spec froze the base to the parent's resolution; a revise
+            # must honor that or it mints a child with the parent AMPUTATED
+            parent_env = self.store.get_env(merged.extends_env)
+            if not parent_env:
+                raise WeftError(
+                    "task.invalid",
+                    f"cannot revise {env_id}: its parent "
+                    f"{merged.extends_env} is unknown here", stage="solve")
+            merged = self._pin_to_parent(merged, parent_env)
         workdir = self.solve_dir / merged.spec_hash().split(":")[-1][:16]
-        result = solve(merged, workdir, self.pixi_bin)
+        try:
+            result = solve(merged, workdir, self.pixi_bin)
+        except WeftError as e:
+            if parent_env is None or e.code != "env.solve_conflict":
+                raise
+            raise WeftError(
+                "env.layer_conflict",
+                "revise cannot keep the base frozen: the parent's pinned "
+                "set no longer solves", stage="solve",
+                hints={"parent": merged.extends_env,
+                       "solver_message": e.hints.get("solver_message", ""),
+                       "suggestion": "revise the parent first, then "
+                                     "re-ensure this child on the revised "
+                                     "parent — or re-ensure with `extends` "
+                                     "to free the base"})
         canonical = result.canonical
         for eco, deps in sorted(merged.deps_extra.items()):
             canonical.setdefault("layers", {})[eco] = \
@@ -424,6 +539,11 @@ class EnvManager:
             new_id, merged.spec_hash(), canonical, result.native_lock,
             result.manifest, result.platforms,
             weakly_reproducible=merged.weakly_reproducible())
+        if parent_env:
+            from .overlay import classify_delta
+            delta = classify_delta(parent_env["canonical"], canonical)
+            self.store.set_env_parent(new_id, merged.extends_env,
+                                      layerable=delta["layerable"])
         fresh = {"env_id": new_id, "status": "solved",
                  "summary": self._summary(self.store.get_env(new_id))}
         diff = diff_envs(old["canonical"],
@@ -450,15 +570,32 @@ class EnvManager:
             from .spec import split_constraint
             n, c = split_constraint(dep)
             want[n] = c
+        for eco, deps in target.deps_extra.items():
+            for dep in deps:
+                want[_layer_dep_name(dep)] = "*"
+        if not want:
+            return []     # nothing asked for = nothing is "near"
         out = []
         for row in self.store.list_envs():
             env = self.store.get_env(row["env_id"])
             names = {p["name"]: p["version"]
                      for plat in env["canonical"]["platforms"].values()
                      for p in plat}
+            for layer in (env["canonical"].get("layers") or {}).values():
+                names.update({r["name"]: r["version"]
+                              for r in layer.get("records", [])})
             missing = [n for n in want if n not in names]
+            # a present name at an unsatisfying version is NOT a match —
+            # python 3.9 for a "python =3.13" ask is the decision the agent
+            # needs to see, not a distance-0 "perfect hit"
+            mismatched = [{"package": n, "have": names[n], "want": c}
+                          for n, c in want.items()
+                          if n in names and c != "*"
+                          and not _satisfies(names[n], c)]
             if len(missing) > len(want) / 2:
-                continue      # not remotely the same environment
+                continue      # not remotely the same environment (a version
+                              # MISMATCH still ranks — it is the "near" in
+                              # near-match; absence is what disqualifies)
             realized = [r["site"] for r in
                         self.store.realizations_for(row["env_id"])
                         if r["state"] == "ready"
@@ -470,7 +607,8 @@ class EnvManager:
                 "env_id": row["env_id"],
                 "realized_at": realized,
                 "missing_packages": missing,
-                "distance": len(missing),
+                "version_mismatches": mismatched,
+                "distance": len(missing) + len(mismatched),
                 "grade": grade_env(env["canonical"])["grade"],
             })
         out.sort(key=lambda e: (e["distance"], not e["realized_at"]))

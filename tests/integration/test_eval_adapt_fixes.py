@@ -109,6 +109,11 @@ def test_footprint_is_honest_and_orphans_reclaimable(w):
     env = w.env_ensure({"name": "fp", "deps": {"conda": ["xz >=5"]}})["env_id"]
     w.runner.wait(w.task_submit({"command": "true", "env": env,
                                  "site": "local"})["job_id"], 900)
+    # freshly-written dirs get a concurrency grace window by default —
+    # zero it so the just-created ghost is visible to this test
+    site_cfg = w.store.get_site("local")["config"]
+    site_cfg.setdefault("policy", {})["orphan_grace_minutes"] = 0
+    w.register_site("local", "local", site_cfg)
     fp = w.site_footprint("local")
     assert fp["free_bytes"] > 0                     # the premise, reported
     assert fp["realizations"][0]["evictable"] is True

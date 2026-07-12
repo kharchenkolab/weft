@@ -231,7 +231,13 @@ class EnvSpec:
             system_requirements={**parent.system_requirements,
                                  **self.system_requirements},
             notes=parent.notes + self.notes,
-            step_notes={**parent.step_notes, **self.step_notes},
+            # child steps land AFTER the parent's in the merged list — their
+            # notes shift with them (else they annotate, and clobber notes
+            # on, the parent's steps)
+            step_notes={**parent.step_notes,
+                        **{(str(int(k) + len(parent.post_install))
+                            if k.isdigit() else k): v
+                           for k, v in self.step_notes.items()}},
         )
 
     def weakly_reproducible(self) -> bool:

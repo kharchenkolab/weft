@@ -277,7 +277,11 @@ class JobRunner:
                 if job_id:
                     stored = self.store.get_job(job_id)["task"]
                     stored["env"] = new_id
-                    self.store.update_job(job_id, task=stored)
+                    # re-key the memo index too: the result about to be
+                    # recorded was computed under the REVISED env, and must
+                    # never satisfy a memo lookup for the original EnvID
+                    self.store.update_job(job_id, task=stored,
+                                          task_hash=task.task_hash())
             else:
                 # same identity, lock re-derived — nothing to report to the
                 # record; just clear the failed realization and rebuild

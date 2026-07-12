@@ -98,6 +98,10 @@ class Store:
             self._conn.execute("ALTER TABLE realizations ADD COLUMN bytes INTEGER")
             self._conn.execute("ALTER TABLE realizations ADD COLUMN last_used REAL")
         self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS spec_aliases("
+            "spec_hash TEXT PRIMARY KEY, env_id TEXT, created_at REAL)"
+        )
+        self._conn.execute(
             "CREATE TABLE IF NOT EXISTS metrics("
             "ts REAL, site TEXT, key TEXT, value REAL)"
         )
@@ -178,9 +182,23 @@ class Store:
     # -- specs / envs -----------------------------------------------------
 
     def put_spec(self, spec_hash: str, name: str, body: dict) -> None:
+        # upsert: same hash = same semantic spec (the hash excludes only
+        # identity-neutral notes), so last-write-wins is exactly how notes
+        # get attached to an existing spec without forking its identity
         self._write(
-            "INSERT OR IGNORE INTO specs VALUES(?,?,?,?)",
+            "INSERT INTO specs(spec_hash, name, body, created_at) "
+            "VALUES(?,?,?,?) ON CONFLICT(spec_hash) DO UPDATE SET "
+            "name=excluded.name, body=excluded.body",
             (spec_hash, name, _j(body), time.time()),
+        )
+
+    def put_spec_alias(self, spec_hash: str, env_id: str) -> None:
+        """A spec that reached an existing env through an adaptive path
+        (soft-constraint relaxation): re-ensuring it must be a cache hit."""
+        self._write(
+            "INSERT OR IGNORE INTO spec_aliases(spec_hash, env_id, "
+            "created_at) VALUES(?,?,?)",
+            (spec_hash, env_id, time.time()),
         )
 
     def get_spec(self, spec_hash: str) -> dict | None:
@@ -244,6 +262,10 @@ class Store:
             "SELECT env_id FROM envs WHERE spec_hash=? ORDER BY created_at DESC LIMIT 1",
             (spec_hash,),
         )
+        if r:
+            return r["env_id"]
+        r = self._row("SELECT env_id FROM spec_aliases WHERE spec_hash=?",
+                      (spec_hash,))
         return r["env_id"] if r else None
 
     # -- realizations ------------------------------------------------------
@@ -298,7 +320,8 @@ class Store:
         chunks: list[str] | None = None, meta: dict | None = None,
     ) -> None:
         self._write(
-            "INSERT OR IGNORE INTO datarefs VALUES(?,?,?,?,?)",
+            "INSERT OR IGNORE INTO datarefs(ref, kind, bytes, chunks, meta) "
+            "VALUES(?,?,?,?,?)",
             (ref, kind, nbytes, _j(chunks) if chunks else None, _j(meta or {})),
         )
 
@@ -311,6 +334,10 @@ class Store:
             "chunks": json.loads(r["chunks"]) if r["chunks"] else None,
             "meta": json.loads(r["meta"]),
         }
+
+    def all_datarefs(self) -> list[dict]:
+        return [{"ref": r["ref"], "meta": json.loads(r["meta"] or "{}")}
+                for r in self._rows("SELECT ref, meta FROM datarefs")]
 
     def datarefs_with_meta(self, key: str, value: str) -> list[dict]:
         rows = self._rows("SELECT ref, meta FROM datarefs")
@@ -395,13 +422,15 @@ class Store:
         self, job_id: str, *, state: str | None = None,
         sched_handle: str | None = None, error: dict | None = None,
         manifest: dict | None = None, queue_reason: str | None = None,
-        task: dict | None = None,
+        task: dict | None = None, task_hash: str | None = None,
     ) -> None:
         sets, vals = ["updated_at=?"], [time.time()]
         if state is not None:
             sets.append("state=?"); vals.append(state)
         if task is not None:
             sets.append("task=?"); vals.append(_j(task))
+        if task_hash is not None:
+            sets.append("task_hash=?"); vals.append(task_hash)
         if queue_reason is not None:
             sets.append("queue_reason=?"); vals.append(queue_reason)
         if sched_handle is not None:
@@ -562,7 +591,8 @@ class Store:
     # -- metrics (measured reality feeding placement/estimates over time) ------
 
     def add_metric(self, site: str, key: str, value: float) -> None:
-        self._write("INSERT INTO metrics VALUES(?,?,?,?)",
+        self._write("INSERT INTO metrics(ts, site, key, value) "
+                    "VALUES(?,?,?,?)",
                     (time.time(), site, key, float(value)))
 
     def metric_summary(self, site: str, key: str, days: float = 30) -> dict:

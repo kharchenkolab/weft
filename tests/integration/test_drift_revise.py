@@ -20,14 +20,18 @@ def w(tmp_path, pixi_bin):
 
 def test_diff_is_package_level():
     old = {"platforms": {"linux-64": [
-        {"name": "numpy", "version": "2.0.1"},
-        {"name": "gone", "version": "1.0"}]}}
+        {"kind": "conda", "name": "numpy", "version": "2.0.1"},
+        {"kind": "conda", "name": "gone", "version": "1.0"}]}}
     new = {"platforms": {"linux-64": [
-        {"name": "numpy", "version": "2.1.0"},
-        {"name": "fresh", "version": "0.1"}]}}
+        {"kind": "conda", "name": "numpy", "version": "2.1.0"},
+        {"kind": "conda", "name": "fresh", "version": "0.1"}]}}
     d = diff_envs(old, new)
-    assert d["changed"] == [{"name": "numpy", "from": "2.0.1", "to": "2.1.0"}]
-    assert d["added"] == ["fresh"] and d["removed"] == ["gone"]
+    # keys carry platform and kind: multi-platform envs can move a package
+    # on one platform only
+    assert d["changed"] == [{"name": "linux-64/conda:numpy",
+                             "from": "2.0.1", "to": "2.1.0"}]
+    assert d["added"] == ["linux-64/conda:fresh"]
+    assert d["removed"] == ["linux-64/conda:gone"]
 
 
 def _break_lock(w, env_id):

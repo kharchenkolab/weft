@@ -740,16 +740,19 @@ class Weft:
         from . import gc as _gc
         return _gc.sweep(self, site, confirm=confirm)
 
-    def env_evict(self, env_id: str, site: str, archive: bool = False) -> dict:
+    def env_evict(self, env_id: str, site: str, archive: bool = False,
+                  cascade: bool = False) -> dict:
         """Reclaim a realized environment's disk (GBs) while keeping the
         ability to come back. Default: drop the prefix — the site's shared
         package cache stays warm, so re-materialization is seconds and needs
         no network. archive=True additionally packs the env and keeps the
         blob on the CONTROLLER (reclaims ~100% of site space and rebuilds
-        with no site network — the air-gapped path). Distinct from
+        with no site network — the air-gapped path). Refuses if overlay envs
+        stack on this prefix (cascade=True evicts them too). Distinct from
         env_repair: this is reclaiming, not fixing."""
         from . import evict as _evict
-        return _evict.evict(self, env_id, site, archive=archive)
+        return _evict.evict(self, env_id, site, archive=archive,
+                            cascade=cascade)
 
     def gc_packages(self, site: str, confirm: bool = False) -> dict:
         """Clear the site's SHARED package cache. Consequential: after this,
@@ -805,7 +808,9 @@ class Weft:
         m = job["manifest"] or {}
         node = {
             "schema": "provenance:v1",
-            "reproducibility": m.get("reproducibility", "fully-pinned"),
+            # no manifest (job failed or still running) = no claim — never
+            # default to the BEST grade
+            "reproducibility": m.get("reproducibility", "unknown"),
             "reproducibility_meaning": m.get("reproducibility_meaning"),
             "reproducibility_components": m.get("reproducibility_components"),
             "job_id": target, "state": job["state"], "site": job["site"],
