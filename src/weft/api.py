@@ -82,7 +82,7 @@ class Weft:
         # "skypilot" is the intended production entry; tests register mocks.
         self.provisioners: dict = {}
         from .session import SessionManager
-        self.sessions = SessionManager(self.store, self.envman)
+        self.sessions = SessionManager(self.store, self.envman, self.runner)
         from .kernel import KernelManager
         self.kernels = KernelManager(self.store, self.adapters, self.runner)
         from .service import ServiceManager
@@ -435,11 +435,11 @@ class Weft:
 
     # -- session environments (doc 03 §7) --------------------------------------
 
-    def session_start(self, env_id: str, site: str) -> dict:
-        try:
-            return self.sessions.start(env_id, self._adapter(site))
-        except WeftError as e:
-            return e.to_dict()
+    def session_start(self, env_id, site: str) -> dict:
+        """Start a mutable scratch environment for iteration. Accepts an
+        EnvID *or an inline spec* — and realizes the base itself if needed,
+        so exploration costs one call, not three."""
+        return self.sessions.start(env_id, self._adapter(site))
 
     def _session_adapter(self, session_id: str):
         s = self.store.get_session(session_id)
@@ -452,18 +452,26 @@ class Weft:
 
     def session_install(self, session_id: str, conda: list[str] | None = None,
                         pypi: list[str] | None = None) -> dict:
-        try:
-            return self.sessions.install(
-                session_id, self._session_adapter(session_id), conda, pypi
-            )
-        except WeftError as e:
-            return e.to_dict()
+        """Add packages to the session (fast: the site's package cache is
+        warm). Captured, so a snapshot carries them into the spec."""
+        return self.sessions.install(
+            session_id, self._session_adapter(session_id), conda, pypi)
 
-    def session_snapshot(self, session_id: str, name: str | None = None) -> dict:
-        try:
-            return self.sessions.snapshot(session_id, name)
-        except WeftError as e:
-            return e.to_dict()
+    def session_run_installer(self, session_id: str, cmd: str,
+                              note: str = "") -> dict:
+        """Run a bespoke install that no index expresses (R
+        install.packages, pip install -e, vendored make install). A normal
+        move — it is captured and a snapshot carries it as a labeled
+        post_install step (grade: escape-hatch). `note` records why."""
+        return self.sessions.run_installer(
+            session_id, self._session_adapter(session_id), cmd, note)
+
+    def session_snapshot(self, session_id: str, name: str | None = None,
+                         notes: list[str] | None = None) -> dict:
+        """Freeze the session's additions into a real, citable EnvID (a
+        fresh whole-spec solve). Bespoke installers ride along as labeled
+        post_install steps; `notes` records the rationale."""
+        return self.sessions.snapshot(session_id, name, notes)
 
     def session_stop(self, session_id: str) -> dict:
         return self.sessions.stop(session_id, self._session_adapter(session_id))
@@ -808,7 +816,7 @@ PUBLIC_TOOLS = [
     "events_poll", "doctor", "reconcile", "provenance",
     "gc_plan", "gc_sweep", "gc_events",
     "session_start", "session_exec", "session_install", "session_snapshot",
-    "session_stop",
+    "session_run_installer", "session_stop",
     "kernel_start", "kernel_exec", "kernel_poll", "kernel_status",
     "kernel_transcript", "kernel_interrupt", "kernel_restart", "kernel_stop",
     "kernel_promote",

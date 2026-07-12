@@ -28,11 +28,18 @@ from .store import Store
 
 
 class SessionManager:
-    def __init__(self, store: Store, envman: EnvManager):
+    def __init__(self, store: Store, envman: EnvManager, runner=None):
         self.store = store
         self.envman = envman
+        self.runner = runner   # for auto-realizing a base env (ergonomics)
 
-    def start(self, base_env_id: str, adapter: SiteAdapter) -> dict:
+    def start(self, base: str | dict, adapter: SiteAdapter) -> dict:
+        """Accepts an EnvID *or a spec* — exploration should not cost three
+        round trips (ensure → throwaway task to realize → start)."""
+        if isinstance(base, dict):
+            base_env_id = self.envman.ensure(base)["env_id"]
+        else:
+            base_env_id = base
         env_row = self.store.get_env(base_env_id)
         if not env_row:
             raise WeftError("task.invalid", f"unknown EnvID: {base_env_id}", stage="solve")
@@ -49,13 +56,22 @@ class SessionManager:
             )
         base_rel = env_dir_rel(base_env_id)
         if not adapter.file_exists(f"{base_rel}/.weft-ready"):
-            raise WeftError(
-                "env.realize_failed",
-                "base env must be realized on the site before starting a session",
-                stage="realize",
-                hints={"suggestion": f"run any task with env {base_env_id} on "
-                                     f"{adapter.name} first, or call env.ensure"},
-            )
+            # realizing the base is weft's errand, not the agent's
+            if self.runner is None:
+                raise WeftError(
+                    "env.not_realized",
+                    f"env {base_env_id} is not realized on {adapter.name}",
+                    stage="realize",
+                    hints={"suggestion": "run any task with it there first"})
+            from .realize import ensure_realization
+            ensure_realization(
+                base_env_id, env_row, adapter, self.store,
+                caps=(site_row or {}).get("capabilities"),
+                site_config=(site_row or {}).get("config"),
+                pack_tools={"pixi_pack": self.runner.pixi_pack,
+                            "cas": self.runner.cas,
+                            "transfers": self.runner.transfers,
+                            "solvers": self.envman.solvers})
         session_id = "ses_" + uuid.uuid4().hex[:10]
         rel = f"sessions/{session_id}"
         # clone the *project* (manifest + lock); the install is a fresh
@@ -140,21 +156,61 @@ class SessionManager:
         return {"installed": {"conda": conda, "pypi": pypi},
                 "session_id": session_id}
 
-    def snapshot(self, session_id: str, name: str | None = None) -> dict:
-        """Synthesize the spec delta, re-solve properly, return a real EnvID."""
+    def run_installer(self, session_id: str, adapter: SiteAdapter, cmd: str,
+                      note: str = "") -> dict:
+        """The bespoke install that no index can express — an R
+        install.packages, a pip install -e, a vendored make install. A
+        normal, supported move: it runs in the session AND is captured, so
+        `snapshot` can carry it into the spec as a labeled post_install
+        step instead of losing it."""
+        s = self._get(session_id)
+        manifest = adapter.path(f"{s['location']}/pixi.toml")
+        r = adapter.run_activated(
+            f"cd {shlex.quote(adapter.path(s['location']))} && "
+            f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
+            f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )",
+            timeout=3600)
+        if r.rc != 0:
+            raise WeftError(
+                "env.realize_failed",
+                "session installer failed",
+                stage="realize",
+                hints={"command": cmd, "log_tail": (r.err or r.out)[-1500:]})
+        self.store.session_add_installer(session_id, cmd, note)
+        self.store.emit("session.installer", session=session_id, cmd=cmd[:200])
+        return {"session_id": session_id, "installed": cmd,
+                "captured": True,
+                "note": "snapshot will carry this as a post_install step "
+                        "(grade: escape-hatch) with your note attached"}
+
+    def snapshot(self, session_id: str, name: str | None = None,
+                 notes: list[str] | None = None) -> dict:
+        """Synthesize the spec delta, re-solve properly, return a real EnvID.
+        Captured bespoke installers ride along as labeled post_install steps."""
         s = self._get(session_id)
         env_row = self.store.get_env(s["base_env_id"])
+        installers = s.get("installers") or []
         spec = {
             "name": name or f"snapshot-of-{session_id}",
             "extends": env_row["spec_hash"],
             "deps": {"conda": s["added_conda"], "pypi": s["added_pypi"]},
         }
+        if installers:
+            spec["post_install"] = [i["cmd"] for i in installers]
+            spec["step_notes"] = {str(i): inst["note"]
+                                  for i, inst in enumerate(installers)
+                                  if inst.get("note")}
+        if notes:
+            spec["notes"] = list(notes)
         result = self.envman.ensure(spec)
         self.store.emit("session.snapshot", session=session_id,
                         env_id=result["env_id"])
-        return {**result, "spec": spec,
-                "note": "re-run the final computation under this EnvID to "
-                        "enter it into provenance"}
+        out = {**result, "spec": spec,
+               "note": "re-run the final computation under this EnvID to "
+                       "enter it into provenance"}
+        if installers:
+            out["carried_installers"] = len(installers)
+        return out
 
     def stop(self, session_id: str, adapter: SiteAdapter) -> dict:
         s = self._get(session_id)

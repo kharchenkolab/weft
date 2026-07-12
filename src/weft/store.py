@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS sessions(
   added_conda TEXT, added_pypi TEXT, state TEXT, created_at REAL);
 """
 
+_SESSION_MIGRATIONS = [
+    ("installers", "ALTER TABLE sessions ADD COLUMN installers TEXT"),
+]
+
 
 def _j(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True)
@@ -80,6 +84,15 @@ class Store:
             )
         if "queue_reason" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN queue_reason TEXT")
+        scols = {r[1] for r in self._conn.execute("PRAGMA table_info(sessions)")}
+        for col, ddl in _SESSION_MIGRATIONS:
+            if col not in scols:
+                self._conn.execute(ddl)
+        rcols = {r[1] for r in
+                 self._conn.execute("PRAGMA table_info(realizations)")}
+        if "bytes" not in rcols:
+            self._conn.execute("ALTER TABLE realizations ADD COLUMN bytes INTEGER")
+            self._conn.execute("ALTER TABLE realizations ADD COLUMN last_used REAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS metrics("
             "ts REAL, site TEXT, key TEXT, value REAL)"
@@ -208,12 +221,26 @@ class Store:
     ) -> None:
         now = time.time()
         self._write(
-            "INSERT INTO realizations VALUES(?,?,?,?,?,?,?,?) "
+            "INSERT INTO realizations(env_id, site, strategy, location, state,"
+            " log, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?) "
             "ON CONFLICT(env_id, site) DO UPDATE SET strategy=?, location=?,"
             " state=?, log=?, updated_at=?",
             (env_id, site, strategy, location, state, log, now, now,
              strategy, location, state, log, now),
         )
+
+    def touch_realization(self, env_id: str, site: str,
+                          nbytes: int | None = None) -> None:
+        """LRU/quota metadata a host GC policy needs (footprint + recency)."""
+        if nbytes is None:
+            self._write(
+                "UPDATE realizations SET last_used=? WHERE env_id=? AND site=?",
+                (time.time(), env_id, site))
+        else:
+            self._write(
+                "UPDATE realizations SET last_used=?, bytes=? "
+                "WHERE env_id=? AND site=?",
+                (time.time(), nbytes, env_id, site))
 
     def get_realization(self, env_id: str, site: str) -> dict | None:
         r = self._row(
@@ -254,7 +281,8 @@ class Store:
 
     def set_location(self, ref: str, site: str, path: str, present: bool = True) -> None:
         self._write(
-            "INSERT INTO locations VALUES(?,?,?,?,?) "
+            "INSERT INTO locations(ref, site, path, present, verified_at)"
+            " VALUES(?,?,?,?,?) "
             "ON CONFLICT(ref, site) DO UPDATE SET path=?, present=?, verified_at=?",
             (ref, site, path, int(present), time.time(),
              path, int(present), time.time()),
@@ -434,7 +462,11 @@ class Store:
     def put_session(self, session_id: str, base_env_id: str, site: str,
                     location: str) -> None:
         self._write(
-            "INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?)",
+            # column-explicit: migrations add columns, and a positional
+            # INSERT would break the moment one lands
+            "INSERT INTO sessions(session_id, base_env_id, site, location,"
+            " added_conda, added_pypi, state, created_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
             (session_id, base_env_id, site, location, "[]", "[]",
              "active", time.time()),
         )
@@ -443,13 +475,23 @@ class Store:
         r = self._row("SELECT * FROM sessions WHERE session_id=?", (session_id,))
         if not r:
             return None
+        keys = r.keys()
         return {
             "session_id": r["session_id"], "base_env_id": r["base_env_id"],
             "site": r["site"], "location": r["location"],
             "added_conda": json.loads(r["added_conda"]),
             "added_pypi": json.loads(r["added_pypi"]),
+            "installers": json.loads(r["installers"]) if "installers" in keys
+            and r["installers"] else [],
             "state": r["state"],
         }
+
+    def session_add_installer(self, session_id: str, cmd: str,
+                              note: str = "") -> None:
+        s = self.get_session(session_id)
+        self._write(
+            "UPDATE sessions SET installers=? WHERE session_id=?",
+            (_j(s["installers"] + [{"cmd": cmd, "note": note}]), session_id))
 
     def session_add_deps(self, session_id: str, conda: list[str], pypi: list[str]) -> None:
         s = self.get_session(session_id)
@@ -500,9 +542,11 @@ class Store:
 
     def put_service(self, service_id: str, site: str, jobdir: str,
                     handle: str, ports: list[int], task: dict) -> None:
-        self._write("INSERT INTO services VALUES(?,?,?,?,?,?,?,?)",
-                    (service_id, site, jobdir, handle, _j(ports), "starting",
-                     _j(task), time.time()))
+        self._write(
+            "INSERT INTO services(service_id, site, jobdir, handle, ports,"
+            " state, task, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (service_id, site, jobdir, handle, _j(ports), "starting",
+             _j(task), time.time()))
 
     def get_service(self, service_id: str) -> dict | None:
         r = self._row("SELECT * FROM services WHERE service_id=?",
@@ -531,7 +575,9 @@ class Store:
                    env_id: str | None, jobdir: str, handle: str) -> None:
         now = time.time()
         self._write(
-            "INSERT INTO kernels VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO kernels(kernel_id, site, lang, env_id, jobdir,"
+            " handle, state, blocks_run, created_at, last_used)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
             (kernel_id, site, lang, env_id, jobdir, handle, "running",
              0, now, now),
         )
