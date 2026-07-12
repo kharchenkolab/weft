@@ -85,7 +85,20 @@ base = w.env_ensure({"name": "base", "deps": {"conda": ["python =3.12", "numpy"]
 from weft.spec import EnvSpec
 parent_hash = EnvSpec.from_dict({...same base dict...}).spec_hash()
 child = w.env_ensure({"extends": parent_hash, "deps": {"conda": ["emcee"]}})
+
+# or freeze the base and add a package mid-analysis: extends_env pins the
+# parent's ENTIRE resolution (incl. layer snapshot dates and github SHAs),
+# so the child is a superset by construction — and realizes as an O(delta)
+# overlay on the parent's prefix when the delta is pure language-layer
+quick = w.env_ensure({"extends_env": base["env_id"],
+                      "deps": {"pypi": ["emcee"]}})
+quick["delta"]["layerable"]   # True → overlay fast path; else why-not text
 ```
+
+`extends` lets the base move (full re-solve); `extends_env` never moves it
+(a contradicting delta is `env.layer_conflict`, not a silent version
+change). Overlay vs full prefix is a realization detail: same EnvID, same
+results — held byte-identical by a conformance test.
 
 Re-solving an unchanged spec never happens implicitly; pass
 `update=True` to `env_ensure` to pick up new channel state (old EnvID
@@ -249,9 +262,19 @@ w.env_ensure({"name": "jl", "deps": {"conda": ["julia"],
 ```python
 w.gc_plan()                      # reclaimable bytes per site (dry)
 w.gc_sweep("hpc", confirm=True)  # explicit; content rebuilds on next use
+w.env_evict(env_id, "hpc")       # reclaim a prefix; rebuild is seconds
+w.env_evict(parent, "hpc", cascade=True)   # take overlay children with it
 w.gc_events(older_than_days=30)
 w.task_logs(job_id, follow_cursor=0)   # live log following
 ```
+
+Eviction refuses (`env.evict_blocked`) while queued/running jobs, open
+sessions/kernels, or realized overlay children depend on the env — the
+hints name them and the lever. GC recency is *usage* (`last_used`), not
+state age, sweeps go through the same guarded evict path, and orphan
+scans never touch dirs that carry a valid env marker, a fresh lease, or
+recent writes (other users' work on shared roots is out of scope by
+construction).
 
 ### Services (endpoint-publishing processes)
 

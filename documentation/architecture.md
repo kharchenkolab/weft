@@ -208,6 +208,26 @@ probing cannot see (and simulates air-gapped compute in tests). The
 `container` strategy currently falls back to `packed` with an emitted
 `realize.fallback` event — same no-network property, honest record.
 
+**Overlay realization** (O(delta) stacking): a child solved with
+`extends_env` — the parent's entire resolution pinned exactly, including
+layer snapshot dates and github commit SHAs, so the child's lock is a
+superset *by construction* — realizes by reusing the parent's ready prefix
+and materializing only the delta into child-owned dirs (`pylib/`, `rlib/`,
+a Julia project), composed at runtime by each ecosystem's native search
+path. Eligibility is conservative: language-layer deltas only (conda
+packages carry embedded prefixes/RPATHs and never compose from sibling
+dirs), extras equal to the parent's, a pixi-prefix parent on an
+index-connected site, depth 1. Source-built deltas compile with a
+weft-owned toolchain env (never added to the user's env) against the
+parent's headers, cached by (source, parent EnvID, platform, resolved
+toolchain lock). A composition gate loads every delta package plus a
+parent sample; any failure emits `realize.overlay_fallback` and builds
+the same EnvID as a full prefix — overlay is a realization detail, held
+to byte-identical task outputs by a conformance test. Integrity fences go
+two-deep (the child's marker records the parent's executable
+fingerprint → `realize.parent_changed` rebuilds), and eviction
+refuses/cascades over live overlay children (`env.evict_blocked`).
+
 **Per-site user policy** (`policy.py`): the site owner can set structured
 rules — `partitions_allowed` (allowlist, also picks the default),
 `max_gpus`, `max_concurrent_jobs`, `storage` roles — which weft *enforces*

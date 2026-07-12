@@ -21,9 +21,23 @@ w.env_ensure({
 })   # → {"env_id": "env:v1:…", "status": "solved"|"cached", "summary": …}
 ```
 
-- **Layering:** `{"extends": <parent spec_hash>, "deps": {...}}` — whole-spec
-  re-solve, new EnvID, cheap build (shared package cache). Never install
-  into an existing env.
+- **Layering, two flavors — never install into an existing env:**
+  - `{"extends": <parent SPEC hash>, "deps": {...}}` — whole-spec
+    re-solve. The base may move. New EnvID, cheap build (shared cache).
+  - `{"extends_env": <parent EnvID>, "deps": {...}}` — **freeze the base**:
+    every package in the parent's lock becomes an exact pin (conda, pypi,
+    cran/julia layers including github SHAs and the parent's snapshot
+    date), so the child's lock is a superset *by construction*. The solve
+    is fast (tiny search space), and if the delta is pure language-layer
+    (`deps.pypi` / `deps.cran` / `deps.julia`), the child **realizes as an
+    O(delta) overlay** on the parent's already-realized prefix: seconds and
+    megabytes for "the same env plus one package". A conda delta, an extras
+    delta (modules/post_install), or a delta contradicting a frozen pin
+    can't overlay — the response's `delta.why` explains, and the same
+    EnvID just realizes as a full prefix (identical behavior, more disk).
+    A contradiction raises `env.layer_conflict` naming the package and the
+    lever (`extends` for a free re-solve). This is the right tool
+    mid-analysis: "add emcee to what I have" without re-solving the world.
 - **Re-solve only on request:** `env_ensure(spec, update=True)` picks up new
   channel state; the old EnvID stays valid for reproducing old results.
 - **GPU:** `env_gpu_hint(site)` reads the probed driver and returns the
@@ -122,5 +136,39 @@ still to fail with a cause.
 
 **Warm near-matches.** `env_find_near(spec, site="hpc")` lists already-
 realized envs close to what you want, with their distance, missing
-packages, and grade. A query, never a substitution: you decide whether the
-instant near-match beats an exact solve.
+packages, **version mismatches** (a present-but-wrong-version package
+counts against the match and is shown, not hidden), and grade. A query,
+never a substitution: you decide whether the instant near-match beats an
+exact solve.
+
+## Overlay mechanics (what actually happens)
+
+When a child `extends_env` a parent that is realized on the site, the
+child env dir holds ONLY its delta: `pylib/` (pip `--target`, artifact
+hashes from the lock), `rlib/` (R delta, `.libPaths`-composed), or a
+Julia project instantiated against the shared depot. Its `activate.sh`
+sources the parent's and appends `PYTHONPATH`/`R_LIBS`/`JULIA_PROJECT`
+lines. Same EnvID, same behavior — a conformance test holds overlay and
+full-prefix realizations to byte-identical task outputs.
+
+- **Source builds** (github R packages, sdists) compile with a weft-owned
+  build toolchain (never added to YOUR env), against the parent's
+  headers/libs; artifacts are cached by (source SHA, parent EnvID,
+  platform, resolved toolchain lock) — an `env_repair` + rebuild, or a
+  colleague on the same site, pays an untar, not a compile
+  (`overlay.compile_cache_hit`).
+- **Verification gate:** after composing, every delta package is loaded
+  (R: `library()`; python: metadata visibility by distribution name) plus
+  a sample of the parent's — shadowing or ABI trouble triggers
+  `realize.overlay_fallback` and an automatic full build. You never keep a
+  broken overlay.
+- **Integrity is two-deep:** the child's marker records the parent's
+  executable fingerprint; a repaired/tampered/evicted parent rebuilds the
+  child on next use (`realize.parent_changed`).
+- **Eviction:** `env_evict(parent)` refuses while overlay children are
+  realized (`env.evict_blocked`, dependents listed); `cascade=True` evicts
+  them with it (all rebuild cache-warm). Evicting a child alone is always
+  fine — it owns only its delta. With the parent gone, the child's next
+  realization is a full prefix: honest, automatic.
+- **Air-gapped sites don't overlay** (delta installs need index access) —
+  they get packed/archive realization of the same EnvID.
