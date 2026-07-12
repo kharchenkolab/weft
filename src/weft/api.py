@@ -590,6 +590,7 @@ class Weft:
             for k in self.store.list_kernels(state="running")
             if time.time() - k["last_used"] > 3600
         ]
+        events_n = self.store.events_count()
         return {
             "sites": checks,
             "nonterminal_jobs": [
@@ -597,6 +598,7 @@ class Weft:
                 for j in pending
             ],
             "idle_kernels": idle_kernels or None,
+            "events_rows": events_n if events_n > 100_000 else None,
             "suggestion": "call reconcile() if nonterminal jobs look stale"
             if pending else
             ("stop idle kernels (or set policy.kernel_idle_stop_s)"
@@ -605,6 +607,28 @@ class Weft:
 
     def reconcile(self) -> list[dict]:
         return self.runner.reconcile()
+
+    # -- garbage collection / retention ------------------------------------------
+
+    def gc_plan(self, site: str | None = None) -> dict:
+        """Dry-run eviction plan per site: idle realizations + stale cached
+        refs (with pin status) and reclaimable bytes. Free to call; nothing
+        is deleted."""
+        from . import gc as _gc
+        return _gc.plan(self, site)
+
+    def gc_sweep(self, site: str, confirm: bool = False) -> dict:
+        """Execute the eviction plan for a site — only with confirm=True
+        (nothing on a shared system is deleted implicitly, doc 03 §6).
+        Evicted content re-stages/rebuilds automatically on next use."""
+        from . import gc as _gc
+        return _gc.sweep(self, site, confirm=confirm)
+
+    def gc_events(self, older_than_days: float = 30) -> dict:
+        """Prune old events (terminal digests and failures are kept)."""
+        pruned = self.store.prune_events(older_than_days)
+        self.store.audit_log("user", "gc.events", result=f"pruned={pruned}")
+        return {"pruned": pruned, "remaining": self.store.events_count()}
 
     # -- provenance -------------------------------------------------------------
 
@@ -692,6 +716,7 @@ PUBLIC_TOOLS = [
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_result", "array_retry",
     "events_poll", "doctor", "reconcile", "provenance",
+    "gc_plan", "gc_sweep", "gc_events",
     "session_start", "session_exec", "session_install", "session_snapshot",
     "session_stop",
     "kernel_start", "kernel_exec", "kernel_poll", "kernel_status",

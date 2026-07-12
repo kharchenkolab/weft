@@ -144,9 +144,12 @@ class DataManager:
             method.transfer(blobs, self.cas, endpoint, progress=_progress,
                             verify=self.verify_map_for(plan.to_transfer))
             elapsed = round(time.time() - t0, 2)
+            rate = round(total / max(elapsed, 0.01) / 1e6, 2)
             self.store.emit("transfer.done", job_id=job_id, site=adapter.name,
                             bytes_total=total, elapsed_s=elapsed,
-                            rate_mbps=round(total / max(elapsed, 0.01) / 1e6, 2))
+                            rate_mbps=rate)
+            if total > 1 << 20:   # tiny transfers say nothing about the pipe
+                self.store.add_metric(adapter.name, "transfer_mbps", rate)
             for ref in plan.to_transfer:
                 self.store.set_location(ref, adapter.name, endpoint["cas_root"])
         return plan.to_dict()

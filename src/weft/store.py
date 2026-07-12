@@ -81,6 +81,13 @@ class Store:
         if "queue_reason" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN queue_reason TEXT")
         self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS metrics("
+            "ts REAL, site TEXT, key TEXT, value REAL)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS metrics_by_key ON metrics(site, key)"
+        )
+        self._conn.execute(
             "CREATE TABLE IF NOT EXISTS kernels("
             "kernel_id TEXT PRIMARY KEY, site TEXT, lang TEXT, env_id TEXT,"
             "jobdir TEXT, handle TEXT, state TEXT, blocks_run INTEGER,"
@@ -211,6 +218,11 @@ class Store:
     def realizations_for(self, env_id: str) -> list[dict]:
         return [dict(r) for r in self._rows(
             "SELECT * FROM realizations WHERE env_id=?", (env_id,)
+        )]
+
+    def realizations_for_site(self, site: str) -> list[dict]:
+        return [dict(r) for r in self._rows(
+            "SELECT * FROM realizations WHERE site=?", (site,)
         )]
 
     # -- data locations ------------------------------------------------------
@@ -444,6 +456,39 @@ class Store:
         self._write(
             "UPDATE sessions SET state=? WHERE session_id=?", (state, session_id)
         )
+
+    # -- metrics (measured reality feeding placement/estimates over time) ------
+
+    def add_metric(self, site: str, key: str, value: float) -> None:
+        self._write("INSERT INTO metrics VALUES(?,?,?,?)",
+                    (time.time(), site, key, float(value)))
+
+    def metric_summary(self, site: str, key: str, days: float = 30) -> dict:
+        rows = self._rows(
+            "SELECT value FROM metrics WHERE site=? AND key=? AND ts>? "
+            "ORDER BY value", (site, key, time.time() - days * 86400))
+        vals = [r["value"] for r in rows]
+        if not vals:
+            return {"n": 0}
+        return {"n": len(vals), "median": vals[len(vals) // 2],
+                "p90": vals[int(len(vals) * 0.9)], "min": vals[0],
+                "max": vals[-1]}
+
+    # -- events retention -------------------------------------------------------
+
+    def events_count(self) -> int:
+        return self._row("SELECT COUNT(*) AS n FROM events")["n"]
+
+    def prune_events(self, older_than_days: float = 30,
+                     keep_kinds: tuple = ("array.done", "job.failed",
+                                          "budget.watchdog")) -> int:
+        cutoff = time.time() - older_than_days * 86400
+        placeholders = ",".join("?" * len(keep_kinds))
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                f"DELETE FROM events WHERE ts < ? AND kind NOT IN ({placeholders})",
+                (cutoff, *keep_kinds))
+            return cur.rowcount
 
     # -- kernels ---------------------------------------------------------------
 

@@ -233,6 +233,10 @@ class SitePoller:
                 self.runner.store.update_job(w.job_id, queue_reason=reason)
         if state == "running" and w.last_state == "QUEUED":
             w.last_state = "RUNNING"
+            # measured queue wait: the raw material for honest ETAs
+            self.runner.store.add_metric(
+                self.site, "queue_wait_s",
+                round(time.time() - w.started_at, 1))
             self.runner.set_job_state(w.job_id, "RUNNING",
                                       **self.runner.group_payload(w.array_group))
 
