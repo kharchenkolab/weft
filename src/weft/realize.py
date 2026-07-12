@@ -160,7 +160,9 @@ def ensure_realization(
                               modules_init)
             _realize_layers(env_id, env_row, adapter, rel,
                             (pack_tools or {}).get("solvers") or {},
-                            store.emit)
+                            store.emit,
+                            offline=strategy.endswith("packed"),
+                            pack_tools=pack_tools)
             _run_post_install(env_row, adapter, rel)
             _spot_check_and_mark(env_id, env_row, adapter, rel, strategy)
         except WeftError as e:
@@ -216,10 +218,16 @@ def _build_prefix(
 
 
 def _realize_layers(env_id: str, env_row: dict, adapter: SiteAdapter,
-                    rel: str, solvers: dict, emit) -> None:
+                    rel: str, solvers: dict, emit,
+                    offline: bool = False, pack_tools: dict | None = None) -> None:
     """Non-conda layers (cran, julia, …) install on top of the base env,
     each appending its activation lines. One progress event per layer —
-    source builds can be slow and the agent should see where time goes."""
+    source builds can be slow and the agent should see where time goes.
+
+    `offline` (air-gapped sites, design B2): the layer's packages are
+    downloaded controller-side, shipped as a CAS blob, and installed with
+    no network — symmetric to the conda `packed` strategy. Solvers that
+    cannot pack say so with a structured reason."""
     import time as _t
     layers = env_row["canonical"].get("layers") or {}
     for eco, layer in sorted(layers.items()):
@@ -234,8 +242,24 @@ def _realize_layers(env_id: str, env_row: dict, adapter: SiteAdapter,
             )
         t0 = _t.time()
         emit("realize.layer", env_id=env_id, site=adapter.name,
-             layer=eco, packages=len(layer.get("records", [])))
-        lines = solver.realize_layer(layer, adapter, rel)
+             layer=eco, packages=len(layer.get("records", [])),
+             offline=offline)
+        if offline:
+            packer = getattr(solver, "pack_layer", None)
+            if packer is None:
+                raise WeftError(
+                    "env.unsatisfiable_on_site",
+                    f"the {eco} layer cannot be delivered to a site without "
+                    "network (no packing support)",
+                    stage="realize",
+                    hints={"layer": eco,
+                           "suggestion": f"move these deps to conda-forge "
+                                         f"equivalents, build them as a task, "
+                                         f"or use a site with index access"},
+                )
+            lines = packer(layer, adapter, rel, pack_tools or {})
+        else:
+            lines = solver.realize_layer(layer, adapter, rel)
         if lines:
             current = adapter.read_file(f"{rel}/activate.sh").decode()
             adapter.write_file(f"{rel}/activate.sh",

@@ -349,8 +349,114 @@ class CranSolver:
             )
         return f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"'
 
+    def pack_layer(self, layer: dict, adapter, env_rel: str,
+                   pack_tools: dict) -> str:
+        """Air-gapped delivery (design B2): download the locked closure
+        controller-side, ship it as one CAS blob through the data plane,
+        install offline in dependency order. Symmetric to conda's `packed`."""
+        import json as _json
+        import shlex
+        import subprocess
+        import tarfile
+        import tempfile
+        import urllib.request
+
+        cas = pack_tools.get("cas")
+        transfers = pack_tools.get("transfers", {})
+        if cas is None:
+            raise WeftError(
+                "env.realize_failed",
+                "packed cran layer needs the controller CAS",
+                stage="realize")
+        records = layer["records"]
+        order = _topo_order(records)
+        with tempfile.TemporaryDirectory(prefix="weft-cranpack-") as td:
+            tdp = Path(td)
+            (tdp / "src").mkdir()
+            files = []
+            for rec in order:
+                if rec.get("remote_sha"):        # github: tarball by SHA
+                    url, fn = rec["tarball"], f"{rec['name']}.tar.gz"
+                else:                            # cran: source tarball
+                    base = layer["snapshot"].replace("__linux__/focal/", "")
+                    url = (f"{base}/src/contrib/"
+                           f"{rec['name']}_{rec['version']}.tar.gz")
+                    fn = f"{rec['name']}_{rec['version']}.tar.gz"
+                req = urllib.request.Request(url, headers={"User-Agent": "weft"})
+                try:
+                    data = urllib.request.urlopen(req, timeout=120).read()
+                except Exception as e:
+                    raise WeftError(
+                        "env.realize_failed",
+                        f"could not download {rec['name']} for offline packing",
+                        stage="realize",
+                        hints={"url": url, "detail": str(e)[-200:]}) from e
+                (tdp / "src" / fn).write_bytes(data)
+                files.append(fn)
+            # one filename per line, in install order — a shell loop reads it
+            (tdp / "order.txt").write_text("\n".join(files) + "\n")
+            archive = tdp / "cran-layer.tar"
+            with tarfile.open(archive, "w") as tar:
+                tar.add(tdp / "src", arcname="src")
+                tar.add(tdp / "order.txt", arcname="order.txt")
+            info = cas.register_file(archive)
+
+        digest = info.ref.split(":")[-1]
+        endpoint = adapter.transfer_endpoint()
+        method = transfers.get(endpoint["method"])
+        method.transfer([(digest, info.bytes)], cas, endpoint,
+                        verify={digest: info.plain_sha256 or digest})
+        site_tar = f"{endpoint['cas_root']}/{digest[:2]}/{digest}"
+        env_dir = adapter.path(env_rel)
+        rlib = f"{env_dir}/rlib"
+        pack_dir = f"{env_dir}/cran-pack"
+        r = adapter.run_activated(
+            f". {shlex.quote(env_dir)}/activate.sh && "
+            f"rm -rf {shlex.quote(pack_dir)} && mkdir -p {shlex.quote(pack_dir)} "
+            f"{shlex.quote(rlib)} && tar -xf {shlex.quote(site_tar)} "
+            f"-C {shlex.quote(pack_dir)} && "
+            # install in dependency order, offline, from source
+            f"cd {shlex.quote(pack_dir)}/src && "
+            f"while read -r f; do "
+            f"R CMD INSTALL --library={shlex.quote(rlib)} \"$f\" || exit 1; "
+            f"done < ../order.txt",
+            timeout=7200)
+        if r.rc != 0:
+            raise WeftError(
+                "env.realize_failed",
+                "offline cran layer install failed on site",
+                stage="realize",
+                hints={"ecosystem": "cran",
+                       "log_tail": (r.err or r.out)[-1500:],
+                       "note": "packages build from source on the site; the "
+                               "conda layer must provide the toolchain "
+                               "(c-compiler, fortran-compiler, make)"})
+        return f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"'
+
     def why(self, env_row: dict, package: str, workdir: Path) -> str:
         return f"{package}: see the cran layer record (env_why returns it)"
+
+
+def _topo_order(records: list[dict]) -> list[dict]:
+    """Dependency order for offline installs (the graph the solver stored)."""
+    by_name = {r["name"]: r for r in records}
+    out, seen, temp = [], set(), set()
+
+    def visit(name: str) -> None:
+        if name in seen or name not in by_name:
+            return
+        if name in temp:      # cycles shouldn't exist in CRAN; be safe
+            return
+        temp.add(name)
+        for dep in by_name[name].get("deps", []):
+            visit(dep)
+        temp.discard(name)
+        seen.add(name)
+        out.append(by_name[name])
+
+    for r in records:
+        visit(r["name"])
+    return out
 
 
 class JuliaSolver:

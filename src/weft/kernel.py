@@ -219,6 +219,72 @@ class KernelManager:
         self.store.emit("kernel.stopped", kernel=kernel_id)
         return {"kernel_id": kernel_id, "state": "stopped"}
 
+    def promote(self, kernel_id: str, blocks: list[int],
+                dataman=None) -> dict:
+        """Elevate exploratory kernel results into the record — honestly.
+
+        Captures the FULL ordered transcript through the last promoted
+        block (the state that produced block N is a function of blocks
+        0..N, all of which we hold) plus the promoted blocks' artifacts,
+        into a manifest with reproducibility="transcript": replayable (the
+        same mechanism kernel_restart uses), one rung below content-pinned
+        tasks, above post_install's "weak". Default doctrine is unchanged —
+        promotion is explicit and labeled."""
+        import uuid as _uuid
+        k = self._get(kernel_id)
+        if not blocks:
+            raise WeftError("task.invalid", "blocks=[...] required",
+                            stage="collecting")
+        adapter = self._adapter(k["site"])
+        last = max(blocks)
+        transcript = self.transcript(kernel_id, last=10**6)
+        by_block = {e["block"]: e for e in transcript}
+        for b in blocks:
+            e = by_block.get(b)
+            if e is None or e.get("rc") is None:
+                raise WeftError("task.invalid",
+                                f"block {b} has not finished",
+                                stage="collecting")
+            if e["rc"] != 0:
+                raise WeftError(
+                    "task.invalid",
+                    f"block {b} failed (rc={e['rc']}) — only successful "
+                    "blocks can be promoted", stage="collecting",
+                    hints={"transcript": "kernel_transcript shows rc per block"})
+
+        from .task import Task
+        pseudo = Task.from_dict({
+            "command": f"[kernel promotion of blocks {blocks}]",
+            "env": k["env_id"],
+            "outputs": [f"blocks/{b:04d}.artifacts/" for b in blocks],
+            "site": k["site"]})
+        entries, total = dataman.collect_outputs(adapter, k["jobdir"], pseudo)
+        from .ids import task_id
+        chain = [{"block": e["block"], "code": e.get("code", ""),
+                  "rc": e.get("rc")} for e in transcript
+                 if e["block"] <= last]
+        job_id = "jb_" + _uuid.uuid4().hex[:12]
+        manifest = {
+            "schema": "manifest:v1",
+            "reproducibility": "transcript",
+            "job_id": job_id, "kernel_id": kernel_id,
+            "task_hash": task_id({"kernel_transcript": chain,
+                                  "env": k["env_id"]}),
+            "env_id": k["env_id"], "site": k["site"],
+            "exit_code": 0, "wall_s": None, "max_rss_gb": None,
+            "transcript": chain,
+            "outputs": entries, "output_bytes": total,
+            "logs": {"tail": "", "site_path": adapter.path(k["jobdir"])},
+        }
+        self.store.put_job(job_id, manifest["task_hash"], pseudo.to_dict(),
+                           k["site"], "DONE")
+        self.store.update_job(job_id, manifest=manifest)
+        self.store.emit("kernel.promoted", kernel=kernel_id, job_id=job_id,
+                        blocks=blocks)
+        self.store.audit_log("agent", "kernel.promote", site=k["site"],
+                             command=f"{kernel_id} blocks={blocks}")
+        return manifest
+
     def restart(self, kernel_id: str, replay: str = "successful") -> dict:
         """After a death (or deliberately): starts a NEW kernel (fresh
         kernel_id — returned; the old one stays dead/stopped for its

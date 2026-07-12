@@ -49,13 +49,20 @@ class LocalAdapter(SiteAdapter):
         if not shim_dst.exists() or shim_dst.read_bytes() != SHIM_SRC.read_bytes():
             shim_dst.write_bytes(SHIM_SRC.read_bytes())
             shim_dst.chmod(0o755)
-        if self._pixi_source and not (bin_dir / "pixi").exists():
-            try:
-                os.link(self._pixi_source, bin_dir / "pixi")
-            except OSError:
-                import shutil
-                shutil.copy2(self._pixi_source, bin_dir / "pixi")
-                (bin_dir / "pixi").chmod(0o755)
+        if self._pixi_source:
+            # pixi plus its siblings (pixi-unpack for packed realizations)
+            src_dir = Path(self._pixi_source).parent
+            for name, src in [("pixi", Path(self._pixi_source)),
+                              ("pixi-unpack", src_dir / "pixi-unpack")]:
+                dst = bin_dir / name
+                if dst.exists() or not src.exists():
+                    continue
+                try:
+                    os.link(src, dst)
+                except OSError:
+                    import shutil
+                    shutil.copy2(src, dst)
+                dst.chmod(0o755)
         (self._root / ".weft-site").write_text('{"bootstrap_version": 1}\n')
 
     def shim(self, argv: list[str], *, timeout: float = 60.0) -> ShimResult:

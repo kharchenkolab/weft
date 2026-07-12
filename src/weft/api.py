@@ -515,6 +515,14 @@ class Weft:
         except WeftError as e:
             return e.to_dict()
 
+    def kernel_promote(self, kernel_id: str, blocks: list[int]) -> dict:
+        """Promote successful kernel blocks into the record: a manifest
+        with reproducibility="transcript" — the full ordered transcript
+        (replayable) plus the blocks' artifacts as content-addressed
+        outputs. Explicit and honestly labeled; the default doctrine
+        (re-run as a task for "task"-grade reproducibility) is unchanged."""
+        return self.kernels.promote(kernel_id, blocks, dataman=self.dataman)
+
     def kernel_stop(self, kernel_id: str) -> dict:
         return self.kernels.stop(kernel_id)
 
@@ -797,6 +805,7 @@ PUBLIC_TOOLS = [
     "session_stop",
     "kernel_start", "kernel_exec", "kernel_poll", "kernel_status",
     "kernel_transcript", "kernel_interrupt", "kernel_restart", "kernel_stop",
+    "kernel_promote",
     "service_start", "service_status", "service_stop",
 ]
 
