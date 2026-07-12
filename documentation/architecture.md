@@ -307,6 +307,66 @@ are \r-terminated; no pipe buffering mode flushes them); ssh-pipe streams
 its tar through a counting writer (also removing the old whole-archive-in-
 memory build); plans carry method + time estimates before any bytes move.
 
+## Generalized solvers (multi-ecosystem environments)
+
+`deps` is an open map keyed by ecosystem; a `Solver` registry
+(`solvers.default_solvers()` — one class + one entry to add an ecosystem)
+resolves each non-conda section into a *layer* of the canonical lock:
+records (name, version, source, hashes) plus a realization recipe. The
+conda+pypi pair stays one pixi-solved layer and realizes as before; later
+layers install into subdirectories of the same env and append activation
+lines. Identity: conda-only specs keep their exact v1 hashes (cache
+continuity was a hard requirement); envs with extra layers get `env:v2:`.
+Cross-layer contracts are data (`Solver.conda_requirements`) enforced
+generically as `env.layer_conflict` before any solve is paid for.
+
+**CRAN/GitHub (CranSolver):** resolution runs in a machine-global,
+weft-owned R solver env (`~/.cache/weft/solverenvs`), using base-R
+metadata against a **dated Posit Package Manager snapshot** — the date
+(pin via `system_requirements.cran_snapshot`, else captured at first
+solve) freezes the answer forever. GitHub refs `owner/repo@ref` resolve
+to exact commit SHAs (recorded, with tarball URLs) and their DESCRIPTION
+deps join the closure. Realization installs against the same snapshot
+(PPM serves Linux binaries via the UserAgent convention) then GitHub
+tarballs by SHA; needs network at the install point in v1 — the failure
+hint says so and points at conda-forge `r-*` or build-as-task for
+air-gapped sites. (pak was the original plan; its bundled binaries need
+glibc ≥2.32, which the snapshot design both avoids and improves on.)
+
+Operability: per-layer solve summaries (`layers` in the ensure result,
+source builds flagged), `realize.layer`/`realize.layer.done` events,
+normalized failure hints ({ecosystem, solver_message, user_pins}),
+`env_why(env_id, pkg)` (pixi inverted tree / layer records),
+`env_ensure(dry_run=True)` for testing a fix without minting an EnvID.
+
+## Kernels (persistent interactive interpreters)
+
+A kernel is a tracked, detached job running a small per-language driver
+(python/R/julia — a registry, `kernel.LANGUAGES`) that executes code
+blocks against persistent interpreter state, through a file protocol
+(blocks/NNNN.{code,out,err,rc} + artifacts dir + heartbeat) — Jupyter-like
+statefulness with no sockets, working over any control channel and
+surviving disconnects. Async-first: `kernel_exec(wait=False)` →
+`kernel_poll`; long blocks are watchable. The site poller watches kernel
+jobs with kernel semantics: death (native crash, OOM) emits `kernel.died`
+naming the **killing block** with the log tail; `kernel_restart(replay=
+"successful")` rebuilds state from the transcript. `kernel_interrupt`
+SIGINTs the process group — which required two real fixes: background
+launches inherit SIGINT=ignore through exec (reset via
+`env --default-signal` in the shim runner + explicitly in the python
+driver), and dash's kill only accepts the `kill -s INT -- -pgid` form.
+Doctrine unchanged: kernels are exploration; the citable record is the
+assembled script re-run as a task.
+
+## Provenance
+
+`provenance(job_id | dref)` assembles the full chain: command + env
+identity (spec body, locked layers with snapshot dates and pinned SHAs,
+attested modules, post_install honesty flags) + inputs, recursing into
+producing jobs down to user-registered data. All links were already in
+the store; this API is the one-call join an agent or a methods appendix
+needs.
+
 ## Deviations & decisions log
 
 | decision | rationale |

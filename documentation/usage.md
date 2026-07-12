@@ -174,6 +174,50 @@ Off-CI regression scenarios live in `misc/scenarios/scenarios.py`
 (gitignored): 12 end-to-end runs against dockerized sites —
 `pixi run python misc/scenarios/scenarios.py`.
 
+### Multi-ecosystem environments (R/CRAN/GitHub, more to come)
+
+```python
+env = w.env_ensure({
+    "name": "r-analysis",
+    "deps": {"conda": ["r-base =4.4"],                  # interpreter layer
+             "cran": ["data.table",                     # snapshot-locked
+                      "jsonlite ==2.0.1",               # exact assertion
+                      "lab/pkg@fix-branch"]},           # github → pinned SHA
+    "system_requirements": {"cran_snapshot": "2026-07-01"},  # frozen forever
+})
+env["layers"]                        # per-layer package counts, source builds
+w.env_ensure(spec, dry_run=True)     # test a fix; nothing stored
+w.env_why(env_id, "data.table")      # what pulls it in / the locked record
+```
+
+Missing interpreter → `env.layer_conflict` names exactly what to add.
+Unknown deps key → the registered-solver list. Adding an ecosystem =
+one Solver class + one registry entry (`solvers.default_solvers`).
+
+### Kernels (incremental interactive execution)
+
+```python
+k = w.kernel_start("beamlab", "python", env_id=env_id)["kernel_id"]
+w.kernel_exec(k, "grid = load_grid()")            # state persists
+r = w.kernel_exec(k, "fit = slow_scan(grid)", wait=False)   # async block
+w.kernel_poll(k, r["block"], timeout=30)          # watch it
+w.kernel_interrupt(k)                             # hung block → rc 130
+w.kernel_transcript(k)                            # what ran, in order
+# native crash → kernel.died event names the killing block; then:
+w.kernel_restart(k, replay="successful")          # state rebuilt
+w.kernel_stop(k)
+```
+
+Exploration only: assemble the successful blocks into a script and run it
+as a normal task for the citable record.
+
+### Provenance
+
+```python
+w.provenance(job_id)     # command + env identity + inputs, recursively
+w.provenance("dref:…")   # who produced this artifact, all the way down
+```
+
 ### Diagnostics
 
 ```python

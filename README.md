@@ -12,10 +12,12 @@ what is actually built (and where it deviates) in
 
 ## What it does
 
-- **Declarative environments.** A spec (conda/PyPI deps, site modules,
-  CUDA pins) solves once into a locked, content-addressed **EnvID**;
-  realization on each site is automatic — `pixi install` where there's
-  network, pre-packed archives for air-gapped compute nodes, site
+- **Declarative environments, multiple ecosystems.** A spec (conda/PyPI
+  deps — plus CRAN and GitHub R packages locked against dated snapshots
+  with SHA-pinned refs; more solvers plug into a registry — with site
+  modules and CUDA pins) solves once into a locked, content-addressed
+  **EnvID**; realization on each site is automatic — `pixi install` where
+  there's network, pre-packed archives for air-gapped compute nodes, site
   `module load`s layered in. Identical resolutions are never rebuilt,
   anywhere. Everything is userspace: no root, no docker, no daemons on
   remote machines — one inspectable directory, removable in one command.
@@ -29,13 +31,20 @@ what is actually built (and where it deviates) in
   backlog, GPU utilization, scheduler start ETAs), per-site user policy
   (partition allowlists, GPU caps, storage roles, free-form guidance),
   and placement that weighs cache warmth and current load — with reasons.
+- **Interactive when you need it.** Persistent kernels (Python/R/Julia)
+  execute code blocks incrementally with live interpreter state — over
+  plain SSH, no sockets — with interrupt, crash diagnosis (which block
+  killed it), and transcript replay; sessions and snapshots turn
+  exploration into locked, citable environments; `provenance()` walks any
+  result back to exact commands, locked envs, and input hashes.
 - **Built for agents.** Structured errors with remediation hints
-  (`job.oom` carries observed peak vs asked), plans before effects,
-  coalesced event digests for 1000-element arrays, an audited diagnostic
-  shell, crash/outage semantics you can rely on (controller crashes
-  reconcile; remote reboots are detected; connectivity loss never fails a
-  detached job). Cloud spend sits behind hard budget caps with a runaway
-  watchdog.
+  (`job.oom` carries observed peak vs asked; queue reasons name why a job
+  pends), plans before effects, coalesced event digests for 1000-element
+  arrays with one-call retry of failed elements, live load/queue/GPU
+  status with scheduler start ETAs, an audited diagnostic shell, and
+  crash/outage semantics you can rely on (controller crashes reconcile;
+  remote reboots are detected; connectivity loss never fails a detached
+  job). Cloud spend sits behind hard budget caps with a runaway watchdog.
 
 ## Quick look
 
