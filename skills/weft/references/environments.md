@@ -97,11 +97,21 @@ in the *path* to a solve, not in what you got.
 
 **Cheap iteration.** `session_start(spec_or_env_id, site)` takes a spec and
 realizes the base itself — exploration costs one call. `session_install`
-for packages; `session_run_installer(cmd, note="why")` for the bespoke fix
-no index expresses (an R `install.packages`, `pip install -e`, a vendored
-`make install`). Both are captured: `session_snapshot(notes=[...])` carries
-installers into the spec as labeled `post_install` steps (grade:
-`escape-hatch`) instead of losing them.
+for packages; `session_run_installer(cmd, note="why", source=<path>)` for
+the bespoke fix no index expresses (an R `install.packages`, `pip install
+-e`, a vendored `make install`).
+
+**Pass `source=` whenever the command needs local files.** weft
+content-addresses them into the env (`post_install_inputs`), so the step
+travels and the env rebuilds *anywhere*. Without it you get an env that
+builds on your machine and nowhere else — `session_snapshot` lints for
+this and warns (`portability_warning`), and the grade's `post_install`
+component reports `portable: false`.
+
+`session_snapshot(notes=[...])` carries installers into the spec as labeled
+`post_install` steps (grade: `escape-hatch`) and, by default, **verifies**
+the minted env by realizing it — a citable EnvID that cannot be rebuilt is
+worse than an error.
 
 **Drift.** `env_revise(env_id)` when a recorded env can no longer be built:
 if a fresh solve reproduces the same identity, the stale lock is re-derived

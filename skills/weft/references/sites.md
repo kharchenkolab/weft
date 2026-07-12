@@ -95,6 +95,12 @@ w.env_evict(env_id, "hpc", archive=True)   # + keep a blob on the CONTROLLER
                                            #   with no site network
 w.gc_packages("hpc", confirm=True)         # the SHARED cache — consequential:
                                            # rebuilds then need the index
+w.gc_orphans("hpc", confirm=True)          # leftovers no record claims
 ```
+`site_footprint` reports `free_bytes` (the premise), what each area costs,
+and every ready realization as `evictable`. `env_evict`'s `freed_bytes` is
+measured from the filesystem — `apparent_bytes` is the prefix size, most of
+which is hardlinked from the shared cache and therefore not reclaimed by
+dropping the prefix alone.
 Realized envs are the bulk of a quota; the lock that re-materializes them
 is kilobytes. Strip aggressively — `env_evict` is cheap to undo.
