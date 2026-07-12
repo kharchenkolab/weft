@@ -22,15 +22,24 @@ def w(tmp_path, pixi_bin, slurm_site):
 
 
 def test_slurm_load_view_reflects_queue_pressure(w):
-    # the fixture cluster is shared: drain leftovers, wait for quiescence
+    # The fixture cluster is shared across the suite and slurmd needs a
+    # moment to register its node. Drain, then wait for a genuinely idle
+    # node — and if it never comes, say WHAT the cluster looked like
+    # instead of failing on a bare assert (this test flaked once and gave
+    # no diagnosis; that was the actual bug).
     w.adapters["hpc"].run_cmd("scancel -u $USER 2>/dev/null; true")
-    for _ in range(120):
+    quiet = None
+    for _ in range(180):
         quiet = w.site_load("hpc", fresh=True)
-        if quiet["partitions"]["standard"]["cpus_idle"] == 8:
+        std = quiet["partitions"].get("standard", {})
+        if std.get("cpus_total") == 8 and std.get("cpus_idle") == 8:
             break
         time.sleep(1)
-    assert quiet["partitions"]["standard"]["cpus_total"] == 8
-    assert quiet["partitions"]["standard"]["cpus_idle"] == 8
+    else:
+        squeue = w.adapters["hpc"].run_cmd("squeue -a; sinfo -N -l").out
+        pytest.fail(
+            "cluster never became idle within 180s.\n"
+            f"last load view: {quiet['partitions']}\n{squeue}")
     assert "load_fraction" in quiet
     assert quiet["qos"] is None  # no accounting DB on the fixture — honest
 
