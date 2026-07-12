@@ -47,3 +47,12 @@ w.array_retry(group, command_override="...")    # with a fixed command
   running job (process identity is checked, not just the pid).
 - Every submission/cancel/diagnostic is in the audit log with its why:
   `store.audit_tail(50)` answers "what ran last night".
+
+## Following a running job's log
+
+```python
+out = w.task_logs(job_id, follow_cursor=0)     # then keep passing back
+out["log"], out["cursor"], out["state"]        # the returned cursor
+```
+Byte-exact and gap-free; stop when state goes terminal. Plain
+`task_logs(job_id, tail=100)` for a one-shot look.

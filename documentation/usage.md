@@ -226,3 +226,29 @@ w.site_exec("local", "df -h .", why="check quota before big staging")
 w.store.audit_tail(50)                      # what ran where, and why
 w.reconcile()                               # after a controller crash/restart
 ```
+
+### MCP server
+
+```sh
+python -m weft.mcp_server --workspace /path/to/project \
+    --pixi-bin .env/bin/pixi      # stdio JSON-RPC; tools/list has schemas
+```
+Contract: every tool returns JSON; failures are structured error payloads
+flagged `isError` — nothing raises across the boundary.
+
+### Julia environments
+
+```python
+w.env_ensure({"name": "jl", "deps": {"conda": ["julia"],
+                                     "julia": ["Example"]}})
+# Manifest.toml-locked (content tree-hashes); github: "owner/Repo.jl@ref"
+```
+
+### Housekeeping
+
+```python
+w.gc_plan()                      # reclaimable bytes per site (dry)
+w.gc_sweep("hpc", confirm=True)  # explicit; content rebuilds on next use
+w.gc_events(older_than_days=30)
+w.task_logs(job_id, follow_cursor=0)   # live log following
+```

@@ -55,3 +55,13 @@ w.env_ensure({
   `{"deps": {"conda": ["cxx-compiler", "make"]}}`; compile as a task with
   the source tree as an input; downstream tasks run the binary via
   site-side chaining. `${CXX}` etc. are set by activation.
+
+## Julia (and the solver registry generally)
+
+`deps.julia` works like `deps.cran`: `["DataFrames", "Example ==0.5.5",
+"owner/Repo.jl@ref"]`, requiring `julia` in `deps.conda`
+(`env.layer_conflict` tells you if you forget). The lock is Julia's own
+Manifest.toml — every package pinned by content tree-hash, github refs by
+commit. Realization runs `Pkg.instantiate` against a shared per-site depot
+(network needed at install, like cran). Other ecosystems join the same
+way — unknown `deps` keys fail fast listing what's registered.

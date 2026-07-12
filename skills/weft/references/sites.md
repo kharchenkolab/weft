@@ -63,3 +63,13 @@ watchdog re-checks accrued spend on every poll: on breach it cancels jobs,
 **terminates the instance**, then errors. `site_teardown(name)` is the
 explicit off switch; relay `cloud.launched` / `budget.watchdog` events to
 the user — they carry the dollars.
+
+## Cache hygiene
+
+`gc_plan()` shows what's reclaimable everywhere (idle realizations, stale
+cached data; provenance-referenced content is pin-protected in the
+workspace); `gc_sweep(site, confirm=True)` executes — never implicit, and
+evicted content re-stages/rebuilds automatically on next use.
+`gc_events(older_than_days=30)` prunes the event log (terminal digests
+kept). `policy.gc_idle_days` and `policy.kernel_idle_stop_s` tune the
+knobs per site; `doctor()` nags about idle kernels and bloat.
