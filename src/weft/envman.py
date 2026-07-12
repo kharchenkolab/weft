@@ -15,6 +15,29 @@ from .spec import EnvSpec, resolve_extends
 from .store import Store
 
 
+def diff_envs(old_canonical: dict, new_canonical: dict) -> dict:
+    """Package-level delta between two resolved envs — what an agent (and a
+    user) needs to judge whether the near-match is acceptable."""
+    def flat(c):
+        out = {}
+        for plat in c.get("platforms", {}).values():
+            for p in plat:
+                out[p["name"]] = p["version"]
+        for eco, layer in (c.get("layers") or {}).items():
+            for r in layer.get("records", []):
+                out[f"{eco}:{r['name']}"] = r["version"]
+        return out
+
+    a, b = flat(old_canonical), flat(new_canonical)
+    changed = [{"name": k, "from": a[k], "to": b[k]}
+               for k in sorted(a.keys() & b.keys()) if a[k] != b[k]]
+    return {
+        "changed": changed,
+        "added": sorted(b.keys() - a.keys()),
+        "removed": sorted(a.keys() - b.keys()),
+    }
+
+
 class EnvManager:
     def __init__(self, store: Store, solve_dir: Path, pixi_bin: str,
                  solvers: dict | None = None):
@@ -204,6 +227,107 @@ class EnvManager:
             "summary": self._summary(row),
             "realizations": realizations,
         }
+
+    # -- adaptive re-materialization -------------------------------------------
+
+    def revise(self, env_id: str, reason: str = "") -> dict:
+        """Reproduce-else-revise: when an EnvID can no longer be realized as
+        recorded (a package was pulled, a snapshot moved, a tarball 404s),
+        re-solve the ORIGINAL SPEC fresh and report the delta.
+
+        This mints a NEW EnvID — it never silently redefines the old one, so
+        the content-addressed cache stays sound and memoization stays honest
+        (a different env → a different task_hash → no false cache hit)."""
+        old = self.store.get_env(env_id)
+        if not old:
+            raise WeftError("task.invalid", f"unknown EnvID: {env_id}",
+                            stage="solve")
+        spec_body = self.store.get_spec(old["spec_hash"])
+        if not spec_body:
+            raise WeftError(
+                "task.invalid",
+                f"no spec recorded for {env_id} — cannot revise",
+                stage="solve",
+                hints={"suggestion": "re-ensure from the original spec"})
+        # solve fresh from the spec — and keep the solver's OWN output: the
+        # stored row is exactly what we suspect is stale, so reading it back
+        # would defeat the point (put_env is insert-or-ignore by design)
+        merged = resolve_extends(EnvSpec.from_dict(spec_body),
+                                 self._lookup_spec)
+        workdir = self.solve_dir / merged.spec_hash().split(":")[-1][:16]
+        result = solve(merged, workdir, self.pixi_bin)
+        canonical = result.canonical
+        for eco, deps in sorted(merged.deps_extra.items()):
+            canonical.setdefault("layers", {})[eco] = \
+                self.solvers[eco].solve(deps, merged, workdir / eco)
+        from .ids import env_id as compute_env_id
+        new_id = compute_env_id(canonical)
+
+        if new_id == env_id:
+            # reproduce: a fresh solve yields the SAME identity, so the
+            # recorded lock was stale/corrupt, not the world. Re-derive it
+            # and carry on — identity untouched, nothing to report but the fix.
+            self.store.replace_env_lock(env_id, result.native_lock,
+                                        result.manifest)
+            self.store.emit("env.restored", env_id=env_id, reason=reason[:200])
+            return {"env_id": env_id, "status": "restored",
+                    "note": "a fresh solve reproduces this env exactly; the "
+                            "recorded lock was re-derived"}
+        self.store.put_env(
+            new_id, merged.spec_hash(), canonical, result.native_lock,
+            result.manifest, result.platforms,
+            weakly_reproducible=merged.weakly_reproducible())
+        fresh = {"env_id": new_id, "status": "solved",
+                 "summary": self._summary(self.store.get_env(new_id))}
+        diff = diff_envs(old["canonical"],
+                         self.store.get_env(new_id)["canonical"])
+        self.store.emit("env.revised", env_id=new_id, revised_from=env_id,
+                        changed=len(diff["changed"]),
+                        added=len(diff["added"]), removed=len(diff["removed"]),
+                        reason=reason[:200])
+        return {**fresh, "status": "revised", "revised_from": env_id,
+                "diff": diff, "reason": reason,
+                "note": "a fresh solve of the same spec produced a DIFFERENT "
+                        "package set (see diff); the old EnvID remains valid "
+                        "as a record, this one is what will run"}
+
+    def find_near(self, spec_body: dict, site: str | None = None,
+                  limit: int = 5) -> list[dict]:
+        """Which already-solved (ideally already-realized) envs are close to
+        this spec? A QUERY, not a policy: weft never silently substitutes a
+        near-match — the agent sees the diff and decides."""
+        target = resolve_extends(EnvSpec.from_dict(spec_body),
+                                 self._lookup_spec)
+        want = {}
+        for dep in target.conda + target.pypi:
+            from .spec import split_constraint
+            n, c = split_constraint(dep)
+            want[n] = c
+        out = []
+        for row in self.store.list_envs():
+            env = self.store.get_env(row["env_id"])
+            names = {p["name"]: p["version"]
+                     for plat in env["canonical"]["platforms"].values()
+                     for p in plat}
+            missing = [n for n in want if n not in names]
+            if len(missing) > len(want) / 2:
+                continue      # not remotely the same environment
+            realized = [r["site"] for r in
+                        self.store.realizations_for(row["env_id"])
+                        if r["state"] == "ready"
+                        and (site is None or r["site"] == site)]
+            if site is not None and not realized:
+                continue
+            from .grade import grade_env
+            out.append({
+                "env_id": row["env_id"],
+                "realized_at": realized,
+                "missing_packages": missing,
+                "distance": len(missing),
+                "grade": grade_env(env["canonical"])["grade"],
+            })
+        out.sort(key=lambda e: (e["distance"], not e["realized_at"]))
+        return out[:limit]
 
     def extras(self, env_id: str) -> dict:
         row = self.store.get_env(env_id)

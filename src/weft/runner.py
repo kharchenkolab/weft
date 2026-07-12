@@ -229,26 +229,68 @@ class JobRunner:
                 "note": f"one sbatch --array submission ({handle}); watch "
                         f"array.progress events"}
 
-    def _ensure_env_for(self, task: Task, site: str) -> tuple[str, dict]:
-        """Realize the task's env on the site; -> (activation line, spec vars)."""
+    def _ensure_env_for(self, task: Task, site: str,
+                        job_id: str | None = None) -> tuple[str, dict]:
+        """Realize the task's env on the site; -> (activation line, spec vars).
+
+        If the world moved and the recorded env can no longer be built, the
+        site's `on_drift` policy decides: "fail" (default — the strict path)
+        or "revise" — re-solve the spec, run under the nearest working env,
+        and report the delta rather than dead-ending (design §1d)."""
         if not task.env:
             return "true", {}
         env_row = self.store.get_env(task.env)
         if not env_row:
             raise WeftError("task.invalid", f"unknown EnvID {task.env}",
                             stage="realize")
-        extras = env_row["canonical"]["extras"]
         site_row = self.store.get_site(site) or {}
+        pack_tools = {"pixi_pack": self.pixi_pack, "cas": self.cas,
+                      "transfers": self.transfers,
+                      "solvers": self.envman.solvers, "store": self.store}
         adapter = self.adapters[site]
-        real = ensure_realization(
-            task.env, env_row, adapter, self.store,
-            caps=site_row.get("capabilities"),
-            site_config=site_row.get("config"),
-            pack_tools={"pixi_pack": self.pixi_pack, "cas": self.cas,
-                        "transfers": self.transfers,
-                        "solvers": self.envman.solvers,
-                        "store": self.store},
-        )
+        try:
+            real = ensure_realization(
+                task.env, env_row, adapter, self.store,
+                caps=site_row.get("capabilities"),
+                site_config=site_row.get("config"),
+                pack_tools=pack_tools,
+            )
+        except WeftError as e:
+            on_drift = (site_policy(site_row).get("on_drift")
+                        or task.env_vars.get("WEFT_ON_DRIFT") or "fail")
+            if e.code not in ("env.realize_failed", "env.solve_conflict") \
+                    or on_drift != "revise":
+                raise
+            revised = self.envman.revise(
+                task.env, reason=f"realization failed on {site}: {e.detail}")
+            status = revised.get("status")
+            if status not in ("revised", "restored"):
+                raise
+            new_id = revised["env_id"]
+            if status == "revised":
+                # a genuinely different package set: run under it, say so
+                self.store.emit("job.env_revised", job_id=job_id,
+                                requested=task.env, effective=new_id,
+                                diff=revised["diff"])
+                task.env = new_id
+                if job_id:
+                    stored = self.store.get_job(job_id)["task"]
+                    stored["env"] = new_id
+                    self.store.update_job(job_id, task=stored)
+            else:
+                # same identity, lock re-derived — nothing to report to the
+                # record; just clear the failed realization and rebuild
+                self.store.set_realization(new_id, site, "prefix",
+                                           f"envs/{new_id.rsplit(':', 1)[-1]}",
+                                           "missing")
+            env_row = self.store.get_env(new_id)
+            real = ensure_realization(
+                new_id, env_row, adapter, self.store,
+                caps=site_row.get("capabilities"),
+                site_config=site_row.get("config"),
+                pack_tools=pack_tools,
+            )
+        extras = env_row["canonical"]["extras"]
         return (f". {shlex.quote(adapter.path(real['location']))}/activate.sh",
                 extras.get("env_vars") or {})
 
@@ -436,7 +478,8 @@ class JobRunner:
         group = job.get("array_group")
 
         self.set_job_state(job_id, "RESOLVING_ENV", **self.group_payload(group))
-        activate_line, spec_env_vars = self._ensure_env_for(task, job["site"])
+        activate_line, spec_env_vars = self._ensure_env_for(
+            task, job["site"], job_id=job_id)
 
         if self._cancelled(job_id):
             return

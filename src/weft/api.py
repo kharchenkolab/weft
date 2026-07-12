@@ -285,6 +285,23 @@ class Weft:
     def env_status(self, env_id: str) -> dict:
         return self.envman.status(env_id)
 
+    def env_revise(self, env_id: str, reason: str = "") -> dict:
+        """Reproduce-else-revise: when an EnvID can no longer be realized as
+        recorded (package pulled, snapshot moved), re-solve its original spec
+        and report the package-level diff. Mints a NEW EnvID — the old one
+        stays valid as a record and nothing is silently redefined. Sites can
+        do this automatically with policy `on_drift: "revise"`."""
+        return self.envman.revise(env_id, reason)
+
+    def env_find_near(self, spec: dict, site: str | None = None,
+                      limit: int = 5) -> list[dict]:
+        """Which already-solved (with site=, already-REALIZED) envs are close
+        to this spec? A query, not a policy — weft never substitutes a
+        near-match behind your back. You see the distance, the missing
+        packages, the grade, and where it is warm; you decide whether to
+        submit against it (instant) or solve fresh (exact)."""
+        return self.envman.find_near(spec, site=site, limit=limit)
+
     def env_why(self, env_id: str, package: str) -> dict:
         """Reverse-dependency probe: what pulls `package` in, per layer."""
         row = self.store.get_env(env_id)
@@ -838,6 +855,7 @@ PUBLIC_TOOLS = [
     "register_site", "sites_list", "sites_describe", "site_probe",
     "site_load", "module_check", "site_exec", "site_teardown",
     "env_ensure", "env_status", "env_why", "env_repair", "env_gpu_hint",
+    "env_revise", "env_find_near",
     "data_register", "data_describe", "data_fetch",
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_result", "array_retry",

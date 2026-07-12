@@ -206,6 +206,19 @@ class Store:
             "weakly_reproducible": bool(r["weakly_reproducible"]),
         }
 
+    def replace_env_lock(self, env_id: str, native_lock: str,
+                         manifest: str) -> None:
+        """Re-derive a stale/corrupt lock for an unchanged identity. Safe by
+        construction: only called when a fresh solve produced the SAME
+        EnvID, so the canonical form (and thus the identity) is identical."""
+        self._write("UPDATE envs SET native_lock=?, manifest=? WHERE env_id=?",
+                    (native_lock, manifest, env_id))
+
+    def list_envs(self) -> list[dict]:
+        return [{"env_id": r["env_id"], "spec_hash": r["spec_hash"]}
+                for r in self._rows(
+                    "SELECT env_id, spec_hash FROM envs ORDER BY created_at DESC")]
+
     def env_for_spec(self, spec_hash: str) -> str | None:
         r = self._row(
             "SELECT env_id FROM envs WHERE spec_hash=? ORDER BY created_at DESC LIMIT 1",
@@ -362,10 +375,13 @@ class Store:
         self, job_id: str, *, state: str | None = None,
         sched_handle: str | None = None, error: dict | None = None,
         manifest: dict | None = None, queue_reason: str | None = None,
+        task: dict | None = None,
     ) -> None:
         sets, vals = ["updated_at=?"], [time.time()]
         if state is not None:
             sets.append("state=?"); vals.append(state)
+        if task is not None:
+            sets.append("task=?"); vals.append(_j(task))
         if queue_reason is not None:
             sets.append("queue_reason=?"); vals.append(queue_reason)
         if sched_handle is not None:
