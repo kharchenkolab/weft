@@ -107,6 +107,17 @@ class SiteAdapter(ABC):
     def probe(self) -> dict:
         return self.shim(["probe"], timeout=30).json()
 
+    def load(self) -> dict:
+        """What is realistically available *now* (vs. probed capabilities).
+
+        Base: host load average, free memory, logged-in users. Scheduler
+        adapters extend with queue depth, idle CPUs, and wait estimates.
+        """
+        info = self.shim(["load"], timeout=20).json()
+        cpus = max(1, int(info.get("cpus", 1)))
+        info["load_fraction"] = round(float(info.get("load5", 0)) / cpus, 3)
+        return info
+
     def file_exists(self, rel: str) -> bool:
         r = self.run_cmd(f"test -e {self.path(rel)!r} && echo yes || echo no")
         return r.out.strip() == "yes"

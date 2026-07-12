@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import time  # noqa: F401  (site_load cache timestamps)
 from pathlib import Path
 
 from .adapters.base import SiteAdapter
@@ -192,6 +193,25 @@ class Weft:
                 caps[k] = v
         return caps
 
+    def site_load(self, name: str, resources: dict | None = None,
+                  fresh: bool = False) -> dict:
+        """What's realistically available under current load (doc 02 §7 spirit):
+        host load; on schedulers also idle CPUs, queue backlog, QOS, and —
+        when `resources` is given — an sbatch --test-only start estimate."""
+        adapter = self._adapter(name)
+        if getattr(adapter, "launched", None) is False:
+            return {"site": name, "note": "cloud instance not launched; "
+                    "no live load (launching to measure would cost money)"}
+        info = self.runner.get_load(name, fresh=fresh)
+        if info is None:
+            raise WeftError("site.unreachable",
+                            f"could not read live load from {name}",
+                            stage="infra", retryable=True)
+        out = {"site": name, **info}
+        if resources and hasattr(adapter, "estimate_start"):
+            out["start_estimate"] = adapter.estimate_start(resources)
+        return out
+
     def module_check(self, site: str, names: list[str]) -> dict:
         """Lazy per-site module inventory (doc 02 §3), cached."""
         adapter = self._adapter(site)
@@ -337,12 +357,36 @@ class Weft:
 
     # -- events / diagnostics -----------------------------------------------------
 
-    def events_poll(self, since_cursor: int = 0, limit: int = 100) -> dict:
+    def events_poll(self, since_cursor: int = 0, limit: int = 100,
+                    compact: bool = True) -> dict:
+        """compact drops per-element events of array groups — the digests
+        (array.progress / array.done) summarize them; a 2000-point scan
+        reads as a handful of lines, not 2000. UIs pass compact=False."""
         events = self.store.events_since(since_cursor, limit)
-        return {
-            "events": events,
-            "cursor": events[-1]["seq"] if events else since_cursor,
-        }
+        cursor = events[-1]["seq"] if events else since_cursor
+        if compact:
+            events = [e for e in events
+                      if not (e.get("array_group")
+                              and e["kind"].startswith("job."))]
+        return {"events": events, "cursor": cursor}
+
+    def array_status(self, group: str) -> dict:
+        counts = self.store.group_counts(group)
+        if counts["total"] == 0:
+            raise WeftError("task.invalid", f"unknown array group: {group}",
+                            stage="infra")
+        return {"group": group, **counts,
+                "failed_previews": self.store.failed_in_group(group),
+                "elements": [{"index": j["array_index"], "job_id": j["job_id"],
+                              "state": j["state"]}
+                             for j in self.store.jobs_in_group(group)]}
+
+    def array_result(self, group: str) -> dict:
+        counts = self.store.group_counts(group)
+        if counts["total"] == 0:
+            raise WeftError("task.invalid", f"unknown array group: {group}",
+                            stage="infra")
+        return {"group": group, **self.runner.group_rollup(group)}
 
     def site_exec(self, name: str, cmd: str, why: str) -> dict:
         """Guarded diagnostic shell (doc 05 §5): audited, deny-listed, scoped."""

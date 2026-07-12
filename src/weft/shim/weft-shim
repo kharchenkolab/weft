@@ -308,6 +308,22 @@ cmd_unpack_verify() {
     echo '{"ok": true}'
 }
 
+# load: what is realistically available right now (cheap; poll-safe)
+cmd_load() {
+    set +e
+    cpus=$(nproc 2>/dev/null || echo 1)
+    l1=0; l5=0; l15=0
+    if [ -r /proc/loadavg ]; then
+        read -r l1 l5 l15 _ < /proc/loadavg
+    fi
+    mem_avail_kb=$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    users=$(who 2>/dev/null | wc -l | tr -d ' ')
+    cat <<EOF
+{"cpus": $cpus, "load1": ${l1:-0}, "load5": ${l5:-0}, "load15": ${l15:-0},
+ "mem_available_gb": $((mem_avail_kb / 1048576)), "login_users": ${users:-0}}
+EOF
+}
+
 cmd_version() { echo "{\"shim_version\": $WEFT_SHIM_VERSION}"; }
 
 sub="${1:-}"
@@ -324,6 +340,7 @@ case "$sub" in
     materialize) cmd_materialize "$@";;
     ingest) cmd_ingest "$@";;
     unpack-verify) cmd_unpack_verify "$@";;
+    load) cmd_load "$@";;
     version) cmd_version "$@";;
     *) echo "weft-shim: unknown command $sub" >&2; exit 2;;
 esac

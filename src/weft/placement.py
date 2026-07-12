@@ -19,6 +19,7 @@ def rank_sites(
     data_present: dict[str, int],  # site -> bytes of required refs already there
     total_bytes: int,
     preferences: dict[str, float] | None = None,
+    loads: dict[str, dict | None] | None = None,
 ) -> dict:
     ranked, rejected = [], []
     for site in sites:
@@ -50,6 +51,23 @@ def rank_sites(
         if scheduler_type(caps) == "none":
             score += 1.0
             why.append("interactive (no queue)")
+        load = (loads or {}).get(name)
+        if load:
+            # what's realistically free right now, not just on paper
+            frac = float(load.get("load_fraction", 0))
+            if frac > 0.5:
+                score -= min(frac, 2.0)
+                why.append(f"host load {frac:.0%} of cores")
+            partitions = load.get("partitions") or {}
+            idle = sum(p.get("cpus_idle", 0) for p in partitions.values())
+            cap = sum(p.get("cpus_total", 0) for p in partitions.values())
+            pending = sum(p.get("pending_jobs", 0) for p in partitions.values())
+            if cap:
+                score += 1.5 * (idle / cap)
+                why.append(f"{idle}/{cap} scheduler CPUs idle")
+            if pending:
+                score -= min(pending / 10, 2.0)
+                why.append(f"{pending} jobs pending in queue")
         score += (preferences or {}).get(name, 0.0)
         ranked.append({"site": name, "score": round(score, 2), "why": why})
     ranked.sort(key=lambda r: -r["score"])

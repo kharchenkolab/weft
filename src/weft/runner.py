@@ -75,6 +75,25 @@ class JobRunner:
         self._digest_lock = threading.Lock()
         self._last_digest: dict[str, dict] = {}
         self._done_digests: set[str] = set()
+        self._load_cache: dict[str, tuple[float, dict]] = {}
+
+    LOAD_TTL_S = 15.0
+
+    def get_load(self, site: str, fresh: bool = False) -> dict | None:
+        """Best-effort live-load view, TTL-cached (placement + site_load)."""
+        adapter = self.adapters.get(site)
+        if adapter is None or getattr(adapter, "launched", None) is False:
+            return None  # never launch a cloud instance to measure its load
+        now = time.time()
+        cached = self._load_cache.get(site)
+        if cached and not fresh and now - cached[0] < self.LOAD_TTL_S:
+            return cached[1]
+        try:
+            info = adapter.load()
+        except (WeftError, Exception):
+            return None
+        self._load_cache[site] = (now, info)
+        return info
 
     def poller_for(self, site: str) -> SitePoller:
         with self._pollers_lock:
@@ -159,9 +178,11 @@ class JobRunner:
                            if r in self.store.refs_present_at(s["name"]))
             for s in self.store.list_sites()
         }
+        loads = {s["name"]: self.get_load(s["name"])
+                 for s in self.store.list_sites()}
         result = rank_sites(
             task.resources.to_dict(), modules, self.store.list_sites(),
-            realized, present, total,
+            realized, present, total, loads=loads,
         )
         if not result["ranked"]:
             raise WeftError(
@@ -527,8 +548,9 @@ class JobRunner:
             "failures": self.store.failed_in_group(group, limit=10),
             "output_bytes": sum(j["manifest"].get("output_bytes", 0)
                                 for j in jobs if j["manifest"]),
-            "elements": {j["array_index"]: {"job_id": j["job_id"],
-                                            "state": j["state"]}
+            # string keys: this dict crosses JSON boundaries in events
+            "elements": {str(j["array_index"]): {"job_id": j["job_id"],
+                                                 "state": j["state"]}
                          for j in jobs},
         }
         if walls:

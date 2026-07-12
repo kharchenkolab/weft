@@ -70,6 +70,69 @@ class SlurmAdapter(SSHAdapter):
             version = v.out.strip().split()[-1]
         return {"version": version, "partitions": partitions}
 
+    def load(self) -> dict:
+        """Login-node load + the scheduler's live picture: idle vs allocated
+        CPUs per partition, queue backlog, QOS (when accounting exists),
+        and the caller's own footprint. This — not the capability record —
+        is what placement and wait estimation should reason over."""
+        base = super().load()
+        base["login_note"] = "load figures describe the login node only"
+        parts: dict[str, dict] = {}
+        r = self.run_cmd("sinfo -h -o '%R|%C' 2>/dev/null | sort -u", timeout=30)
+        for line in r.out.splitlines():
+            try:
+                name, cpus = line.strip().split("|")
+                alloc, idle, other, total = (int(x) for x in cpus.split("/"))
+                parts[name] = {"cpus_idle": idle, "cpus_allocated": alloc,
+                               "cpus_down": other, "cpus_total": total,
+                               "pending_jobs": 0, "running_jobs": 0}
+            except ValueError:
+                continue
+        q = self.run_cmd("squeue -h -o '%P %T' 2>/dev/null", timeout=30)
+        for line in q.out.splitlines():
+            fields = line.split()
+            if len(fields) != 2:
+                continue
+            p = parts.setdefault(fields[0], {"pending_jobs": 0, "running_jobs": 0})
+            if fields[1] == "PENDING":
+                p["pending_jobs"] = p.get("pending_jobs", 0) + 1
+            elif fields[1] == "RUNNING":
+                p["running_jobs"] = p.get("running_jobs", 0) + 1
+        base["partitions"] = parts
+        mine = self.run_cmd("squeue -h -u \"$USER\" -o '%T' 2>/dev/null", timeout=30)
+        my = mine.out.split()
+        base["my_jobs"] = {"pending": my.count("PENDING"),
+                           "running": my.count("RUNNING")}
+        qos = self.run_cmd(
+            "sacctmgr -nP show qos format=name,maxwall,maxtresperuser "
+            "2>/dev/null; true", timeout=30)
+        base["qos"] = [
+            dict(zip(("name", "max_wall", "max_tres_per_user"), ln.split("|")))
+            for ln in qos.out.splitlines() if ln.strip()
+        ] or None  # None = no accounting DB; not "no limits"
+        return base
+
+    def estimate_start(self, resources: dict) -> dict:
+        """Scheduler-computed start ETA under current load and priorities,
+        via `sbatch --test-only` — nothing is submitted."""
+        directives = [f"--cpus-per-task={resources.get('cpus', 1)}"]
+        if resources.get("mem_gb"):
+            directives.append(f"--mem={resources['mem_gb']}G")
+        if resources.get("walltime"):
+            directives.append(f"--time={resources['walltime']}")
+        if self.partition:
+            directives.append(f"--partition={self.partition}")
+        r = self.run_cmd(
+            "printf '#!/bin/sh\\ntrue\\n' | sbatch --test-only "
+            + " ".join(directives) + " 2>&1; true", timeout=30,
+        )
+        m = re.search(r"to start at (\S+)", r.out)
+        if m:
+            return {"estimated_start": m.group(1), "raw": r.out.strip()[:200]}
+        return {"estimated_start": None,
+                "note": "scheduler gave no estimate (rejected ask or busy)",
+                "raw": r.out.strip()[:300]}
+
     def module_avail(self, name: str) -> bool:
         """Lazy module-inventory query (doc 02 §3); callers cache."""
         init = (self.modules_init + "; ") if self.modules_init else ""
