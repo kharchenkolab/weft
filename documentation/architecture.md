@@ -141,6 +141,36 @@ idempotent. Jobs whose process vanished without an exit record fail as
 6. **Audit log** — every submission, cancel, and diagnostic command with
    its rationale; `audit_tail()` renders the activity feed.
 
+## Phase 1: SSH sites
+
+`SSHAdapter` invokes the system `ssh` (BatchMode, ControlMaster multiplexing
+under `/tmp/weft-ssh-<uid>/`), so the user's aliases/ProxyJump/MFA all work
+unchanged. Exit code 255 maps to `site.unreachable` (retryable); the monitor
+loop backs off exponentially through outages and never fails a detached job
+on connectivity — remote state is the truth. Status polls run on a tighter
+timeout (`poll_timeout`) than other calls so outages surface quickly.
+
+Bootstrap: `mkdir` the root tree, push the shim (content-hash-checked, so
+upgrades are automatic) and the static pixi binary (hash-verified after
+push), smoke-test `shim version`, write the `.weft-site` marker. Fully
+idempotent; second call costs two ssh round-trips.
+
+Transfers: `rsync-ssh` batches blobs with `--files-from` (identical CAS
+layout both ends), shares the adapter's ControlMaster socket, and proves
+delivery with a batched remote `sha256sum -c`.
+
+Liveness: the shim records the runner's own pid (`pid.real`) because the
+setsid wrapper pid can exit immediately; "lost" verdicts are double-checked
+site-side (1s grace for the exit-code rename) and require two consecutive
+polls controller-side before `sched.node_failure` is raised.
+
+Session environments (`session.py`): scratch clone of a realized env's
+project (fresh hardlink install from the shared package cache), mutable via
+`pixi add`, exec'd through `pixi shell-hook`; `snapshot()` synthesizes the
+minimal spec delta (`extends` the base spec hash + accumulated additions)
+and re-solves properly into a citable EnvID. Sessions refuse to start on
+sites without index access — the error points at packed realization instead.
+
 ## Deviations & decisions log
 
 | decision | rationale |

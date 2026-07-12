@@ -37,6 +37,7 @@ cmd_probe() {
     glibc=$(ldd --version 2>/dev/null | head -1 | grep -o '[0-9][0-9.]*$' || echo "")
     gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort | uniq -c \
         | awk '{n=$1; $1=""; sub(/^ /,""); printf "%s{\"model\":\"%s\",\"count\":%d}", sep, $0, n; sep=","}' || true)
+    cuda_driver=$(nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9.]*' | awk '{print $3}' | head -1 || true)
     cat <<EOF
 {"shim_version": $WEFT_SHIM_VERSION,
  "os": "$os", "arch": "$arch", "hostname": "$host",
@@ -45,7 +46,7 @@ cmd_probe() {
  "runtimes": {"apptainer": "${apptainer_v:-}", "docker": $(json_bool $docker_ok)},
  "scheduler": {"type": "$sched"},
  "module_system": $(json_bool $modules),
- "gpus": [${gpus:-}],
+ "gpus": [${gpus:-}], "cuda_driver": "${cuda_driver:-}",
  "storage": {"weft_root": "$root", "free_gb": $free_gb}}
 EOF
 }

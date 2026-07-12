@@ -142,6 +142,12 @@ class Weft:
     def env_status(self, env_id: str) -> dict:
         return self.envman.status(env_id)
 
+    def env_gpu_hint(self, site: str) -> dict:
+        """What GPU userland can this site's driver support? (doc S3/S4)"""
+        from .gpu import suggest_gpu_spec
+        row = self.sites_describe(site)
+        return suggest_gpu_spec(row.get("capabilities") or {}, site)
+
     # -- data -----------------------------------------------------------------
 
     def data_register(self, path: str) -> dict:

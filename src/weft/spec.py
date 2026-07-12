@@ -70,6 +70,9 @@ class EnvSpec:
     env_vars: dict[str, str] = field(default_factory=dict)
     post_install: list[str] = field(default_factory=list)
     extends: str | None = None  # "spec:v1:<sha256>" of the parent spec
+    # pixi [system-requirements]: lets a CUDA stack solve on a GPU-less
+    # controller by asserting what the *target* provides (e.g. {"cuda": "12.4"})
+    system_requirements: dict[str, str] = field(default_factory=dict)
 
     # -- serialization ------------------------------------------------------
 
@@ -80,6 +83,7 @@ class EnvSpec:
         unknown = set(d) - {
             "name", "platforms", "channels", "deps", "variants", "modules",
             "container_base", "env_vars", "post_install", "extends",
+            "system_requirements",
         }
         if unknown:
             raise WeftError(
@@ -89,7 +93,7 @@ class EnvSpec:
                 hints={"known_fields": [
                     "name", "platforms", "channels", "deps.conda", "deps.pypi",
                     "variants", "modules", "container_base", "env_vars",
-                    "post_install", "extends",
+                    "post_install", "extends", "system_requirements",
                 ]},
             )
         variants = {
@@ -108,6 +112,9 @@ class EnvSpec:
             env_vars={k: str(v) for k, v in (d.get("env_vars") or {}).items()},
             post_install=list(d.get("post_install") or []),
             extends=d.get("extends"),
+            system_requirements={
+                k: str(v) for k, v in (d.get("system_requirements") or {}).items()
+            },
         )
 
     def to_dict(self) -> dict:
@@ -122,6 +129,7 @@ class EnvSpec:
             "env_vars": self.env_vars,
             "post_install": self.post_install,
             "extends": self.extends,
+            "system_requirements": self.system_requirements,
         }
 
     def spec_hash(self) -> str:
@@ -151,6 +159,8 @@ class EnvSpec:
             env_vars={**parent.env_vars, **self.env_vars},
             post_install=parent.post_install + self.post_install,
             extends=None,  # fully merged specs stand alone
+            system_requirements={**parent.system_requirements,
+                                 **self.system_requirements},
         )
 
     def weakly_reproducible(self) -> bool:

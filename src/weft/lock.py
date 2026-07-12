@@ -34,12 +34,25 @@ def _toml_str(s: str) -> str:
 
 
 def _normalize_constraint(c: str) -> str:
-    # conda's "=3.12" (fuzzy) -> "3.12.*", which pixi accepts everywhere.
-    m = re.fullmatch(r"=\s*([\w.]+)", c)
+    # conda's fuzzy "=3.12" / "=2.*" -> "3.12.*" / "2.*" for pixi.
+    m = re.fullmatch(r"=\s*([\w.]+?)(\.\*|\*)?", c)
     if m:
         v = m.group(1)
         return v if v.endswith("*") else v + ".*"
     return c
+
+
+def _dep_line(dep: str) -> str:
+    """Render one conda dep. Supports 'name', 'name constraint', and
+    'name constraint build-selector' ('pytorch 2.* *cuda*')."""
+    name, constraint = split_constraint(dep)
+    parts = constraint.split()
+    if len(parts) == 2:
+        version, build = parts
+        return (f"{_toml_str(name)} = {{ version = "
+                f"{_toml_str(_normalize_constraint(version))}, "
+                f"build = {_toml_str(build)} }}")
+    return f"{_toml_str(name)} = {_toml_str(_normalize_constraint(constraint))}"
 
 
 def render_pixi_manifest(spec: EnvSpec) -> str:
@@ -48,12 +61,15 @@ def render_pixi_manifest(spec: EnvSpec) -> str:
         f"name = {_toml_str('weft-env')}",
         f"channels = [{', '.join(_toml_str(c) for c in spec.channels)}]",
         f"platforms = [{', '.join(_toml_str(p) for p in spec.platforms)}]",
-        "",
-        "[dependencies]",
     ]
+    if spec.system_requirements:
+        lines.append("")
+        lines.append("[system-requirements]")
+        for k, v in sorted(spec.system_requirements.items()):
+            lines.append(f"{k} = {_toml_str(v)}")
+    lines += ["", "[dependencies]"]
     for dep in spec.conda:
-        name, constraint = split_constraint(dep)
-        lines.append(f"{_toml_str(name)} = {_toml_str(_normalize_constraint(constraint))}")
+        lines.append(_dep_line(dep))
     if spec.pypi:
         lines.append("")
         lines.append("[pypi-dependencies]")
@@ -66,10 +82,7 @@ def render_pixi_manifest(spec: EnvSpec) -> str:
             lines.append("")
             lines.append(f"[target.{plat}.dependencies]")
             for dep in v["conda"]:
-                name, constraint = split_constraint(dep)
-                lines.append(
-                    f"{_toml_str(name)} = {_toml_str(_normalize_constraint(constraint))}"
-                )
+                lines.append(_dep_line(dep))
         if v.get("pypi"):
             lines.append("")
             lines.append(f"[target.{plat}.pypi-dependencies]")
@@ -97,10 +110,20 @@ def canonicalize_lock(pixi_lock_text: str, spec: EnvSpec) -> dict:
         url = rec.get("conda") or rec.get("pypi")
         if url:
             by_url[url] = rec
+    # lock format v7 keys environment packages by named platform *profile*
+    # (subdir + virtual packages); v6 keys by subdir directly. Our canonical
+    # form always uses subdirs — this indirection is exactly the format
+    # churn the canonical layer exists to absorb (doc 06 §4).
+    profile_subdir = {
+        p["name"]: p.get("subdir", p["name"])
+        for p in (doc.get("platforms") or [])
+        if isinstance(p, dict) and "name" in p
+    }
     env = doc["environments"]["default"]
     platforms: dict[str, list[dict]] = {}
-    for plat, entries in env["packages"].items():
-        rows = []
+    for plat_key, entries in env["packages"].items():
+        plat = profile_subdir.get(plat_key, plat_key)
+        rows = platforms.get(plat, [])
         for entry in entries:
             if "conda" in entry:
                 url = entry["conda"]
@@ -129,6 +152,13 @@ def canonicalize_lock(pixi_lock_text: str, spec: EnvSpec) -> dict:
                 )
         rows.sort(key=lambda r: (r["kind"], r["name"], r["version"], r["build"]))
         platforms[plat] = rows
+    for plat in platforms:  # dedup if several profiles share a subdir
+        seen: set[tuple] = set()
+        platforms[plat] = [
+            r for r in platforms[plat]
+            if (key := (r["kind"], r["name"], r["version"], r["build"])) not in seen
+            and not seen.add(key)
+        ]
     return {
         "version": 1,
         "platforms": platforms,

@@ -21,6 +21,7 @@ def normalize_probe(probe: dict, compute_probe: dict | None = None) -> dict:
         "scheduler": probe.get("scheduler", {"type": "none"}),
         "module_system": bool(probe.get("module_system", False)),
         "gpus": probe.get("gpus", []),
+        "cuda_driver": probe.get("cuda_driver", ""),
         "storage": probe.get("storage", {}),
         "shim_version": probe.get("shim_version"),
     }

@@ -56,19 +56,20 @@ def select_strategy(
         return prefer
 
     if container_base:
+        if modules:
+            # inherently contradictory spec, regardless of site
+            raise WeftError(
+                "task.invalid",
+                "modules and container_base cannot combine (site modules are "
+                "not visible inside containers)",
+                stage="realize",
+            )
         if not (apptainer or docker):
             raise WeftError(
                 "env.unsatisfiable_on_site",
                 "spec sets container_base but site has no container runtime",
                 stage="realize",
                 hints={"runtimes": view.get("runtimes", {})},
-            )
-        if modules:
-            raise WeftError(
-                "task.invalid",
-                "modules and container_base cannot combine (site modules are "
-                "not visible inside containers)",
-                stage="realize",
             )
         return "container"
 
