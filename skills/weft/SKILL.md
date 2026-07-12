@@ -26,7 +26,8 @@ w = Weft(workspace_dir)          # pixi/pixi-pack auto-found next to pixi_bin
 - **Site** — a registered place to run (`local` | `ssh` | `slurm` | `cloud`),
   described by a *probed capability record* + live `site_load()`.
 - **EnvSpec → EnvID** — declarative environment, solved & locked once;
-  `env:v1:<hash>` is the universal cache key. Never install imperatively.
+  the EnvID (`env:v1:…` conda/pypi-only, `env:v2:…` with extra layers) is
+  the universal cache key. Never install imperatively.
 - **DataRef** — `dref:<sha256>` for every file/tree. Content moves at most
   once per site; outputs chain site-side for free.
 - **Task** — env + inputs + command + outputs; content-hashed, so identical
