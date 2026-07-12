@@ -171,6 +171,54 @@ minimal spec delta (`extends` the base spec hash + accumulated additions)
 and re-solves properly into a citable EnvID. Sessions refuse to start on
 sites without index access — the error points at packed realization instead.
 
+## Phase 2: Slurm sites
+
+`SlurmAdapter` extends `SSHAdapter` — a login node is an SSH-reachable
+POSIX machine; only the scheduler verbs differ. It adds: partition
+discovery via `sinfo` into the capability record; batch-script rendering
+(directives from `resources`, then the same file-based epilogue contract as
+the shim's detached runner — pid.real/exit_code/wall_s/rusage, so files
+remain the truth whatever the scheduler forgets); `sbatch` submission with
+`sched.rejected` on refusal; polling that consults `squeue` first, then
+`scontrol show job`, then the exit files; `scancel`. Slurm terminal states
+map onto the taxonomy: TIMEOUT → `job.walltime_exceeded`, OUT_OF_MEMORY →
+`job.oom`, NODE_FAIL → `sched.node_failure`, CANCELLED (external) →
+CANCELLED.
+
+Arrays are currently fan-out (N submissions with `WEFT_ARRAY_INDEX` in the
+env; distinct memoization per element). Native `sbatch --array` with one
+submission per group is a planned optimization for login-node politeness —
+the fan-out semantics (per-element manifests) are already the contract.
+
+**Modules** (scenario S4): a spec's `modules` list is loaded in the
+activation prelude, which sources the standard module init scripts first
+(non-interactive shells don't get `/etc/profile`) and applies the site's
+`modules_init` config snippet (e.g. `export MODULEPATH=...`) — site quirks
+stay in site config, not code. `module_check(site, names)` answers
+availability lazily and caches per site (doc 02 §3); a failed load aborts
+activation with exit 90 and the module name in the log.
+
+**Packed realization** (air-gapped compute): `pixi-pack` runs on the
+controller (network side) producing an archive of the locked packages plus
+an offline installer; the archive travels the ordinary data plane as a CAS
+blob (dedup + verification for free); `pixi-unpack` (pushed at bootstrap,
+static) recreates the env site-side with zero network. Strategy selection
+is capability-driven; `capabilities_override` in site config patches what
+probing cannot see (and simulates air-gapped compute in tests). The
+`container` strategy currently falls back to `packed` with an emitted
+`realize.fallback` event — same no-network property, honest record.
+
+**Per-site user policy** (`policy.py`): the site owner can set structured
+rules — `partitions_allowed` (allowlist, also picks the default),
+`max_gpus`, `max_concurrent_jobs`, `storage` roles — which weft *enforces*
+at submit time as `site.capability_violation` with the rule and its source
+("site policy set by the user") in the hints, and free-form `notes`
+("prefer nights for long jobs") which weft *surfaces* in `sites.list`,
+`sites.describe`, and every submit plan. Storage roles are exported into
+every sandbox as `WEFT_STORAGE_LARGE` / `WEFT_STORAGE_SCRATCH` /
+`WEFT_STORAGE_NODE_TMP` so agent-written commands can target the right
+filesystem tier.
+
 ## Deviations & decisions log
 
 | decision | rationale |
