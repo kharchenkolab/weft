@@ -55,6 +55,9 @@ class Task:
             raise WeftError(
                 "task.invalid", f"unknown task fields: {sorted(unknown)}",
                 stage="submit",
+                hints={"known_fields": [
+                    "command", "env", "inputs", "code", "outputs",
+                    "resources", "site", "array", "env_vars"]},
             )
         if not d.get("command"):
             raise WeftError("task.invalid", "task.command is required", stage="submit")

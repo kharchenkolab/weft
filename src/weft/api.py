@@ -369,16 +369,34 @@ class Weft:
             out.append(entry)
         return out
 
-    def task_logs(self, job_id: str, tail: int = 100) -> str:
+    def task_logs(self, job_id: str, tail: int = 100,
+                  follow_cursor: int | None = None) -> dict:
+        """Job log access. tail=N gives the last N lines. For live
+        following pass follow_cursor (0 to start): returns new bytes since
+        that offset plus the next cursor — poll while state is RUNNING."""
         job = self.store.get_job(job_id)
         if not job:
             raise WeftError("task.invalid", f"unknown job: {job_id}", stage="infra")
         adapter = self._adapter(job["site"])
+        if job.get("array_group") and job.get("array_index") is not None \
+                and "_" in (job.get("sched_handle") or ""):
+            logrel = f"jobs/{job['array_group']}/el{job['array_index']}/log"
+        else:
+            logrel = f"jobs/{job_id}/log"
+        if follow_cursor is not None:
+            r = adapter.shim(
+                ["read-from", "--file", adapter.path(logrel),
+                 "--offset", str(follow_cursor), "--max", "65536"],
+                timeout=60)
+            chunk = r.out
+            return {"log": chunk,
+                    "cursor": follow_cursor + len(chunk.encode()),
+                    "state": job["state"]}
         r = adapter.shim(
-            ["tail", "--file", adapter.path(f"jobs/{job_id}/log"), "--lines", str(tail)],
+            ["tail", "--file", adapter.path(logrel), "--lines", str(tail)],
             timeout=60,
         )
-        return r.out
+        return {"log": r.out, "state": job["state"]}
 
     def task_result(self, job_id: str) -> dict:
         job = self.store.get_job(job_id)

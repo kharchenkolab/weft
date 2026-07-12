@@ -120,7 +120,12 @@ class KernelManager:
         adapter = self._adapter(k["site"])
         base = f"{k['jobdir']}/blocks/{block:04d}"
         deadline = time.time() + timeout
+        last_alive_check = 0.0
         while True:
+            # a death must surface immediately, not after the full timeout
+            if time.time() - last_alive_check > 2.0:
+                last_alive_check = time.time()
+                self._assert_alive(self._get(kernel_id))
             if adapter.file_exists(f"{base}.rc"):
                 rc = int(adapter.read_file(f"{base}.rc").decode().strip() or 1)
                 out = adapter.read_file(f"{base}.out", 65536).decode("utf-8", "replace")

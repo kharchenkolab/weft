@@ -191,6 +191,21 @@ cmd_tail() {
     [ -f "$file" ] && tail -n "$lines" "$file" || true
 }
 
+# read-from --file F --offset N --max M : incremental log follow
+cmd_read_from() {
+    file=""; offset=0; max=65536
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --file) file=$2; shift 2;;
+            --offset) offset=$2; shift 2;;
+            --max) max=$2; shift 2;;
+            *) echo "read-from: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    [ -f "$file" ] || exit 0
+    tail -c +$((offset + 1)) "$file" | head -c "$max"
+}
+
 cmd_head() {
     file=""; bytes=4096
     while [ $# -gt 0 ]; do
@@ -345,6 +360,7 @@ case "$sub" in
     status-batch) cmd_status_batch "$@";;
     tail) cmd_tail "$@";;
     head) cmd_head "$@";;
+    read-from) cmd_read_from "$@";;
     hash-tree) cmd_hash_tree "$@";;
     materialize) cmd_materialize "$@";;
     ingest) cmd_ingest "$@";;

@@ -62,6 +62,19 @@ def test_batch_job_full_lifecycle(weft_slurm, tmp_path):
 
 
 def test_array_scan_fanout(weft_slurm):
+    import threading
+    adapter = weft_slurm.adapters["hpc"]
+    sbatch_calls = []
+    orig = adapter.run_cmd
+    lock = threading.Lock()
+
+    def counting(script, **kw):
+        if "sbatch" in script and "--test-only" not in script:
+            with lock:
+                sbatch_calls.append(script[:60])
+        return orig(script, **kw)
+
+    adapter.run_cmd = counting
     r = weft_slurm.task_submit({
         "command": "echo \"scan point $WEFT_ARRAY_INDEX done\" > results/point.txt",
         "outputs": ["results/"],
@@ -69,14 +82,19 @@ def test_array_scan_fanout(weft_slurm):
         "site": "hpc", "array": 4,
     })
     assert r["elements"] == 4, r
+    assert r.get("native_array", "").startswith("slurm:")
     got = set()
     for sub in r["jobs"]:
         job = weft_slurm.runner.wait(sub["job_id"], 240)
         assert job["state"] == "DONE", job["error"]
+        assert "_" in job["sched_handle"]   # element handle slurm:JID_i
         out = next(o for o in job["manifest"]["outputs"]
                    if o["path"] == "results/point.txt")
         got.add(out["preview"]["lines"][0])
     assert got == {f"scan point {i} done" for i in range(4)}
+    # the login-node politeness contract: ONE submission for the whole scan
+    assert len(sbatch_calls) == 1, sbatch_calls
+    adapter.run_cmd = orig
 
 
 def test_capability_violation_against_partitions(weft_slurm):

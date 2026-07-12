@@ -37,6 +37,61 @@ def _json_type(annotation) -> dict:
     return {}
 
 
+# property-level schema detail the type system can't express: the shapes
+# a cold agent must be able to discover from tools/list alone
+SCHEMA_HINTS: dict[str, dict] = {
+    "task_submit": {"task": {
+        "type": "object",
+        "description": (
+            'The task: {"command": str (required), "env": EnvID|null, '
+            '"inputs": [{"ref": "dref:…", "mount_as": "rel/path"}], '
+            '"code": {ref, mount_as}, "outputs": ["results/"], '
+            '"resources": {"cpus", "mem_gb", "gpus", "walltime"}, '
+            '"site": name|"auto", "array": N, "env_vars": {k: v}}'),
+    }},
+    "env_ensure": {"spec_or_id": {
+        "description": (
+            'An EnvID string, or a spec: {"name", "deps": {"conda": [...], '
+            '"pypi": [...], "cran": [...]}, "modules": [...], '
+            '"env_vars": {...}, "extends": spec-hash, '
+            '"system_requirements": {"cuda", "cran_snapshot"}}'),
+    }},
+    "register_site": {"config": {
+        "description": ('Site config: {"root": path, "pixi_source": path, '
+                        'ssh: +{"host","port","user","ssh_opts"}, slurm: '
+                        '+{"scheduler","modules_init"}, "policy": {...}}'),
+    }},
+}
+
+# fallback descriptions for thin wrappers (docstrings win when present)
+TOOL_DESCRIPTIONS: dict[str, str] = {
+    "sites_list": "Registered sites: health, capabilities headline, policy.",
+    "sites_describe": "Full capability record + config for one site.",
+    "site_probe": "Re-probe a site's capabilities (drift check).",
+    "env_status": "Env summary + per-site realizations (with failure logs).",
+    "env_repair": "Clear a corrupt realization; next task rebuilds it.",
+    "data_register": "Hash a workspace file/dir into a DataRef.",
+    "data_describe": "DataRef metadata, size, and known site locations.",
+    "data_fetch": "Bring a ref's content back to the workspace (verified).",
+    "task_status": "Job states (list); QUEUED entries carry queue_reason.",
+    "task_result": "The manifest (outputs with previews) or the error.",
+    "task_cancel": "Cancel a queued or running job.",
+    "array_status": "Group digest + per-element states (memoized marked).",
+    "array_result": "Group roll-up: wall stats, failures, output bytes.",
+    "reconcile": "After a controller restart: resume watching all jobs.",
+    "session_start": "Mutable scratch clone of a realized env (exploration).",
+    "session_exec": "Run a command inside the session env.",
+    "session_install": "Incrementally add conda/pypi packages to a session.",
+    "session_snapshot": "Freeze session additions into a real, citable EnvID.",
+    "session_stop": "Discard a session environment.",
+    "kernel_start": "Start a persistent interpreter (python/r/julia) on a "
+                    "site; env must be realized there.",
+    "kernel_restart": "Start a NEW kernel replaying the old transcript's "
+                      "successful blocks; returns the new kernel_id.",
+    "kernel_stop": "Stop a kernel (transcript remains readable).",
+}
+
+
 def build_tool_defs(weft_cls) -> list[dict]:
     from .api import PUBLIC_TOOLS
     defs = []
@@ -54,10 +109,14 @@ def build_tool_defs(weft_cls) -> list[dict]:
             else:
                 schema = {**schema, "default": param.default} \
                     if param.default is not None else schema
+            hint = SCHEMA_HINTS.get(name, {}).get(pname)
+            if hint:
+                schema = {**schema, **hint}
             props[pname] = schema
         defs.append({
             "name": name,
-            "description": inspect.getdoc(fn) or name,
+            "description": inspect.getdoc(fn)
+            or TOOL_DESCRIPTIONS.get(name, name),
             "inputSchema": {"type": "object", "properties": props,
                             "required": required},
         })

@@ -160,6 +160,9 @@ class JobRunner:
         # array.done must wait for the whole fan-out, even when elements
         # memoize instantly and the group looks "complete" at size 1
         self._group_expected[group] = task.array
+        adapter = self.adapters[site]
+        if getattr(adapter, "supports_native_array", False):
+            return self._submit_array_native(task, group, site, plan)
         results = []
         for i in range(task.array):
             element = replace(
@@ -167,6 +170,7 @@ class JobRunner:
                 env_vars={**task.env_vars, "WEFT_ARRAY_INDEX": str(i)},
             )
             r = self.submit(element, force=force, _group=group, _index=i)
+            r.pop("plan", None)   # one plan for the group, not N copies
             r["array_index"] = i
             results.append(r)
         job_ids = [r["job_id"] for r in results if "job_id" in r]
@@ -174,6 +178,104 @@ class JobRunner:
                 "elements": task.array, "jobs": results,
                 "note": f"{len(job_ids)} element jobs submitted; watch "
                         f"array.progress events for the digest"}
+
+    def _submit_array_native(self, task: Task, group: str, site: str,
+                             plan: dict) -> dict:
+        """One scheduler submission for the whole scan (`sbatch --array`):
+        env realized once, inputs staged once, one shared plan — each
+        element materializes its own sandbox node-side at runtime.
+        Memoization does not apply inside native arrays."""
+        adapter = self.adapters[site]
+        group_rel = f"jobs/{group}"
+        activate_line, spec_env_vars = self._ensure_env_for(task, site)
+        self.dataman.ensure_at(task.required_refs(), adapter, self.transfers)
+        adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(group_rel))}")
+        plan_tsv = self.dataman.materialize_plan(task)
+        if plan_tsv:
+            adapter.write_file(f"{group_rel}/inputs.tsv", plan_tsv.encode())
+        adapter.write_file(f"{group_rel}/activate.sh",
+                           (activate_line + "\n").encode())
+        lines = self._cmd_lines(task, spec_env_vars, site,
+                                job_id_expr=f"{group}.el$WEFT_ARRAY_INDEX")
+        adapter.write_file(f"{group_rel}/cmd.sh",
+                           ("\n".join(lines) + "\n").encode())
+
+        handle = adapter.submit_array(group_rel, task.to_dict(), task.array)
+        jid = handle.split(":", 1)[1]
+        jobs = []
+        for i in range(task.array):
+            element = replace(
+                task, array=None,
+                env_vars={**task.env_vars, "WEFT_ARRAY_INDEX": str(i)})
+            job_id = "jb_" + uuid.uuid4().hex[:12]
+            stored = element.to_dict()
+            stored["site"] = site
+            self.store.put_job(job_id, element.task_hash(), stored, site,
+                               "QUEUED", array_group=group, array_index=i)
+            eh = f"slurm:{jid}_{i}"
+            self.store.update_job(job_id, sched_handle=eh)
+            self.store.emit("job.state", job_id=job_id, state="QUEUED",
+                            site=site, handle=eh,
+                            **self.group_payload(group))
+            self.poller_for(site).register(Watch(
+                job_id=job_id, handle=eh,
+                jobdir_rel=f"{group_rel}/el{i}", task=element,
+                started_at=time.time(), scheduler=True,
+                array_group=group, last_state="QUEUED"))
+            jobs.append({"job_id": job_id, "array_index": i, "site": site})
+        return {"group": group, "site": site, "plan": plan,
+                "elements": task.array, "native_array": handle,
+                "jobs": jobs,
+                "note": f"one sbatch --array submission ({handle}); watch "
+                        f"array.progress events"}
+
+    def _ensure_env_for(self, task: Task, site: str) -> tuple[str, dict]:
+        """Realize the task's env on the site; -> (activation line, spec vars)."""
+        if not task.env:
+            return "true", {}
+        env_row = self.store.get_env(task.env)
+        if not env_row:
+            raise WeftError("task.invalid", f"unknown EnvID {task.env}",
+                            stage="realize")
+        extras = env_row["canonical"]["extras"]
+        site_row = self.store.get_site(site) or {}
+        adapter = self.adapters[site]
+        real = ensure_realization(
+            task.env, env_row, adapter, self.store,
+            caps=site_row.get("capabilities"),
+            site_config=site_row.get("config"),
+            pack_tools={"pixi_pack": self.pixi_pack, "cas": self.cas,
+                        "transfers": self.transfers,
+                        "solvers": self.envman.solvers},
+        )
+        return (f". {shlex.quote(adapter.path(real['location']))}/activate.sh",
+                extras.get("env_vars") or {})
+
+    def _cmd_lines(self, task: Task, spec_env_vars: dict, site: str,
+                   job_id_expr: str) -> list[str]:
+        lines = [
+            f"export WEFT_JOB_ID={job_id_expr}",
+            f"export WEFT_CPUS={task.resources.cpus}",
+            f"export WEFT_MEM_GB={task.resources.mem_gb}",
+            f"export WEFT_GPUS={task.resources.gpus}",
+        ]
+        for var, val in storage_env_vars(
+            site_policy(self.store.get_site(site))
+        ).items():
+            lines.append(f"export {var}={shlex.quote(val)}")
+        for k, v in {**spec_env_vars, **task.env_vars}.items():
+            v = v.replace("{{cpus}}", str(task.resources.cpus))
+            v = v.replace("{{mem_gb}}", str(task.resources.mem_gb))
+            v = v.replace("{{gpus}}", str(task.resources.gpus))
+            lines.append(f"export {k}={shlex.quote(v)}")
+        lines.append("mkdir -p tmp")
+        for out in task.outputs:
+            d = out.rstrip("/") if out.endswith("/") else \
+                (out.rsplit("/", 1)[0] if "/" in out else "")
+            if d:
+                lines.append(f"mkdir -p {shlex.quote(d)}")
+        lines.append(task.command)
+        return lines
 
     def _place(self, task: Task) -> str:
         if task.site != "auto":
@@ -333,24 +435,7 @@ class JobRunner:
         group = job.get("array_group")
 
         self.set_job_state(job_id, "RESOLVING_ENV", **self.group_payload(group))
-        activate_line = "true"
-        spec_env_vars: dict[str, str] = {}
-        if task.env:
-            env_row = self.store.get_env(task.env)
-            if not env_row:
-                raise WeftError("task.invalid", f"unknown EnvID {task.env}", stage="realize")
-            extras = env_row["canonical"]["extras"]
-            spec_env_vars = extras.get("env_vars") or {}
-            site_row = self.store.get_site(job["site"]) or {}
-            real = ensure_realization(
-                task.env, env_row, adapter, self.store,
-                caps=site_row.get("capabilities"),
-                site_config=site_row.get("config"),
-                pack_tools={"pixi_pack": self.pixi_pack, "cas": self.cas,
-                            "transfers": self.transfers,
-                            "solvers": self.envman.solvers},
-            )
-            activate_line = f". {shlex.quote(adapter.path(real['location']))}/activate.sh"
+        activate_line, spec_env_vars = self._ensure_env_for(task, job["site"])
 
         if self._cancelled(job_id):
             return
@@ -387,29 +472,8 @@ class JobRunner:
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(jobdir_rel))}")
         plan_tsv = self.dataman.materialize_plan(task)
         adapter.write_file(f"{jobdir_rel}/activate.sh", (activate_line + "\n").encode())
-        lines = [
-            f"export WEFT_JOB_ID={shlex.quote(job_id)}",
-            f"export WEFT_CPUS={task.resources.cpus}",
-            f"export WEFT_MEM_GB={task.resources.mem_gb}",
-            f"export WEFT_GPUS={task.resources.gpus}",
-        ]
-        for var, val in storage_env_vars(
-            site_policy(self.store.get_site(adapter.name))
-        ).items():
-            lines.append(f"export {var}={shlex.quote(val)}")
-        # env-spec vars first, task vars override (both support {{templates}})
-        for k, v in {**(spec_env_vars or {}), **task.env_vars}.items():
-            v = v.replace("{{cpus}}", str(task.resources.cpus))
-            v = v.replace("{{mem_gb}}", str(task.resources.mem_gb))
-            v = v.replace("{{gpus}}", str(task.resources.gpus))
-            lines.append(f"export {k}={shlex.quote(v)}")
-        lines.append("mkdir -p tmp")
-        for out in task.outputs:
-            d = out.rstrip("/") if out.endswith("/") else \
-                (out.rsplit("/", 1)[0] if "/" in out else "")
-            if d:
-                lines.append(f"mkdir -p {shlex.quote(d)}")
-        lines.append(task.command)
+        lines = self._cmd_lines(task, spec_env_vars or {}, adapter.name,
+                                job_id_expr=shlex.quote(job_id))
         adapter.write_file(f"{jobdir_rel}/cmd.sh", ("\n".join(lines) + "\n").encode())
         if plan_tsv:
             adapter.write_file(f"{jobdir_rel}/inputs.tsv", plan_tsv.encode())
@@ -526,6 +590,7 @@ class JobRunner:
             )
 
         entries, total_bytes = self.dataman.collect_outputs(adapter, jobdir_rel, task)
+        self._enrich_previews(adapter, jobdir_rel, task, entries)
         job = self.store.get_job(job_id)
         manifest = {
             "job_id": job_id,
@@ -545,6 +610,53 @@ class JobRunner:
                         exit_code=exit_code, wall_s=wall_s,
                         outputs=len(entries), output_bytes=total_bytes,
                         **self.group_payload(group))
+
+    _RICH_PREVIEW_CAP = 3
+
+    def _enrich_previews(self, adapter: SiteAdapter, jobdir_rel: str,
+                         task: Task, entries: list[dict]) -> None:
+        """Structure previews for binary science formats, generated by the
+        task's own environment (it has the readers) — the relevant kilobyte
+        instead of 'binary'. Best-effort: any failure keeps the basic
+        preview."""
+        if not task.env:
+            return
+        real = self.store.get_realization(task.env, adapter.name)
+        if not real or real["state"] != "ready":
+            return
+        activate = f". {shlex.quote(adapter.path(real['location']))}/activate.sh"
+        done = 0
+        for e in entries:
+            if done >= self._RICH_PREVIEW_CAP:
+                break
+            path = e.get("path", "")
+            full = shlex.quote(adapter.path(f"{jobdir_rel}/{path}"))
+            try:
+                if path.endswith((".h5", ".hdf5")):
+                    r = adapter.run_cmd(
+                        activate + " && python - <<'EOF'\n"
+                        "import h5py, sys\n"
+                        f"f = h5py.File({adapter.path(f'{jobdir_rel}/{path}')!r}, 'r')\n"
+                        "def w(name, obj):\n"
+                        "    d = getattr(obj, 'shape', None)\n"
+                        "    print(name, d if d is not None else '(group)',\n"
+                        "          getattr(obj, 'dtype', ''))\n"
+                        "f.visititems(w)\nEOF", timeout=60)
+                    if r.rc == 0 and r.out.strip():
+                        e["preview"] = {"kind": "hdf5-tree",
+                                        "detail": r.out[:1500]}
+                        done += 1
+                elif path.endswith(".rds"):
+                    r = adapter.run_cmd(
+                        activate + " && Rscript - <<'EOF' 2>&1\n"
+                        f'str(readRDS("{adapter.path(f"{jobdir_rel}/{path}")}"), '
+                        "max.level=2)\nEOF", timeout=60)
+                    if r.rc == 0 and r.out.strip():
+                        e["preview"] = {"kind": "rds-str",
+                                        "detail": r.out[:1500]}
+                        done += 1
+            except WeftError:
+                pass
 
     # -- array digests -----------------------------------------------------------
 
