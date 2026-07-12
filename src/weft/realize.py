@@ -174,7 +174,32 @@ def _build_prefix(
         activate += module_prelude(modules, modules_init) + "\n"
     activate += hook.out
     adapter.write_file(f"{rel}/activate.sh", activate.encode())
+    _run_post_install(env_row, adapter, rel)
     _spot_check_and_mark(env_id, env_row, adapter, rel, "prefix")
+
+
+def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
+    """The escape hatch for what package channels can't express: bespoke
+    installers, R packages from source/git, custom build flags. Runs inside
+    the activated env, in the env dir, on the target site — so it can be
+    hashed (it is, into the EnvID) but not content-pinned; specs using it
+    are flagged weakly-reproducible."""
+    for cmd in env_row["canonical"]["extras"].get("post_install") or []:
+        r = adapter.run_cmd(
+            f"cd {shlex.quote(adapter.path(rel))} && . ./activate.sh && ( {cmd} )",
+            timeout=3600,
+        )
+        if r.rc != 0:
+            raise WeftError(
+                "env.realize_failed",
+                f"post_install command failed: {cmd[:120]}",
+                stage="realize",
+                hints={"command": cmd, "log_tail": (r.err or r.out)[-1500:],
+                       "note": "post_install runs on the target site inside "
+                               "the activated env — air-gapped sites cannot "
+                               "fetch; pin sources (e.g. dated CRAN snapshot "
+                               "repos, git commit hashes) for reproducibility"},
+            )
 
 
 def _spot_check_and_mark(
@@ -279,6 +304,7 @@ def _build_packed(
         activate += module_prelude(modules, modules_init) + "\n"
     activate += f". {shlex.quote(dest)}/activate.inner.sh\n"
     adapter.write_file(f"{rel}/activate.sh", activate.encode())
+    _run_post_install(env_row, adapter, rel)
     _spot_check_and_mark(env_id, env_row, adapter, rel, "packed")
 
 
