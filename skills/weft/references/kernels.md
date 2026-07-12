@@ -43,3 +43,20 @@ when the analysis stabilizes, assemble the successful blocks
 (`kernel_transcript`) into a script and run it as a normal task — that
 manifest, with `provenance()`, is the citable result. Stop kernels when
 done (`kernel_status`'s `idle_s` tells you which ones you forgot).
+
+## Promoting exploration into the record
+
+Default doctrine stands: for full `"task"`-grade reproducibility, assemble
+the successful blocks into a script and run it as a task. But when the
+result depended on **accumulated interpreter state** (re-running would be
+wasteful, or wouldn't reproduce it), promote instead:
+
+```python
+m = w.kernel_promote(k, blocks=[7])     # only successful blocks
+m["reproducibility"]   # "transcript" — one rung below "task"
+m["transcript"]        # the FULL ordered chain (0..7) that built the state
+m["outputs"]           # the blocks' artifacts, content-addressed
+```
+The result is a first-class manifest: `task_result(m["job_id"])` and
+`provenance(...)` work on it, honestly labeled. Nothing is promoted
+implicitly.

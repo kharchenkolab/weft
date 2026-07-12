@@ -73,3 +73,12 @@ evicted content re-stages/rebuilds automatically on next use.
 `gc_events(older_than_days=30)` prunes the event log (terminal digests
 kept). `policy.gc_idle_days` and `policy.kernel_idle_stop_s` tune the
 knobs per site; `doctor()` nags about idle kernels and bloat.
+
+## Shared sites (team caches)
+
+Set `"shared": true` when the site root lives on a filesystem several
+people can write (a group scratch allocation). weft then creates
+group-writable files and takes a **site-side lease** around environment
+builds, so two users racing the same EnvID cooperate: one builds, the
+other waits and adopts (`realize.adopted`). Trust is the filesystem's —
+weft brokers no identity. Env reuse across users is the payoff.

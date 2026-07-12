@@ -24,3 +24,16 @@ table knows which sites hold what; staging is the set difference.
 - **Transfer methods** are chosen per site: `rsync-ssh` normally,
   `ssh-pipe` (tar over the control channel) on boxes without rsync,
   `local-link` on the same machine. You don't pick; the endpoint does.
+
+## Ingesting remote sources
+
+```python
+w.data_register("https://example.org/run2189.h5")            # → workspace CAS
+w.data_register("https://…/big.h5", site="hpc")              # straight into
+                                                             # the site's CAS
+w.data_register(url, expected_sha256="ab12…")                # verify a
+                                                             # published checksum
+```
+`s3://`, `gs://`, `azure://` work when rclone sits next to pixi. Without an
+expected hash, hash-on-arrival is the identity (`meta.trust =
+"first-fetch"`). Ingest only — discovery and cataloging stay above weft.
