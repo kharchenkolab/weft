@@ -33,10 +33,11 @@ class DataManager:
 
     def register(self, path: str | Path) -> dict:
         info = self.cas.register(Path(path))
-        self.store.put_dataref(
-            info.ref, info.kind, info.bytes, info.chunks,
-            meta={"origin": str(path), "exec": info.exec},
-        )
+        meta = {"origin": str(path), "exec": info.exec}
+        if info.plain_sha256:
+            meta["sha256_plain"] = info.plain_sha256
+        self.store.put_dataref(info.ref, info.kind, info.bytes, info.chunks,
+                               meta=meta)
         # "@workspace" is a reserved pseudo-site: the local CAS itself
         self.store.set_location(info.ref, "@workspace", str(self.cas.root))
         return {"ref": info.ref, "kind": info.kind, "bytes": info.bytes}
@@ -64,7 +65,7 @@ class DataManager:
         return staging_plan(refs, self.store.refs_present_at(site), self.sizes(refs))
 
     def blobs_for(self, ref: str) -> list[tuple[str, int]]:
-        """(sha256, size) of every blob backing a ref."""
+        """(cas-name, size) of every blob backing a ref."""
         kind = self.cas.kind_of(ref)
         if kind is None:
             raise WeftError(
@@ -78,6 +79,29 @@ class DataManager:
             for e in self.cas.tree_manifest(ref)
             if e["kind"] == "file"
         ]
+
+    def verify_map_for(self, refs: list[str]) -> dict[str, str | None]:
+        """cas-name -> content sha256 usable by remote `sha256sum -c`.
+
+        For chunked blobs the CAS name is a merkle root; the plain hash
+        travels in metadata. None = cannot verify remotely by content
+        (legacy refs registered before plain hashes were recorded)."""
+        out: dict[str, str | None] = {}
+        for ref in refs:
+            row = self.store.get_dataref(ref)
+            if row and row["kind"] == "file":
+                name = ref.split(":")[-1]
+                if row["chunks"]:
+                    out[name] = row["meta"].get("sha256_plain")
+                else:
+                    out[name] = name
+            elif self.cas.kind_of(ref) == "tree":
+                for e in self.cas.tree_manifest(ref):
+                    if e["kind"] == "file":
+                        out[e["sha256"]] = e.get("sha256_plain", e["sha256"]) \
+                            if "sha256_plain" in e or e["size"] < 64 * 1024 * 1024 \
+                            else None
+        return out
 
     def ensure_at(self, refs: list[str], adapter: SiteAdapter, transfers: dict,
                   job_id: str | None = None) -> dict:
@@ -117,7 +141,8 @@ class DataManager:
                         **p,
                     )
 
-            method.transfer(blobs, self.cas, endpoint, progress=_progress)
+            method.transfer(blobs, self.cas, endpoint, progress=_progress,
+                            verify=self.verify_map_for(plan.to_transfer))
             elapsed = round(time.time() - t0, 2)
             self.store.emit("transfer.done", job_id=job_id, site=adapter.name,
                             bytes_total=total, elapsed_s=elapsed,

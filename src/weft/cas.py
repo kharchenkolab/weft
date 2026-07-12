@@ -30,6 +30,7 @@ class DataRefInfo:
     bytes: int
     chunks: list[str] | None = None
     exec: bool = False  # file refs only; trees carry per-entry exec bits
+    plain_sha256: str | None = None  # content hash when name is a merkle root
 
 
 class LocalCAS:
@@ -91,7 +92,8 @@ class LocalCAS:
         self._fast_path_index[str(path)] = (st.st_mtime_ns, st.st_size, st.st_ino, digest.sha256)
         self._save_index()
         return DataRefInfo(data_ref(digest.sha256), "file", digest.size,
-                           digest.chunks, exec=_is_exec(st.st_mode))
+                           digest.chunks, exec=_is_exec(st.st_mode),
+                           plain_sha256=digest.plain_sha256)
 
     def register_tree(self, path: Path) -> DataRefInfo:
         path = Path(path).resolve()

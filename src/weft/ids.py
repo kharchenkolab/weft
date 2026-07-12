@@ -38,6 +38,10 @@ class FileDigest:
     sha256: str          # whole-file or merkle root — this is the DataRef hash
     size: int
     chunks: list[str] | None  # chunk hashes when chunked, else None
+    # for chunked files the CAS name is the merkle root, which remote
+    # `sha256sum -c` can never reproduce — so we also carry the plain
+    # content hash, computed in the same read pass, for wire verification
+    plain_sha256: str | None = None
 
 
 def hash_file(path: Path) -> FileDigest:
@@ -49,14 +53,16 @@ def hash_file(path: Path) -> FileDigest:
                 h.update(block)
         return FileDigest(h.hexdigest(), size, None)
     chunks: list[str] = []
+    plain = hashlib.sha256()
     with open(path, "rb") as f:
         while True:
             chunk = f.read(CHUNK_SIZE)
             if not chunk:
                 break
+            plain.update(chunk)
             chunks.append(hashlib.sha256(chunk).hexdigest())
     root = sha256_bytes(canonical_json({"merkle": chunks, "size": size}))
-    return FileDigest(root, size, chunks)
+    return FileDigest(root, size, chunks, plain.hexdigest())
 
 
 def _is_exec(mode: int) -> bool:
@@ -81,15 +87,16 @@ def tree_manifest(root: Path) -> list[dict]:
                 continue
             st = p.stat()
             d = hash_file(p)
-            entries.append(
-                {
-                    "path": rel,
-                    "kind": "file",
-                    "exec": _is_exec(st.st_mode),
-                    "size": d.size,
-                    "sha256": d.sha256,
-                }
-            )
+            entry = {
+                "path": rel,
+                "kind": "file",
+                "exec": _is_exec(st.st_mode),
+                "size": d.size,
+                "sha256": d.sha256,
+            }
+            if d.plain_sha256:
+                entry["sha256_plain"] = d.plain_sha256
+            entries.append(entry)
     return entries
 
 

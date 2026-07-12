@@ -79,7 +79,8 @@ class RsyncSSH:
                        "resumable": "yes — rsync restarts partial blobs"},
             )
 
-    def transfer(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
+    def transfer(self, blobs, cas: LocalCAS, endpoint, progress=None,
+                 verify=None) -> None:
         if not blobs:
             return
         with tempfile.NamedTemporaryFile("w", suffix=".list", delete=False) as f:
@@ -92,12 +93,20 @@ class RsyncSSH:
             "--chmod=Fu+rw", f"--files-from={listfile}",
             str(cas.root) + "/", dest,
         ], progress=progress)
-        self._verify_remote(blobs, endpoint)
+        self._verify_remote(blobs, endpoint, verify)
 
-    def _verify_remote(self, blobs, endpoint) -> None:
+    def _verify_remote(self, blobs, endpoint, verify=None) -> None:
+        # chunked blobs are named by merkle root; verify their *content*
+        # hash instead. None = unverifiable remotely (legacy) — rsync's own
+        # transport checksums are the guarantee then.
+        verify = verify or {}
         checklist = "".join(
-            f"{digest}  {digest[:2]}/{digest}\n" for digest, _ in blobs
+            f"{verify.get(digest, digest)}  {digest[:2]}/{digest}\n"
+            for digest, _ in blobs
+            if verify.get(digest, digest) is not None
         )
+        if not checklist:
+            return
         proc = subprocess.run(
             ["ssh", *endpoint["ssh_opts"], endpoint["destination"],
              f"cd {shlex.quote(endpoint['cas_root'])} && sha256sum -c >/dev/null"],

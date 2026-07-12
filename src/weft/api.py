@@ -245,6 +245,24 @@ class Weft:
     def env_status(self, env_id: str) -> dict:
         return self.envman.status(env_id)
 
+    def env_repair(self, env_id: str, site: str) -> dict:
+        """Force-rebuild lever: clears a realization the marker still claims
+        (corrupt unpack, half-deleted prefix). The next task using this env
+        on the site rebuilds it from the lockfile."""
+        adapter = self._adapter(site)
+        from .realize import env_dir_rel
+        rel = env_dir_rel(env_id)
+        adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))}")
+        real = self.store.get_realization(env_id, site)
+        self.store.set_realization(
+            env_id, site, (real or {}).get("strategy") or "prefix",
+            rel, "missing", log="repair requested",
+        )
+        self.store.audit_log("agent", "env.repair", site=site, command=env_id)
+        self.store.emit("env.repair", env_id=env_id, site=site)
+        return {"env_id": env_id, "site": site, "state": "cleared",
+                "note": "next task using this env here rebuilds it from the lockfile"}
+
     def env_gpu_hint(self, site: str) -> dict:
         """What GPU userland can this site's driver support? (doc S3/S4)"""
         from .gpu import suggest_gpu_spec

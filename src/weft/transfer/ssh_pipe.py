@@ -57,7 +57,8 @@ class SshPipe:
     def _ssh(endpoint: dict, remote_cmd: str) -> list[str]:
         return ["ssh", *endpoint["ssh_opts"], endpoint["destination"], remote_cmd]
 
-    def transfer(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
+    def transfer(self, blobs, cas: LocalCAS, endpoint, progress=None,
+                 verify=None) -> None:
         if not blobs:
             return
         root = shlex.quote(endpoint["cas_root"])
@@ -85,7 +86,13 @@ class SshPipe:
                 hints={"stderr": proc.stderr.read().decode()[-500:],
                        "resumable": "no — ssh-pipe restarts whole batches"},
             )
-        checklist = "".join(f"{d}  {d[:2]}/{d}\n" for d, _ in blobs)
+        verify = verify or {}
+        checklist = "".join(
+            f"{verify.get(d, d)}  {d[:2]}/{d}\n" for d, _ in blobs
+            if verify.get(d, d) is not None
+        )
+        if not checklist:
+            return
         v = subprocess.run(
             self._ssh(endpoint, f"cd {root} && sha256sum -c >/dev/null"),
             input=checklist.encode(), capture_output=True, timeout=1800,

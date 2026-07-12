@@ -318,9 +318,14 @@ cmd_load() {
     fi
     mem_avail_kb=$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
     users=$(who 2>/dev/null | wc -l | tr -d ' ')
+    # GPUs are often the limiting factor: report live utilization + memory
+    gpu_load=$(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total \
+        --format=csv,noheader,nounits 2>/dev/null | \
+        awk -F', *' '{printf "%s{\"util_pct\":%d,\"mem_used_mb\":%d,\"mem_total_mb\":%d}", sep, $1, $2, $3; sep=","}' || true)
     cat <<EOF
 {"cpus": $cpus, "load1": ${l1:-0}, "load5": ${l5:-0}, "load15": ${l15:-0},
- "mem_available_gb": $((mem_avail_kb / 1048576)), "login_users": ${users:-0}}
+ "mem_available_gb": $((mem_avail_kb / 1048576)), "login_users": ${users:-0},
+ "gpus": [${gpu_load:-}]}
 EOF
 }
 

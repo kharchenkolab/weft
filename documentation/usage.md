@@ -156,6 +156,24 @@ snap = w.session_snapshot(s["session_id"])       # minimal delta → real EnvID
 # re-run the final computation under snap["env_id"] → enters provenance
 ```
 
+### Monitoring, arrays, load
+
+```python
+w.site_load("hpc")                          # idle CPUs, backlog, GPU util, QOS
+w.site_load("hpc", resources={"cpus": 8, "walltime": "04:00:00"})
+                                            # + sbatch --test-only start ETA
+r = w.task_submit({..., "array": 2000})     # fan-out with WEFT_ARRAY_INDEX
+w.events_poll(cursor)                       # compact: array digests, transfer
+                                            # progress, job states (non-array)
+w.array_status(r["group"])                  # counts + failure previews
+w.array_result(r["group"])                  # roll-up: wall stats, failures
+w.env_repair(env_id, "hpc")                 # clear a corrupt realization
+```
+
+Off-CI regression scenarios live in `misc/scenarios/scenarios.py`
+(gitignored): 12 end-to-end runs against dockerized sites —
+`pixi run python misc/scenarios/scenarios.py`.
+
 ### Diagnostics
 
 ```python

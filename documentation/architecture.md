@@ -265,6 +265,48 @@ unchanged-resubmission count (must be zero). This layer tests the
 model can't either — a regression here is an agent-experience bug even
 when every unit test passes.
 
+## Monitoring at scale (poller architecture)
+
+Per-job monitor threads were replaced by **per-site pollers**: one thread
+per site with outstanding jobs makes ONE batched status query per tick
+(`squeue`/`scontrol` id-lists on Slurm; a single `weft-shim status-batch`
+call on SSH/local), diffs the snapshot, and applies transitions. Terminal
+jobs go to a bounded collector pool. Submission slots are released at
+submit — thousands of elements can be in flight while thread count stays
+O(sites) + O(collectors). Per-site `policy.poll_interval_s` tunes cadence.
+
+Failure semantics: transport failure = ONE `site.unreachable` event with
+poller-owned exponential backoff (jobs untouched; detached execution rides
+it out); site-fatal errors (e.g. cloud `budget.exceeded`) fail every
+watched job; "lost" verdicts need two consecutive strikes; liveness checks
+verify process *identity* (boot time + start-time vs pid-file mtime), so
+pid recycling after a remote reboot cannot masquerade as a running job.
+Collection retries through brief outages and then parks the job back with
+the poller — when the site returns, the exited status re-triggers
+collection; `reconcile()` never polls inline, it just registers jobs with
+pollers, so an unreachable site at controller restart delays recovery
+instead of corrupting it.
+
+**Array digests:** element jobs carry `array_group`/`array_index`; the
+poller (and collectors) emit coalesced `array.progress` events — counts
+plus up to three failure previews — and a final `array.done` roll-up with
+wall-time stats. `events_poll(compact=True)` (the default) drops
+per-element events; a 2,000-point scan reads as a handful of digest lines.
+
+**Live load** (`site_load`): `weft-shim load` gives host loadavg/free
+memory everywhere; Slurm adds per-partition idle-vs-allocated CPUs, queue
+backlog, the caller's own footprint, QOS (None without accounting — honest),
+and `sbatch --test-only` start ETAs. Placement folds load in best-effort:
+idle scheduler CPUs score up, backlog and hot hosts score down, with
+reasons in the ranked list. Cloud sites report "not launched" rather than
+booting an instance to measure it.
+
+**Transfer progress:** `transfer.start/progress/done` events (≥1s apart)
+with bytes, rate, and ETA. rsync is driven through a pty (progress repaints
+are \r-terminated; no pipe buffering mode flushes them); ssh-pipe streams
+its tar through a counting writer (also removing the old whole-archive-in-
+memory build); plans carry method + time estimates before any bytes move.
+
 ## Deviations & decisions log
 
 | decision | rationale |

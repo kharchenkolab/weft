@@ -248,7 +248,8 @@ def _build_packed(
             f"no transfer method {endpoint['method']!r} for packed delivery",
             stage="realize",
         )
-    method.transfer([(digest, info.bytes)], cas, endpoint)
+    method.transfer([(digest, info.bytes)], cas, endpoint,
+                    verify={digest: info.plain_sha256 or digest})
 
     site_tar = f"{endpoint['cas_root']}/{digest[:2]}/{digest}"
     dest = adapter.path(rel)

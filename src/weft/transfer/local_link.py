@@ -21,7 +21,8 @@ class LocalLink:
     def _dst(endpoint: dict, digest: str) -> Path:
         return Path(endpoint["cas_root"]) / digest[:2] / digest
 
-    def transfer(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
+    def transfer(self, blobs, cas: LocalCAS, endpoint, progress=None,
+                 verify=None) -> None:
         done_bytes = done_files = 0
         for digest, size in blobs:
             done_bytes += size
