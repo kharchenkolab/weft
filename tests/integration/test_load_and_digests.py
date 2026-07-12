@@ -22,10 +22,15 @@ def w(tmp_path, pixi_bin, slurm_site):
 
 
 def test_slurm_load_view_reflects_queue_pressure(w):
-    quiet = w.site_load("hpc")
+    # the fixture cluster is shared: wait for quiescence before asserting
+    for _ in range(60):
+        quiet = w.site_load("hpc", fresh=True)
+        if quiet["partitions"]["standard"]["cpus_idle"] == 8:
+            break
+        time.sleep(1)
     assert quiet["partitions"]["standard"]["cpus_total"] == 8
-    idle0 = quiet["partitions"]["standard"]["cpus_idle"]
-    assert idle0 == 8 and "load_fraction" in quiet
+    assert quiet["partitions"]["standard"]["cpus_idle"] == 8
+    assert "load_fraction" in quiet
     assert quiet["qos"] is None  # no accounting DB on the fixture — honest
 
     # hog the node, then queue one more: pressure must become visible
