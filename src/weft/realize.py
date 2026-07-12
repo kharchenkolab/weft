@@ -106,6 +106,13 @@ def ensure_realization(
                    requested="container", using="packed")
         strategy = strategy.replace("container", "packed")
 
+    # overlay: reuse an already-realized parent's prefix and materialize only
+    # the delta (O(delta) instead of O(env)). Falls back to a full prefix on
+    # any doubt — the fallback is correct, just slower.
+    overlay_parent = _overlay_parent(env_row, adapter, store)
+    if overlay_parent:
+        strategy = "overlay"
+
     rel = env_dir_rel(env_id)
     with _build_lock(env_id, adapter.name):
         existing = store.get_realization(env_id, adapter.name)
@@ -122,12 +129,24 @@ def ensure_realization(
                 except (ValueError, WeftError):
                     marker = {}
                 recorded = marker.get("bin_digest")
-                if not recorded or recorded == _bin_digest(
-                        adapter, rel, marker.get("strategy", strategy)):
+                marked_strategy = marker.get("strategy", strategy)
+                ok = not recorded or recorded == _bin_digest(
+                    adapter, rel, marked_strategy)
+                # two-deep: an overlay is only as intact as its parent
+                if ok and marker.get("parent"):
+                    p_rel = env_dir_rel(marker["parent"])
+                    ok = (adapter.file_exists(f"{p_rel}/.weft-ready")
+                          and marker.get("parent_bin_digest")
+                          == _bin_digest(adapter, p_rel, "prefix"))
+                    if not ok:
+                        store.emit("realize.parent_changed", env_id=env_id,
+                                   site=adapter.name, parent=marker["parent"])
+                if ok:
                     return existing
                 store.emit("realize.integrity_failed", env_id=env_id,
                            site=adapter.name,
-                           note="executable inventory changed; rebuilding")
+                           note="executable inventory changed (here or in the "
+                                "parent); rebuilding")
             # site-side deletion (e.g. scratch purge): demote and rebuild
             store.set_realization(env_id, adapter.name, strategy, rel, "missing")
         elif adapter.file_exists(f"{rel}/.weft-ready"):
@@ -161,20 +180,37 @@ def ensure_realization(
             store.set_realization(env_id, adapter.name, strategy, rel,
                                   "building")
         try:
-            if strategy.endswith("packed"):
-                _build_packed(env_id, env_row, adapter, rel, modules,
-                              modules_init, caps, pack_tools or {})
-            else:
-                _build_prefix(env_id, env_row, adapter, rel, modules,
-                              modules_init)
-            _realize_layers(env_id, env_row, adapter, rel,
-                            (pack_tools or {}).get("solvers") or {},
-                            store.emit,
-                            offline=strategy.endswith("packed"),
-                            pack_tools=pack_tools)
+            if strategy == "overlay":
+                try:
+                    _build_overlay(env_id, env_row, adapter, rel,
+                                   overlay_parent, store, pack_tools or {})
+                except WeftError as e:
+                    # composition didn't verify (ABI, shadowing, a build that
+                    # needed something the parent lacks): the user still gets a
+                    # working env — we just pay for a full prefix and say so.
+                    store.emit("realize.overlay_fallback", env_id=env_id,
+                               site=adapter.name, parent=overlay_parent,
+                               reason=e.detail[:300])
+                    strategy = "modules+prefix" if modules else "prefix"
+                    overlay_parent = None
+                    store.set_realization(env_id, adapter.name, strategy, rel,
+                                          "building")
+            if strategy != "overlay":
+                if strategy.endswith("packed"):
+                    _build_packed(env_id, env_row, adapter, rel, modules,
+                                  modules_init, caps, pack_tools or {})
+                else:
+                    _build_prefix(env_id, env_row, adapter, rel, modules,
+                                  modules_init)
+                _realize_layers(env_id, env_row, adapter, rel,
+                                (pack_tools or {}).get("solvers") or {},
+                                store.emit,
+                                offline=strategy.endswith("packed"),
+                                pack_tools=pack_tools)
             _stage_post_install_inputs(env_row, adapter, rel, pack_tools or {})
             _run_post_install(env_row, adapter, rel)
-            _spot_check_and_mark(env_id, env_row, adapter, rel, strategy)
+            _spot_check_and_mark(env_id, env_row, adapter, rel, strategy,
+                                 parent=overlay_parent)
         except WeftError as e:
             store.set_realization(
                 env_id, adapter.name, strategy, rel, "failed", log=e.detail
@@ -419,7 +455,152 @@ class _SiteLease:
         self.adapter.run_cmd(f"rm -rf {shlex.quote(self.lease)} 2>/dev/null; true")
 
 
+def _overlay_parent(env_row: dict, adapter: SiteAdapter, store: Store) -> str | None:
+    """Is this env an overlay candidate ON THIS SITE right now?"""
+    parent = env_row.get("parent_env_id")
+    if not parent or not env_row.get("layerable"):
+        return None
+    p_real = store.get_realization(parent, adapter.name)
+    if not p_real or p_real["state"] != "ready":
+        return None      # parent not realized here: nothing to stack on
+    if p_real["strategy"] == "overlay":
+        return None      # depth 1 only in v1: chains multiply the failure
+                         # surface and the eviction bookkeeping
+    if not adapter.file_exists(f"{env_dir_rel(parent)}/.weft-ready"):
+        return None
+    return parent
+
+
+def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
+                   parent_env_id: str, store: Store, pack_tools: dict) -> None:
+    """Reuse the parent's prefix; materialize ONLY the delta into this env's
+    own layer dirs; compose at runtime via each ecosystem's search path."""
+    import json as _json
+    import time as _t
+    from .overlay import classify_delta
+    from .toolchain import build_env_prelude, ensure_toolchain
+
+    parent_row = store.get_env(parent_env_id)
+    parent_rel = env_dir_rel(parent_env_id)
+    parent_dir = adapter.path(parent_rel)
+    delta = classify_delta(parent_row["canonical"], env_row["canonical"])
+    if not delta["layerable"]:
+        raise WeftError("env.realize_failed",
+                        f"not layerable: {delta['why']}", stage="realize")
+
+    t0 = _t.time()
+    store.emit("realize.overlay", env_id=env_id, site=adapter.name,
+               parent=parent_env_id, delta=delta)
+    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
+                    f"mkdir -p {shlex.quote(adapter.path(rel))}")
+
+    # a source-built delta needs a compiler that is NOT in the env; weft
+    # brings its own, on PATH for the build only
+    prelude = ""
+    if delta.get("layers_added") or delta.get("pypi_added"):
+        tc = ensure_toolchain(adapter, adapter.pixi_bin)
+        if tc:
+            prelude = build_env_prelude(adapter, tc, parent_dir)
+
+    activation = [f". {shlex.quote(parent_dir)}/activate.sh"]
+    solvers = pack_tools.get("solvers") or {}
+    for eco, names in (delta.get("layers_added") or {}).items():
+        solver = solvers.get(eco)
+        if solver is None or not hasattr(solver, "realize_overlay"):
+            raise WeftError(
+                "env.realize_failed",
+                f"the {eco} solver cannot realize an overlay layer",
+                stage="realize")
+        layer = (env_row["canonical"].get("layers") or {})[eco]
+        parent_layer = (parent_row["canonical"].get("layers") or {}).get(eco)
+        activation.append(solver.realize_overlay(
+            layer, parent_layer, names, adapter, rel, parent_rel, prelude,
+            pack_tools, parent_env_id))
+
+    if delta.get("pypi_added"):
+        activation.append(_overlay_pypi(env_id, env_row, parent_row, adapter,
+                                        rel, parent_dir, delta["pypi_added"],
+                                        prelude))
+
+    adapter.write_file(f"{rel}/activate.sh",
+                       ("\n".join(activation) + "\n").encode())
+    _verify_overlay(env_row, parent_row, adapter, rel, delta)
+    adapter.write_file(f"{rel}/.weft-overlay",
+                       _json.dumps({"parent": parent_env_id,
+                                    "delta": delta}).encode())
+    store.emit("realize.overlay.done", env_id=env_id, site=adapter.name,
+               parent=parent_env_id, elapsed_s=round(_t.time() - t0, 1))
+
+
+def _verify_overlay(env_row: dict, parent_row: dict, adapter: SiteAdapter,
+                    rel: str, delta: dict) -> None:
+    """Composition check — the backstop that makes the overlay safe: load
+    every delta package AND a sample of the parent's, in the composed env.
+    Any failure aborts the overlay and we fall back to a full prefix."""
+    checks = []
+    for name in (delta.get("layers_added") or {}).get("cran", []):
+        checks.append(f"Rscript -e 'library({name})'")
+    for name in (delta.get("layers_added") or {}).get("julia", []):
+        checks.append(f"julia -e 'using {name}'")
+    py_delta = [n for n in delta.get("pypi_added", [])]
+    if py_delta:
+        mods = ", ".join(n.replace("-", "_") for n in py_delta)
+        checks.append(f"python -c 'import {mods}'")
+    # shadowing check: the parent's own top-level packages must still load
+    parent_layers = parent_row["canonical"].get("layers") or {}
+    for name in (parent_layers.get("cran", {}).get("top_level") or [])[:3]:
+        if "/" not in name:
+            checks.append(f"Rscript -e 'library({name})'")
+    if not checks:
+        return
+    script = (f". {shlex.quote(adapter.path(rel))}/activate.sh && "
+              + " && ".join(checks))
+    r = adapter.run_activated(script, timeout=600)
+    if r.rc != 0:
+        raise WeftError(
+            "env.realize_failed",
+            "overlay composition check failed (ABI mismatch, shadowing, or a "
+            "missing native dependency)",
+            stage="realize",
+            hints={"log_tail": (r.err or r.out)[-1200:]})
+
+
+def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
+                  adapter: SiteAdapter, rel: str, parent_dir: str,
+                  added: list[str], prelude: str) -> str:
+    """Install ONLY the delta wheels into the child's own site dir, at the
+    exact versions the lock pinned, with no dependency resolution (the lock
+    already did it) — then compose via PYTHONPATH/PATH."""
+    pins = {p["name"]: p["version"]
+            for plat in env_row["canonical"]["platforms"].values()
+            for p in plat if p["kind"] == "pypi"}
+    specs = " ".join(shlex.quote(f"{n}=={pins[n]}") for n in added if n in pins)
+    pylib = f"{adapter.path(rel)}/pylib"
+    r = adapter.run_activated(
+        prelude +
+        f". {shlex.quote(parent_dir)}/activate.sh && "
+        f"mkdir -p {shlex.quote(pylib)} && "
+        f"python -m pip install --no-deps --no-input --target {shlex.quote(pylib)} "
+        f"{specs} 2>&1", timeout=1800)
+    if r.rc != 0:
+        raise WeftError(
+            "env.realize_failed",
+            "could not install the pypi delta into the overlay layer",
+            stage="realize", hints={"log_tail": (r.err or r.out)[-1200:]})
+    # entry-point scripts: pip --target does not place them on PATH
+    binw = f"{adapter.path(rel)}/bin"
+    adapter.run_cmd(
+        f"mkdir -p {shlex.quote(binw)} && "
+        f"if [ -d {shlex.quote(pylib)}/bin ]; then "
+        f"cp -a {shlex.quote(pylib)}/bin/* {shlex.quote(binw)}/ 2>/dev/null; "
+        f"fi; true")
+    return (f'export PYTHONPATH="{pylib}${{PYTHONPATH:+:$PYTHONPATH}}"\n'
+            f'export PATH="{binw}:$PATH"')
+
+
 def _bin_dir_rel(rel: str, strategy: str) -> str:
+    if strategy == "overlay":
+        return f"{rel}/bin"      # the child's own layer bin (may be empty)
     return f"{rel}/env/bin" if strategy.endswith("packed") \
         else f"{rel}/.pixi/envs/default/bin"
 
@@ -440,7 +621,8 @@ def _bin_digest(adapter: SiteAdapter, rel: str, strategy: str) -> str:
 
 
 def _spot_check_and_mark(
-    env_id: str, env_row: dict, adapter: SiteAdapter, rel: str, strategy: str
+    env_id: str, env_row: dict, adapter: SiteAdapter, rel: str, strategy: str,
+    parent: str | None = None,
 ) -> None:
     """Activation succeeds; interpreter runs if present; then fence-mark
     (with the bin inventory fingerprint for later integrity checks)."""
@@ -456,9 +638,18 @@ def _spot_check_and_mark(
             hints={"log_tail": (spot.err or spot.out)[-1000:], "retryable": True},
         )
     import json as _json
-    marker = _json.dumps({"strategy": strategy,
-                          "bin_digest": _bin_digest(adapter, rel, strategy)})
-    adapter.write_file(f"{rel}/.weft-ready", (marker + "\n").encode())
+    marker = {"strategy": strategy}
+    if parent:
+        # the integrity fence goes two deep: if the PARENT is repaired,
+        # evicted, or tampered with, this child must rebuild too
+        parent_rel = env_dir_rel(parent)
+        marker["parent"] = parent
+        marker["parent_bin_digest"] = _bin_digest(adapter, parent_rel, "prefix")
+        marker["bin_digest"] = _bin_digest(adapter, rel, "overlay")
+    else:
+        marker["bin_digest"] = _bin_digest(adapter, rel, strategy)
+    adapter.write_file(f"{rel}/.weft-ready",
+                       (_json.dumps(marker) + "\n").encode())
 
 
 def _build_packed(

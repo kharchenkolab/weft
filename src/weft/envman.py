@@ -207,9 +207,6 @@ class EnvManager:
                        "suggestion": "typo in a deps key, or the solver "
                                      "needs to be enabled/installed"},
             )
-        from .solvers import check_layer_requirements
-        check_layer_requirements(merged, merged.deps_extra, self.solvers)
-
         if not update and not dry_run:
             cached = self.store.env_for_spec(merged_hash)
             if cached:
@@ -228,6 +225,11 @@ class EnvManager:
                     hints={"suggestion": "extends_env takes a resolved EnvID; "
                                          "use `extends` for a spec hash"})
             merged = self._pin_to_parent(merged, parent_env)
+
+        # after pinning, so an inherited interpreter (r-base via extends_env)
+        # satisfies a layer's prerequisite
+        from .solvers import check_layer_requirements
+        check_layer_requirements(merged, merged.deps_extra, self.solvers)
 
         workdir = self.solve_dir / merged_hash.split(":")[-1][:16]
         try:

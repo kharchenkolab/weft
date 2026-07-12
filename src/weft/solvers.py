@@ -349,6 +349,119 @@ class CranSolver:
             )
         return f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"'
 
+    def realize_overlay(self, layer: dict, parent_layer: dict | None,
+                        added: list[str], adapter, env_rel: str,
+                        parent_rel: str, prelude: str, pack_tools: dict,
+                        parent_env_id: str) -> str:
+        """Install ONLY the delta packages into this env's own rlib and put
+        it *in front of* the parent's on R_LIBS. R composes library paths
+        natively — this is the ecosystem doing the layering, not us.
+
+        Source builds (GitHub refs, packages with C code) use the weft-owned
+        toolchain from `prelude` and are cached content-addressed by
+        (source, parent env, platform, toolchain)."""
+        import json as _json
+        import shlex
+        from .toolchain import cached_build, compile_cache_key, put_cached_build
+
+        env_dir = adapter.path(env_rel)
+        parent_dir = adapter.path(parent_rel)
+        rlib = f"{env_dir}/rlib"
+        parent_rlib = f"{parent_dir}/rlib"
+
+        by_name = {r["name"]: r for r in layer["records"]}
+        recs = [by_name[n] for n in added if n in by_name]
+        store = pack_tools.get("store")
+        cas = pack_tools.get("cas")
+        transfers = pack_tools.get("transfers", {})
+
+        # compile cache: has this exact package already been built against
+        # this exact parent? then nobody pays twice — not the next workspace,
+        # not the next colleague on a shared site.
+        key = compile_cache_key(
+            {"records": [{k: r.get(k) for k in ("name", "version", "source",
+                                                "remote_sha")} for r in recs],
+             "snapshot": layer.get("snapshot")},
+            parent_env_id, "linux-64")
+        hit = cached_build(store, key) if store is not None else None
+        adapter.run_cmd(f"mkdir -p {shlex.quote(rlib)}")
+        if hit and cas is not None:
+            endpoint = adapter.transfer_endpoint()
+            method = transfers.get(endpoint["method"])
+            row = store.get_dataref(hit)
+            digest = hit.split(":")[-1]
+            method.transfer([(digest, row["bytes"])], cas, endpoint,
+                            verify={digest: row["meta"].get("sha256_plain")
+                                    or digest})
+            blob = f"{endpoint['cas_root']}/{digest[:2]}/{digest}"
+            r = adapter.run_cmd(
+                f"tar -xf {shlex.quote(blob)} -C {shlex.quote(rlib)}",
+                timeout=600)
+            if r.rc == 0:
+                store.emit("overlay.compile_cache_hit", key=key,
+                           packages=[x["name"] for x in recs])
+                return self._r_libs_line(rlib, parent_rlib)
+
+        cran_names = [r["name"] for r in recs if not r.get("remote_sha")]
+        tarballs = [r["tarball"] for r in recs if r.get("remote_sha")]
+        rcode = (
+            'options(repos=c(CRAN={snap}), HTTPUserAgent=sprintf('
+            '"R/%s R (%s)", getRversion(), paste(getRversion(), '
+            'R.version$platform, R.version$arch, R.version$os)));'
+            'lib <- {lib}; dir.create(lib, showWarnings=FALSE, recursive=TRUE);'
+            '.libPaths(c(lib, {plib}, .libPaths()));'
+            'p <- c({pkgs});'
+            'if (length(p)) install.packages(p, lib=lib);'
+            't <- c({tarballs});'
+            'if (length(t)) install.packages(t, lib=lib, repos=NULL, type="source");'
+            'need <- c({need});'
+            'ok <- need %in% rownames(installed.packages(lib.loc=lib));'
+            'if (!all(ok)) {{ write(paste("FAILED:", paste(need[!ok], collapse=",")), stderr()); quit(status=4) }}'
+        ).format(snap=_json.dumps(layer["snapshot"]),
+                 lib=_json.dumps(rlib), plib=_json.dumps(parent_rlib),
+                 pkgs=", ".join(_json.dumps(x) for x in cran_names) or 'character(0)',
+                 tarballs=", ".join(_json.dumps(x) for x in tarballs) or 'character(0)',
+                 need=", ".join(_json.dumps(x) for x in added) or 'character(0)')
+        r = adapter.run_activated(
+            prelude +
+            f". {shlex.quote(parent_dir)}/activate.sh && "
+            f"Rscript -e {shlex.quote(rcode)} 2>&1", timeout=3600)
+        if r.rc != 0:
+            raise WeftError(
+                "env.realize_failed",
+                "cran overlay layer install failed",
+                stage="realize",
+                hints={"ecosystem": "cran",
+                       "log_tail": (r.err or r.out)[-1500:],
+                       "note": "if the package needs a native library the "
+                               "parent lacks, it cannot be layered: add that "
+                               "conda package to the parent env"})
+        # populate the compile cache for everyone who comes next
+        if store is not None and cas is not None:
+            import tempfile
+            from pathlib import Path as _P
+            tar_rel = f"{env_rel}/rlib-cache.tar"
+            adapter.run_cmd(
+                f"tar -cf {shlex.quote(adapter.path(tar_rel))} "
+                f"-C {shlex.quote(rlib)} .", timeout=600)
+            try:
+                data = adapter.read_file(tar_rel)
+                with tempfile.TemporaryDirectory() as td:
+                    p = _P(td) / "rlib.tar"
+                    p.write_bytes(data)
+                    ref = put_cached_build(store, cas, key, p)
+                store.emit("overlay.compile_cached", key=key, ref=ref,
+                           packages=added)
+            except WeftError:
+                pass          # caching is an optimization, never a failure
+            adapter.run_cmd(f"rm -f {shlex.quote(adapter.path(tar_rel))}")
+        return self._r_libs_line(rlib, parent_rlib)
+
+    @staticmethod
+    def _r_libs_line(rlib: str, parent_rlib: str) -> str:
+        return (f'export R_LIBS="{rlib}:{parent_rlib}'
+                + '${R_LIBS:+:$R_LIBS}"')
+
     def pack_layer(self, layer: dict, adapter, env_rel: str,
                    pack_tools: dict) -> str:
         """Air-gapped delivery (design B2): download the locked closure
