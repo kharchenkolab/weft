@@ -271,13 +271,16 @@ class Weft:
 
     # -- environments ---------------------------------------------------------
 
-    def env_ensure(self, spec_or_id, *, update: bool = False,
-                   dry_run: bool = False) -> dict:
-        try:
-            return self.envman.ensure(spec_or_id, update=update,
-                                      dry_run=dry_run)
-        except WeftError as e:
-            return e.to_dict()
+    def env_ensure(self, spec_or_id, update: bool = False,
+                   dry_run: bool = False, relax: str = "none") -> dict:
+        """Resolve a spec (or return a known EnvID). Mark a constraint SOFT
+        with a trailing '?' ("scipy ==1.14.1?") and pass relax="soft" to get
+        a working env in one call instead of a conflict-relax-retry loop:
+        weft drops only soft constraints, reports what it relaxed, and the
+        result is still fully pinned. Hard pins are never touched.
+        dry_run=True solves without storing."""
+        return self.envman.ensure(spec_or_id, update=update,
+                                  dry_run=dry_run, relax=relax)
 
     def env_status(self, env_id: str) -> dict:
         return self.envman.status(env_id)

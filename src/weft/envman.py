@@ -28,8 +28,55 @@ class EnvManager:
         body = self.store.get_spec(spec_hash)
         return EnvSpec.from_dict(body) if body else None
 
+    def _solve_forgiving(self, merged: EnvSpec, workdir: Path, relax: str):
+        """Solve as written; under relax="soft", greedily drop SOFT
+        constraints (trailing '?') until it solves. Hard pins are never
+        touched — a silent version drop is precisely what a substrate must
+        not do. The result is still fully pinned: adaptiveness lives in the
+        path to a solve, not in what you got."""
+        from .spec import is_soft, relax_dep
+        try:
+            return solve(merged, workdir, self.pixi_bin), []
+        except WeftError as first:
+            if relax != "soft" or first.code != "env.solve_conflict":
+                raise
+            soft_idx = [(eco, i, d)
+                        for eco, deps in (("conda", merged.conda),
+                                          ("pypi", merged.pypi))
+                        for i, d in enumerate(deps) if is_soft(d)]
+            if not soft_idx:
+                first.hints["relax"] = (
+                    "no soft constraints to relax — mark preferences with a "
+                    "trailing '?' (e.g. \"scipy ==1.14.1?\") to let weft "
+                    "relax them")
+                raise
+            relaxed: list[dict] = []
+            for eco, i, dep in soft_idx:
+                deps = merged.conda if eco == "conda" else merged.pypi
+                requested = dep
+                deps[i] = relax_dep(dep)
+                relaxed.append({"dep": requested.rstrip("? ").strip(),
+                                "ecosystem": eco,
+                                "relaxed_to": deps[i]})
+                try:
+                    result = solve(merged, workdir, self.pixi_bin)
+                except WeftError:
+                    continue     # still conflicting: relax the next one too
+                for r in relaxed:
+                    r["got"] = next(
+                        (p["version"] for plat in
+                         result.canonical["platforms"].values()
+                         for p in plat if p["name"] == r["relaxed_to"]), None)
+                return result, relaxed
+            first.hints["tried_relaxing"] = [r["dep"] for r in relaxed]
+            first.hints["suggestion"] = (
+                "even with every soft constraint relaxed this does not "
+                "solve — a hard pin (or the package set itself) is the "
+                "conflict; the solver_message names it")
+            raise
+
     def ensure(self, spec_or_id, *, update: bool = False,
-               dry_run: bool = False) -> dict:
+               dry_run: bool = False, relax: str = "none") -> dict:
         """Accepts an EnvID string or a spec dict; returns {env_id, status, summary}.
         dry_run solves everything but stores nothing — cheap fix-testing."""
         if isinstance(spec_or_id, str):
@@ -67,7 +114,11 @@ class EnvManager:
                         "summary": self._summary(self.store.get_env(cached))}
 
         workdir = self.solve_dir / merged_hash.split(":")[-1][:16]
-        result = solve(merged, workdir, self.pixi_bin)
+        result, relaxed = self._solve_forgiving(merged, workdir, relax)
+        if relaxed:
+            # the relaxed spec is what actually got solved — store it as the
+            # identity (the lock is exact; adaptiveness was in the *path*)
+            merged_hash = merged.spec_hash()
         canonical = result.canonical
         layer_summaries = {}
         for eco, deps in sorted(merged.deps_extra.items()):
@@ -81,10 +132,13 @@ class EnvManager:
         eid = compute_env_id(canonical)
 
         if dry_run:
-            return {"env_id": eid, "status": "dry-run (not stored)",
-                    "layers": layer_summaries,
-                    "summary": {"packages_per_platform": {
-                        p: len(v) for p, v in canonical["platforms"].items()}}}
+            out = {"env_id": eid, "status": "dry-run (not stored)",
+                   "layers": layer_summaries,
+                   "summary": {"packages_per_platform": {
+                       p: len(v) for p, v in canonical["platforms"].items()}}}
+            if relaxed:
+                out["relaxed"] = relaxed
+            return out
 
         self.store.put_spec(spec.spec_hash(), spec.name, spec.to_dict())
         self.store.put_spec(merged_hash, merged.name, merged.to_dict())
@@ -97,6 +151,12 @@ class EnvManager:
                "summary": self._summary(self.store.get_env(eid))}
         if layer_summaries:
             out["layers"] = layer_summaries
+        if relaxed:
+            # transparent: what weft gave up to get you a working env
+            out["relaxed"] = relaxed
+            out["note"] = ("solved by relaxing soft constraints (see "
+                           "`relaxed`); the result is still fully pinned")
+            self.store.emit("env.relaxed", env_id=eid, relaxed=relaxed)
         return out
 
     def _summary(self, row: dict) -> dict:

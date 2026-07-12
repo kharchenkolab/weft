@@ -27,14 +27,31 @@ DEFAULT_CHANNELS = ["conda-forge"]
 
 
 def split_constraint(dep: str) -> tuple[str, str]:
-    """'root >=6.32' -> ('root', '>=6.32'); bare name -> (name, '*')."""
-    m = _NAME_RE.match(dep)
+    """'root >=6.32' -> ('root', '>=6.32'); bare name -> (name, '*').
+    A trailing '?' marks the constraint SOFT (a preference the solver may
+    relax under relax="soft"); it is stripped here."""
+    m = _NAME_RE.match(strip_soft(dep))
     if not m:
         raise WeftError(
             "task.invalid", f"cannot parse dependency string: {dep!r}", stage="solve"
         )
     name, rest = m.group(1), m.group(2).strip()
     return name.lower(), (rest or "*")
+
+
+def is_soft(dep: str) -> bool:
+    """'scipy ==1.14.1?' — a preference, not a pin. Hard pins are NEVER
+    relaxed: a silent version drop is exactly what a substrate must not do."""
+    return dep.rstrip().endswith("?")
+
+
+def strip_soft(dep: str) -> str:
+    return dep.rstrip()[:-1].rstrip() if is_soft(dep) else dep
+
+
+def relax_dep(dep: str) -> str:
+    """Drop a soft constraint down to a bare name (keep the package)."""
+    return split_constraint(dep)[0]
 
 
 def _merge_deps(parent: list[str], child: list[str]) -> list[str]:
