@@ -75,6 +75,7 @@ class JobRunner:
         self._digest_lock = threading.Lock()
         self._last_digest: dict[str, dict] = {}
         self._done_digests: set[str] = set()
+        self._group_expected: dict[str, int] = {}
         self._load_cache: dict[str, tuple[float, dict]] = {}
 
     LOAD_TTL_S = 15.0
@@ -113,6 +114,22 @@ class JobRunner:
         if not force:
             prior = self.store.latest_manifest_for_task(task_hash)
             if prior:
+                if _group is not None:
+                    # memoized array elements still need a row in the group,
+                    # or digests undercount (live-agent eval finding: a
+                    # group of 6 reporting total=1 hangs done==total gates)
+                    job_id = "jb_" + uuid.uuid4().hex[:12]
+                    stored = task.to_dict()
+                    self.store.put_job(job_id, task_hash, stored,
+                                       prior.get("site", "?"), "DONE",
+                                       array_group=_group, array_index=_index)
+                    self.store.update_job(job_id, manifest=prior)
+                    self.store.emit("job.done", job_id=job_id,
+                                    memoized=True,
+                                    **self.group_payload(_group))
+                    self.emit_group_digest(_group)
+                    return {"job_id": job_id, "memoized": True,
+                            "manifest": prior}
                 return {"job_id": prior["job_id"], "memoized": True,
                         "manifest": prior,
                         "note": "identical task already completed; pass force=true to re-run"}
@@ -140,6 +157,9 @@ class JobRunner:
         plan = self._plan(task, site)
         if dry_run:
             return {"plan": plan, "site": site, "elements": task.array, "dry_run": True}
+        # array.done must wait for the whole fan-out, even when elements
+        # memoize instantly and the group looks "complete" at size 1
+        self._group_expected[group] = task.array
         results = []
         for i in range(task.array):
             element = replace(
@@ -487,7 +507,11 @@ class JobRunner:
                     "job.oom", "job was killed for memory", stage="running",
                     hints={"observed_peak_gb": max_rss_gb, "requested_gb": mem_ask,
                            "log_signature": sig,
-                           "suggestion": "resubmit with a larger mem_gb ask"},
+                           "suggestion": "resubmit with mem_gb >= "
+                                         "max(2 x requested, 1.5 x observed peak)",
+                           "note": "observed peak UNDERSTATES need when the "
+                                   "kill happened during allocation — never "
+                                   "size down toward it"},
                 )
             raise WeftError(
                 "job.nonzero_exit", f"command exited {exit_code}", stage="running",
@@ -525,7 +549,8 @@ class JobRunner:
             if self._last_digest.get(group) == counts:
                 return
             self._last_digest[group] = counts
-            terminal = counts["total"] > 0 and (
+            expected = self._group_expected.get(group, 0)
+            terminal = counts["total"] > 0 and counts["total"] >= expected and (
                 counts["done"] + counts["failed"] + counts["cancelled"]
                 == counts["total"]
             )

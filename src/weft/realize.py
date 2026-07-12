@@ -110,7 +110,22 @@ def ensure_realization(
         existing = store.get_realization(env_id, adapter.name)
         if existing and existing["state"] == "ready":
             if adapter.file_exists(f"{rel}/.weft-ready"):
-                return existing
+                # integrity fence: a tampered env (deleted tool, partial
+                # purge) must rebuild, not silently fall through to host
+                # binaries with the locked env's name on the manifest
+                import json as _json
+                try:
+                    marker = _json.loads(
+                        adapter.read_file(f"{rel}/.weft-ready").decode())
+                except (ValueError, WeftError):
+                    marker = {}
+                recorded = marker.get("bin_digest")
+                if not recorded or recorded == _bin_digest(
+                        adapter, rel, marker.get("strategy", strategy)):
+                    return existing
+                store.emit("realize.integrity_failed", env_id=env_id,
+                           site=adapter.name,
+                           note="executable inventory changed; rebuilding")
             # site-side deletion (e.g. scratch purge): demote and rebuild
             store.set_realization(env_id, adapter.name, strategy, rel, "missing")
         elif adapter.file_exists(f"{rel}/.weft-ready"):
@@ -234,10 +249,31 @@ def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
             )
 
 
+def _bin_dir_rel(rel: str, strategy: str) -> str:
+    return f"{rel}/env/bin" if strategy.endswith("packed") \
+        else f"{rel}/.pixi/envs/default/bin"
+
+
+def _bin_digest(adapter: SiteAdapter, rel: str, strategy: str) -> str:
+    """Fingerprint of the env's executable inventory. Catches the silent-
+    rot class of failure: a deleted tool would otherwise fall through to
+    the host's PATH and produce a wrong-provenance result that *looks*
+    clean (live-agent eval finding)."""
+    d = adapter.path(_bin_dir_rel(rel, strategy))
+    r = adapter.run_cmd(
+        f"test -d {shlex.quote(d)} && cd {shlex.quote(d)} && "
+        f"find . -type f -o -type l | LC_ALL=C sort | sha256sum | "
+        f"cut -d' ' -f1 || echo none",
+        timeout=60,
+    )
+    return r.out.strip().split()[-1] if r.out.strip() else "none"
+
+
 def _spot_check_and_mark(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str, strategy: str
 ) -> None:
-    """Activation succeeds; interpreter runs if present; then fence-mark."""
+    """Activation succeeds; interpreter runs if present; then fence-mark
+    (with the bin inventory fingerprint for later integrity checks)."""
     check = f". {shlex.quote(adapter.path(rel))}/activate.sh"
     if _has_package(env_row.get("canonical", {}), "python"):
         check += " && python -c 'import sys; sys.exit(0)'"
@@ -249,8 +285,10 @@ def _spot_check_and_mark(
             stage="realize",
             hints={"log_tail": (spot.err or spot.out)[-1000:], "retryable": True},
         )
-    adapter.write_file(f"{rel}/.weft-ready",
-                       f'{{"strategy": "{strategy}"}}\n'.encode())
+    import json as _json
+    marker = _json.dumps({"strategy": strategy,
+                          "bin_digest": _bin_digest(adapter, rel, strategy)})
+    adapter.write_file(f"{rel}/.weft-ready", (marker + "\n").encode())
 
 
 def _build_packed(

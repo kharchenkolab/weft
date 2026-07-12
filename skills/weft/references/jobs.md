@@ -21,10 +21,18 @@ Watch the **digests**, not the elements: `array.progress` events carry
 `{done, failed, running, queued, failed_previews}` coalesced per change;
 `array.done` carries the roll-up (wall-time stats, failures, output
 bytes). `events_poll` hides element-level events by default
-(`compact=False` to see all). `array_status(group)` / `array_result(group)`
-on demand. To retry a failed element, fetch its task from
-`array_status(...)["failed_previews"]` → `store.get_job(job_id)["task"]`
-and resubmit with `force=True` (a first-class retry API is on the roadmap).
+(`compact=False` to see all). `array_status(group)` / `array_result(group)` on demand
+(the digest events use the key `array_group`; the APIs take the same
+value as `group`). Memoized elements count in the digests like any other.
+
+**Retrying failed elements** is one call — retries rejoin the group under
+their index, digests heal, and a fresh `array.done` is emitted:
+
+```python
+w.array_retry(group)                            # all failed elements
+w.array_retry(group, indices=[3, 17])           # specific ones
+w.array_retry(group, command_override="...")    # with a fixed command
+```
 
 ## Crash & outage semantics (what you can rely on)
 

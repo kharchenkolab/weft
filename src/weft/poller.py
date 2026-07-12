@@ -197,7 +197,11 @@ class SitePoller:
                 hints={"requested_gb": w.task.resources.mem_gb,
                        "observed_peak_gb": round(
                            int(status.get("max_rss_kb", 0) or 0) / 1048576, 3),
-                       "suggestion": "resubmit with a larger mem_gb ask"},
+                       "suggestion": "resubmit with mem_gb >= "
+                                     "max(2 x requested, 1.5 x observed peak)",
+                       "note": "observed peak UNDERSTATES need when the kill "
+                               "happened during allocation — never size down "
+                               "toward it"},
             )
         if state == "cancelled":
             self.runner.store.update_job(w.job_id, state="CANCELLED")

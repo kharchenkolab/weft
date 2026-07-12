@@ -17,6 +17,7 @@ CODES = {
     "env.layer_conflict": "one dependency layer's requirements contradict another's; hints name both sides and the fix",
     "env.solve_failed": "solver infrastructure failure (network, index); retryable",
     "env.realize_failed": "environment build/unpack failed on site",
+    "env.not_realized": "environment exists but is not realized on this site yet; realize it (run a task with it) first",
     "env.unsatisfiable_on_site": "spec needs something this site lacks; hints list alternative sites",
     "data.transfer_failed": "bulk transfer failed; hints say whether resumable",
     "data.verify_failed": "content hash mismatch after transfer or at use",

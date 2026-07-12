@@ -37,9 +37,20 @@ w.env_ensure({
 - **Reuse:** identical resolutions share EnvIDs; realizations re-adopt
   across workspaces from the site marker; `env_status(env_id)` shows the
   per-site realization matrix (your memory of what is installed where).
-- **Repair:** realized env corrupt but marked ready (jobs fail with
-  command-not-found / import errors)? `env_repair(env_id, site)` clears it;
-  the next task rebuilds from the lockfile.
+- **Integrity & repair:** every job start re-checks the realized env's
+  executable inventory against its build-time fingerprint — a tampered or
+  partially purged env rebuilds automatically (`realize.integrity_failed`
+  event) instead of silently falling through to host binaries. For damage
+  that check can't see (corrupted file *contents*), the symptom is wrong
+  results or import errors: `env_repair(env_id, site)` clears the
+  realization and the next task rebuilds from the lockfile.
+- **Identity forms:** conda/pypi-only envs are `env:v1:<hash>`; envs with
+  extra layers (cran, …) are `env:v2:<hash>`. Both are content-addressed
+  cache keys; the version only reflects the lock document's shape.
+- **`weakly_reproducible`** (in `env_status` summaries and provenance):
+  true when the spec uses `post_install` — those commands are hashed into
+  the identity but their *effects* aren't content-pinned. Prefer real
+  dependency layers; keep post_install for the genuinely unpackageable.
 - **Toolchains are envs too:** no compiler on site → spec
   `{"deps": {"conda": ["cxx-compiler", "make"]}}`; compile as a task with
   the source tree as an input; downstream tasks run the binary via

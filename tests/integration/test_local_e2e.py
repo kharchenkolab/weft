@@ -127,7 +127,8 @@ def test_oom_classified_with_sizing_hints(weft):
     assert job["state"] == "FAILED"
     err = job["error"]
     assert err["error"] == "job.oom"
-    assert "resubmit with a larger mem_gb" in err["hints"]["suggestion"]
+    assert "2 x requested" in err["hints"]["suggestion"]
+    assert "UNDERSTATES" in err["hints"]["note"]  # allocation-kill trap
     assert err["hints"]["requested_gb"] == 1
 
 

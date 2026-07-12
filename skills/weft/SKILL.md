@@ -84,8 +84,11 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
   GPU/CUDA pinning, realization strategies, repair, reuse semantics.
 - `references/data.md` — DataRefs, staging plans, chaining, fetch,
   transfer progress, chunked big files.
-- `references/jobs.md` — lifecycle, arrays & digests, monitoring, logs,
-  cancel, memoization, provenance.
+- `references/jobs.md` — lifecycle, arrays & digests & retry, monitoring,
+  queue reasons, logs, cancel, memoization, provenance.
+- `references/kernels.md` — persistent interactive interpreters
+  (python/R/julia): incremental blocks with live state, interrupt, crash
+  recovery with transcript replay.
 - `references/failures.md` — full error taxonomy with the remediation
   playbook; crash/outage semantics.
 - `references/scenarios.md` — worked end-to-end patterns (offload,

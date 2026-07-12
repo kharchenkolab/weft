@@ -68,13 +68,12 @@ class KernelManager:
             rel = env_dir_rel(env_id)
             if not adapter.file_exists(f"{rel}/.weft-ready"):
                 raise WeftError(
-                    "env.realize_failed",
+                    "env.not_realized",
                     f"env {env_id} is not realized on {site}",
                     stage="realize",
                     hints={"suggestion": "run any task with this env on the "
-                                         "site first (or env_ensure + a "
-                                         "trivial task) — kernels attach to "
-                                         "realized envs"})
+                                         "site first (even `true`) — kernels "
+                                         "attach to realized envs"})
             activate = f". {shlex.quote(adapter.path(rel))}/activate.sh"
 
         kernel_id = "krn_" + uuid.uuid4().hex[:10]
@@ -151,8 +150,9 @@ class KernelManager:
                 f"kernel {k['kernel_id']} is {k['state']}",
                 stage="running",
                 hints={"suggestion": "kernel_restart(kernel_id, "
-                                     "replay='successful') rebuilds state "
-                                     "from the transcript",
+                                     "replay='successful') starts a NEW "
+                                     "kernel (use the returned kernel_id) "
+                                     "with state rebuilt from the transcript",
                        "transcript": "kernel_transcript shows what ran"})
 
     # -- introspection / control ---------------------------------------------------
@@ -215,9 +215,10 @@ class KernelManager:
         return {"kernel_id": kernel_id, "state": "stopped"}
 
     def restart(self, kernel_id: str, replay: str = "successful") -> dict:
-        """After a death (or deliberately): new kernel, same env/site;
-        optionally replay the transcript's successful blocks to rebuild
-        interpreter state."""
+        """After a death (or deliberately): starts a NEW kernel (fresh
+        kernel_id — returned; the old one stays dead/stopped for its
+        transcript), same env/site, optionally replaying the old
+        transcript's successful blocks to rebuild interpreter state."""
         k = self._get(kernel_id)
         codes = []
         if replay == "successful":
