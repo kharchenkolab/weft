@@ -8,6 +8,7 @@ CAS before anything moves — task chaining then finds them already present.
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from .adapters.base import SiteAdapter
@@ -94,7 +95,33 @@ class DataManager:
             blobs = []
             for ref in plan.to_transfer:
                 blobs.extend(self.blobs_for(ref))
-            method.transfer(blobs, self.cas, endpoint)
+            total = sum(s for _, s in blobs)
+            t0 = time.time()
+            self.store.emit("transfer.start", job_id=job_id, site=adapter.name,
+                            method=endpoint["method"], bytes_total=total,
+                            files=len(blobs),
+                            **method.estimate(blobs, endpoint))
+            last_emit = [0.0]
+
+            def _progress(p: dict) -> None:
+                now = time.time()
+                if now - last_emit[0] >= 1.0:   # token economy: ≥1s apart
+                    last_emit[0] = now
+                    elapsed = max(now - t0, 0.01)
+                    rate = p.get("bytes_done", 0) / elapsed
+                    self.store.emit(
+                        "transfer.progress", job_id=job_id, site=adapter.name,
+                        bytes_total=total, rate_mbps=round(rate / 1e6, 2),
+                        eta_s=round((total - p.get("bytes_done", 0))
+                                    / max(rate, 1), 1),
+                        **p,
+                    )
+
+            method.transfer(blobs, self.cas, endpoint, progress=_progress)
+            elapsed = round(time.time() - t0, 2)
+            self.store.emit("transfer.done", job_id=job_id, site=adapter.name,
+                            bytes_total=total, elapsed_s=elapsed,
+                            rate_mbps=round(total / max(elapsed, 0.01) / 1e6, 2))
             for ref in plan.to_transfer:
                 self.store.set_location(ref, adapter.name, endpoint["cas_root"])
         return plan.to_dict()

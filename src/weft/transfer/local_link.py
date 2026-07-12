@@ -21,8 +21,13 @@ class LocalLink:
     def _dst(endpoint: dict, digest: str) -> Path:
         return Path(endpoint["cas_root"]) / digest[:2] / digest
 
-    def transfer(self, blobs, cas: LocalCAS, endpoint) -> None:
-        for digest, _ in blobs:
+    def transfer(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
+        done_bytes = done_files = 0
+        for digest, size in blobs:
+            done_bytes += size
+            done_files += 1
+            if progress:
+                progress({"bytes_done": done_bytes, "files_done": done_files})
             src = cas.open_blob(f"dref:{digest}")
             dst = self._dst(endpoint, digest)
             if dst.exists():
@@ -45,7 +50,7 @@ class LocalLink:
                         stage="staging", retryable=True,
                     )
 
-    def fetch(self, blobs, cas: LocalCAS, endpoint) -> None:
+    def fetch(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
         for digest, _ in blobs:
             src = self._dst(endpoint, digest)
             if not src.exists():

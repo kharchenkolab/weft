@@ -10,10 +10,37 @@ import io
 import shlex
 import subprocess
 import tarfile
+import time
 
 from ..cas import LocalCAS
 from ..errors import WeftError
 from ..ids import hash_file
+
+
+class _CountingWriter:
+    """File-like wrapper that counts bytes into a pipe (for progress)."""
+
+    def __init__(self, fh, progress, min_interval: float = 0.5):
+        self._fh = fh
+        self._progress = progress
+        self._min_interval = min_interval
+        self._done = 0
+        self._last = 0.0
+
+    def write(self, data: bytes) -> int:
+        self._fh.write(data)
+        self._done += len(data)
+        now = time.time()
+        if self._progress and now - self._last >= self._min_interval:
+            self._last = now
+            self._progress({"bytes_done": self._done})
+        return len(data)
+
+    def flush(self):
+        self._fh.flush()
+
+    def close(self):
+        pass  # the caller owns the pipe
 
 
 class SshPipe:
@@ -30,25 +57,32 @@ class SshPipe:
     def _ssh(endpoint: dict, remote_cmd: str) -> list[str]:
         return ["ssh", *endpoint["ssh_opts"], endpoint["destination"], remote_cmd]
 
-    def transfer(self, blobs, cas: LocalCAS, endpoint) -> None:
+    def transfer(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
         if not blobs:
             return
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as tar:
-            for digest, _ in blobs:
-                tar.add(cas.open_blob(f"dref:{digest}"),
-                        arcname=f"{digest[:2]}/{digest}")
         root = shlex.quote(endpoint["cas_root"])
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             self._ssh(endpoint, f"mkdir -p {root} && cd {root} && tar -xf -"),
-            input=buf.getvalue(), capture_output=True, timeout=3600,
+            stdin=subprocess.PIPE, stderr=subprocess.PIPE,
         )
-        if proc.returncode != 0:
+        # stream the archive — never materialized in memory — counting
+        # bytes into the pipe for progress
+        counter = _CountingWriter(proc.stdin, progress)
+        try:
+            with tarfile.open(fileobj=counter, mode="w|") as tar:
+                for digest, _ in blobs:
+                    tar.add(cas.open_blob(f"dref:{digest}"),
+                            arcname=f"{digest[:2]}/{digest}")
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+        rc = proc.wait(timeout=3600)
+        if rc != 0:
             raise WeftError(
                 "data.transfer_failed",
-                f"ssh-pipe transfer failed (rc={proc.returncode})",
+                f"ssh-pipe transfer failed (rc={rc})",
                 stage="staging", retryable=True,
-                hints={"stderr": proc.stderr.decode()[-500:],
+                hints={"stderr": proc.stderr.read().decode()[-500:],
                        "resumable": "no — ssh-pipe restarts whole batches"},
             )
         checklist = "".join(f"{d}  {d[:2]}/{d}\n" for d, _ in blobs)
@@ -64,7 +98,7 @@ class SshPipe:
                 hints={"stderr": v.stderr.decode()[-500:]},
             )
 
-    def fetch(self, blobs, cas: LocalCAS, endpoint) -> None:
+    def fetch(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
         if not blobs:
             return
         root = shlex.quote(endpoint["cas_root"])

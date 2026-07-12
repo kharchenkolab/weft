@@ -19,10 +19,13 @@ class TransferMethod(Protocol):
         """{"bytes": N, "seconds_guess": float | None}"""
         ...
 
-    def transfer(self, blobs: list[tuple[str, int]], cas: LocalCAS, endpoint: dict) -> None:
-        """Push blobs from the local CAS to the endpoint CAS. Verifies."""
+    def transfer(self, blobs: list[tuple[str, int]], cas: LocalCAS,
+                 endpoint: dict, progress=None) -> None:
+        """Push blobs from the local CAS to the endpoint CAS. Verifies.
+        `progress({"bytes_done": n, ...})` may be called during transfer."""
         ...
 
-    def fetch(self, blobs: list[tuple[str, int]], cas: LocalCAS, endpoint: dict) -> None:
+    def fetch(self, blobs: list[tuple[str, int]], cas: LocalCAS,
+              endpoint: dict, progress=None) -> None:
         """Pull blobs from the endpoint CAS into the local CAS. Verifies."""
         ...

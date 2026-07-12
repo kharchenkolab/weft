@@ -13,9 +13,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+import re
+import time
+
 from ..cas import LocalCAS
 from ..errors import WeftError
 from ..ids import hash_file
+
+_PROGRESS_RE = re.compile(r"^\s*([\d,]+)\s+(\d+)%")
 
 
 class RsyncSSH:
@@ -23,6 +28,7 @@ class RsyncSSH:
 
     # measured per-pair throughput could refine this; a flat guess is honest
     ASSUMED_MBPS = 40.0
+    extra_args: list[str] = []   # e.g. ["--bwlimit=4000"] (tests, politeness)
 
     def estimate(self, blobs, endpoint):
         total = sum(s for _, s in blobs)
@@ -33,20 +39,47 @@ class RsyncSSH:
     def _rsh(endpoint: dict) -> str:
         return shlex.join(["ssh", *endpoint["ssh_opts"]])
 
-    def _rsync(self, args: list[str], timeout: float = 3600) -> None:
-        proc = subprocess.run(["rsync", *args], capture_output=True, text=True,
-                              timeout=timeout)
-        if proc.returncode != 0:
-            transport = proc.returncode in (10, 11, 12, 30, 35, 255)
+    def _rsync(self, args: list[str], progress=None, timeout: float = 3600) -> None:
+        # progress repaints are \r-terminated, so no pipe buffering mode
+        # flushes them — rsync only streams progress to a terminal. Give it
+        # one.
+        import os
+        import pty
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            ["rsync", "--info=progress2", *self.extra_args, *args],
+            stdout=slave, stderr=subprocess.PIPE,
+        )
+        os.close(slave)
+        buf, last = "", 0.0
+        while True:
+            try:
+                chunk = os.read(master, 1024)
+            except OSError:   # EIO when the child side closes
+                break
+            if not chunk:
+                break
+            buf += chunk.decode("utf-8", "replace")
+            *lines, buf = re.split(r"[\r\n]", buf)
+            for line in lines:
+                m = _PROGRESS_RE.match(line)
+                if m and progress and time.time() - last >= 0.5:
+                    last = time.time()
+                    progress({"bytes_done": int(m.group(1).replace(",", "")),
+                              "percent": int(m.group(2))})
+        os.close(master)
+        rc = proc.wait(timeout=timeout)
+        if rc != 0:
+            transport = rc in (10, 11, 12, 30, 35, 255)
             raise WeftError(
                 "data.transfer_failed" if not transport else "site.unreachable",
-                f"rsync failed (rc={proc.returncode})",
+                f"rsync failed (rc={rc})",
                 stage="staging", retryable=True,
-                hints={"stderr": proc.stderr[-500:],
+                hints={"stderr": proc.stderr.read().decode()[-500:],
                        "resumable": "yes — rsync restarts partial blobs"},
             )
 
-    def transfer(self, blobs, cas: LocalCAS, endpoint) -> None:
+    def transfer(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
         if not blobs:
             return
         with tempfile.NamedTemporaryFile("w", suffix=".list", delete=False) as f:
@@ -58,7 +91,7 @@ class RsyncSSH:
             "-e", self._rsh(endpoint), "--partial", "--compress",
             "--chmod=Fu+rw", f"--files-from={listfile}",
             str(cas.root) + "/", dest,
-        ])
+        ], progress=progress)
         self._verify_remote(blobs, endpoint)
 
     def _verify_remote(self, blobs, endpoint) -> None:
@@ -78,7 +111,7 @@ class RsyncSSH:
                 hints={"stderr": proc.stderr.decode()[-500:]},
             )
 
-    def fetch(self, blobs, cas: LocalCAS, endpoint) -> None:
+    def fetch(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
         if not blobs:
             return
         with tempfile.NamedTemporaryFile("w", suffix=".list", delete=False) as f:
@@ -89,7 +122,7 @@ class RsyncSSH:
         self._rsync([
             "-e", self._rsh(endpoint), "--partial", "--compress",
             f"--files-from={listfile}", src, str(cas.root) + "/",
-        ])
+        ], progress=progress)
         for digest, _ in blobs:
             p = Path(cas.root) / digest[:2] / digest
             if not p.exists() or hash_file(p).sha256 != digest:
