@@ -269,10 +269,23 @@ class EnvManager:
             # and carry on — identity untouched, nothing to report but the fix.
             self.store.replace_env_lock(env_id, result.native_lock,
                                         result.manifest)
+            # clear the failed realizations, or the fix looks applied while
+            # nothing rebuilds (live-agent eval finding)
+            cleared = []
+            for r in self.store.realizations_for(env_id):
+                if r["state"] in ("failed", "missing"):
+                    self.store.set_realization(env_id, r["site"], r["strategy"],
+                                               r["location"], "missing",
+                                               log="lock re-derived; will rebuild")
+                    cleared.append(r["site"])
             self.store.emit("env.restored", env_id=env_id, reason=reason[:200])
             return {"env_id": env_id, "status": "restored",
+                    "cleared_realizations": cleared,
                     "note": "a fresh solve reproduces this env exactly; the "
-                            "recorded lock was re-derived"}
+                            "recorded lock was re-derived and failed "
+                            "realizations were cleared — the next task using "
+                            "this env rebuilds it (pass force=True to re-run a "
+                            "task whose result was already memoized)"}
         self.store.put_env(
             new_id, merged.spec_hash(), canonical, result.native_lock,
             result.manifest, result.platforms,

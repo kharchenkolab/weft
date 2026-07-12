@@ -28,10 +28,13 @@ from .store import Store
 
 
 class SessionManager:
-    def __init__(self, store: Store, envman: EnvManager, runner=None):
+    def __init__(self, store: Store, envman: EnvManager, runner=None,
+                 dataman=None, adapters=None):
         self.store = store
         self.envman = envman
         self.runner = runner   # for auto-realizing a base env (ergonomics)
+        self.dataman = dataman   # for content-addressing installer sources
+        self._adapters = adapters
 
     def start(self, base: str | dict, adapter: SiteAdapter) -> dict:
         """Accepts an EnvID *or a spec* — exploration should not cost three
@@ -157,13 +160,26 @@ class SessionManager:
                 "session_id": session_id}
 
     def run_installer(self, session_id: str, adapter: SiteAdapter, cmd: str,
-                      note: str = "") -> dict:
+                      note: str = "", source: str | None = None) -> dict:
         """The bespoke install that no index can express — an R
         install.packages, a pip install -e, a vendored make install. A
         normal, supported move: it runs in the session AND is captured, so
-        `snapshot` can carry it into the spec as a labeled post_install
-        step instead of losing it."""
+        `snapshot` can carry it into the spec as a labeled post_install step.
+
+        `source` is a local path (a source tree, a wheel) the command needs:
+        weft content-addresses it so the step travels with the env and
+        rebuilds ANYWHERE. Without it, a step that reads local paths mints
+        an env only this machine can build — the grade will say so."""
         s = self._get(session_id)
+        captured = None
+        if source:
+            from pathlib import Path as _P
+            info = self.dataman.register(_P(source).resolve())
+            mount = _P(source).name
+            captured = {"ref": info["ref"], "mount_as": mount}
+            # stage it into the session too, so the same command line works
+            # here and at realization (relative paths resolve identically)
+            self._stage(adapter, s["location"], captured)
         manifest = adapter.path(f"{s['location']}/pixi.toml")
         r = adapter.run_activated(
             f"cd {shlex.quote(adapter.path(s['location']))} && "
@@ -176,17 +192,31 @@ class SessionManager:
                 "session installer failed",
                 stage="realize",
                 hints={"command": cmd, "log_tail": (r.err or r.out)[-1500:]})
-        self.store.session_add_installer(session_id, cmd, note)
-        self.store.emit("session.installer", session=session_id, cmd=cmd[:200])
+        self.store.session_add_installer(session_id, cmd, note,
+                                         input=captured)
+        self.store.emit("session.installer", session=session_id, cmd=cmd[:200],
+                        portable=bool(captured))
         return {"session_id": session_id, "installed": cmd,
-                "captured": True,
+                "captured": True, "portable": bool(captured),
+                "source_ref": (captured or {}).get("ref"),
                 "note": "snapshot will carry this as a post_install step "
-                        "(grade: escape-hatch) with your note attached"}
+                        "(grade: escape-hatch) with your note attached"
+                        + ("; its source travels with the env, so it rebuilds "
+                           "anywhere" if captured else
+                           " — pass source=<path> if the command needs local "
+                           "files, or the env will only rebuild on this "
+                           "machine")}
 
     def snapshot(self, session_id: str, name: str | None = None,
-                 notes: list[str] | None = None) -> dict:
+                 notes: list[str] | None = None, verify: bool = True) -> dict:
         """Synthesize the spec delta, re-solve properly, return a real EnvID.
-        Captured bespoke installers ride along as labeled post_install steps."""
+
+        Captured installers ride along as labeled post_install steps, with
+        their captured sources as content-addressed `post_install_inputs` —
+        so the escape hatch is PORTABLE (it rebuilds where the session's
+        filesystem does not exist). `verify` then actually *realizes* the
+        minted env before handing it back: a "citable EnvID" that cannot be
+        rebuilt is worse than an error (live-agent eval finding)."""
         s = self._get(session_id)
         env_row = self.store.get_env(s["base_env_id"])
         installers = s.get("installers") or []
@@ -200,17 +230,102 @@ class SessionManager:
             spec["step_notes"] = {str(i): inst["note"]
                                   for i, inst in enumerate(installers)
                                   if inst.get("note")}
+            inputs = [i["input"] for i in installers if i.get("input")]
+            if inputs:
+                spec["post_install_inputs"] = inputs
         if notes:
             spec["notes"] = list(notes)
         result = self.envman.ensure(spec)
-        self.store.emit("session.snapshot", session=session_id,
-                        env_id=result["env_id"])
         out = {**result, "spec": spec,
                "note": "re-run the final computation under this EnvID to "
                        "enter it into provenance"}
         if installers:
             out["carried_installers"] = len(installers)
+
+        # lint: a step that names a path only THIS machine has will rebuild
+        # here and nowhere else — verification can't see that (it succeeds
+        # locally), so say it plainly. Inform, don't scold.
+        unportable = _unportable_paths(installers)
+        if unportable:
+            out["portability_warning"] = {
+                "paths": unportable,
+                "detail": "these installer steps reference local paths that "
+                          "are not part of the env: it will rebuild on this "
+                          "machine and fail elsewhere",
+                "fix": "re-run the installer with "
+                       "session_run_installer(..., source=<path>) so weft "
+                       "content-addresses the sources into the env",
+            }
+            self.store.emit("session.snapshot_unportable",
+                            session=session_id, paths=unportable)
+
+        if verify and installers:
+            adapter = self._adapters.get(s["site"]) if self._adapters else None
+            try:
+                self._verify(result["env_id"], adapter)
+                out["verified"] = True
+            except WeftError as e:
+                out = e.to_dict()
+                out["env_id"] = result["env_id"]
+                out["detail"] = (
+                    "the snapshot env was minted but does NOT rebuild: " +
+                    e.detail)
+                out["hints"] = {
+                    **e.hints,
+                    "suggestion": "an installer step depends on something "
+                                  "that is not in the env: register its "
+                                  "sources (data_register) and re-run it via "
+                                  "session_run_installer(..., inputs=[...]), "
+                                  "or make the step self-contained",
+                }
+                self.store.emit("session.snapshot_unverified",
+                                session=session_id, env_id=result["env_id"])
+                return out
+        self.store.emit("session.snapshot", session=session_id,
+                        env_id=result["env_id"])
         return out
+
+    def _stage(self, adapter: SiteAdapter, location: str, entry: dict) -> None:
+        from .task import Task
+        t = Task.from_dict({"command": "true",
+                            "inputs": [{"ref": entry["ref"],
+                                        "mount_as": entry["mount_as"]}]})
+        self.dataman.ensure_at([entry["ref"]], adapter,
+                               self.runner.transfers)
+        plan = self.dataman.materialize_plan(t)
+        adapter.write_file(f"{location}/inputs.tsv", plan.encode())
+        endpoint = adapter.transfer_endpoint()
+        r = adapter.shim(
+            ["materialize", "--cas", endpoint["cas_root"],
+             "--dir", adapter.path(location),
+             "--plan", adapter.path(f"{location}/inputs.tsv")], timeout=600)
+        if r.rc != 0:
+            raise WeftError("env.realize_failed",
+                            "could not stage the installer's source",
+                            stage="realize", hints={"detail": r.err[:300]})
+
+    def _verify(self, env_id: str, adapter) -> None:
+        """Realize the minted env from scratch — the only honest proof."""
+        if adapter is None or self.runner is None:
+            return
+        from .realize import ensure_realization, env_dir_rel
+        import shlex as _sh
+        rel = env_dir_rel(env_id)
+        adapter.run_cmd(f"rm -rf {_sh.quote(adapter.path(rel))}")
+        self.store.set_realization(env_id, adapter.name, "prefix", rel,
+                                   "missing")
+        site_row = self.store.get_site(adapter.name) or {}
+        env_row = self.store.get_env(env_id)
+        ensure_realization(
+            env_id, env_row, adapter, self.store,
+            caps=site_row.get("capabilities"),
+            site_config=site_row.get("config"),
+            pack_tools={"pixi_pack": self.runner.pixi_pack,
+                        "cas": self.runner.cas,
+                        "transfers": self.runner.transfers,
+                        "solvers": self.envman.solvers,
+                        "store": self.store,
+                        "dataman": self.runner.dataman})
 
     def stop(self, session_id: str, adapter: SiteAdapter) -> dict:
         s = self._get(session_id)
@@ -223,3 +338,21 @@ class SessionManager:
 def _pixi_spec(dep: str) -> str:
     """'numpy >=2' -> 'numpy>=2' (pixi add wants no space)."""
     return dep.replace(" ", "")
+
+
+def _unportable_paths(installers: list[dict]) -> list[str]:
+    """Tokens in an installer command that name a path this controller has
+    but the env does not carry — the difference between an escape hatch that
+    travels and one that quietly depends on one filesystem."""
+    from pathlib import Path as _P
+    out = []
+    for inst in installers:
+        if inst.get("input"):
+            continue          # its source travels with the env
+        for token in inst["cmd"].split():
+            token = token.strip("'\"")
+            if token.startswith(("-", "http://", "https://")):
+                continue
+            if ("/" in token or token.startswith(".")) and _P(token).exists():
+                out.append(token)
+    return out

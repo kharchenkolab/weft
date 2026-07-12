@@ -170,6 +170,7 @@ def canonicalize_lock(pixi_lock_text: str, spec: EnvSpec) -> dict:
         "extras": {
             "modules": spec.modules,
             "post_install": spec.post_install,
+            "post_install_inputs": spec.post_install_inputs,
             "container_base": spec.container_base,
             "env_vars": spec.env_vars,
         },
@@ -231,7 +232,14 @@ def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi") -> LockResult:
             hints={
                 "solver_message": tail,
                 "user_pins": spec.conda + spec.pypi,
-                "suggestion": "relax or remove one of the conflicting pins listed in solver_message, then re-solve",
+                # weft's own one-call answer to this exact error — agents read
+                # hints under pressure, not the reference docs (eval finding)
+                "suggestion": "mark the negotiable pins SOFT with a trailing "
+                              "'?' (e.g. \"scipy ==1.14.1?\") and call "
+                              "env_ensure(..., relax=\"soft\"): weft relaxes "
+                              "only those, reports what it gave up, and the "
+                              "result is still fully pinned. Or relax/remove "
+                              "the conflicting pin named in solver_message.",
             },
         )
     native = lockfile.read_text()

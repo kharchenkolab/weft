@@ -172,6 +172,7 @@ def ensure_realization(
                             store.emit,
                             offline=strategy.endswith("packed"),
                             pack_tools=pack_tools)
+            _stage_post_install_inputs(env_row, adapter, rel, pack_tools or {})
             _run_post_install(env_row, adapter, rel)
             _spot_check_and_mark(env_id, env_row, adapter, rel, strategy)
         except WeftError as e:
@@ -221,6 +222,12 @@ def _build_prefix(
             hints={
                 "log_tail": build.out[-2000:],
                 "retryable": "maybe — check for network or disk errors in log_tail",
+                # the adaptive lever, where an agent will actually read it
+                "if_the_world_moved": "if the recorded packages are simply "
+                                      "gone from the index, env_revise(env_id) "
+                                      "re-solves the same spec and reports the "
+                                      "diff (or set site policy on_drift="
+                                      "'revise' to do it automatically)",
             },
         )
     hook = adapter.run_cmd(
@@ -289,6 +296,45 @@ def _realize_layers(env_id: str, env_row: dict, adapter: SiteAdapter,
                                (current + "\n" + lines + "\n").encode())
         emit("realize.layer.done", env_id=env_id, site=adapter.name,
              layer=eco, elapsed_s=round(_t.time() - t0, 1))
+
+
+def _stage_post_install_inputs(env_row: dict, adapter: SiteAdapter, rel: str,
+                               pack_tools: dict) -> None:
+    """Materialize the escape hatch's sources INTO the env dir, so a
+    post_install step depends on content hashes, not on the controller's
+    filesystem (the live-agent eval's landmine: a `pip install ./pkg` env
+    that could never be rebuilt elsewhere)."""
+    inputs = env_row["canonical"]["extras"].get("post_install_inputs") or []
+    if not inputs:
+        return
+    cas = pack_tools.get("cas")
+    transfers = pack_tools.get("transfers", {})
+    dataman = pack_tools.get("dataman")
+    if cas is None or dataman is None:
+        raise WeftError(
+            "env.realize_failed",
+            "post_install_inputs need the data plane (controller CAS)",
+            stage="realize")
+    from .task import Task
+    t = Task.from_dict({
+        "command": "true",
+        "inputs": [{"ref": i["ref"], "mount_as": i["mount_as"]}
+                   for i in inputs]})
+    dataman.ensure_at([i["ref"] for i in inputs], adapter, transfers)
+    plan = dataman.materialize_plan(t)
+    if not plan:
+        return
+    adapter.write_file(f"{rel}/post-inputs.tsv", plan.encode())
+    endpoint = adapter.transfer_endpoint()
+    r = adapter.shim(
+        ["materialize", "--cas", endpoint["cas_root"],
+         "--dir", adapter.path(rel),
+         "--plan", adapter.path(f"{rel}/post-inputs.tsv")], timeout=600)
+    if r.rc != 0:
+        raise WeftError(
+            "env.realize_failed",
+            "could not stage post_install_inputs into the env",
+            stage="realize", hints={"detail": r.err[:300]})
 
 
 def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:

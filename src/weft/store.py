@@ -511,12 +511,21 @@ class Store:
             "state": r["state"],
         }
 
+    def list_sessions(self, site: str | None = None) -> list[dict]:
+        q, vals = "SELECT session_id FROM sessions", ()
+        if site:
+            q += " WHERE site=?"; vals = (site,)
+        return [self.get_session(r["session_id"]) for r in self._rows(q, vals)]
+
     def session_add_installer(self, session_id: str, cmd: str,
-                              note: str = "") -> None:
+                              note: str = "", input: dict | None = None) -> None:
         s = self.get_session(session_id)
+        entry = {"cmd": cmd, "note": note}
+        if input:
+            entry["input"] = input   # content-addressed source: portability
         self._write(
             "UPDATE sessions SET installers=? WHERE session_id=?",
-            (_j(s["installers"] + [{"cmd": cmd, "note": note}]), session_id))
+            (_j(s["installers"] + [entry]), session_id))
 
     def session_add_deps(self, session_id: str, conda: list[str], pypi: list[str]) -> None:
         s = self.get_session(session_id)

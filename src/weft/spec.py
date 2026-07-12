@@ -89,6 +89,11 @@ class EnvSpec:
     container_base: str | None = None
     env_vars: dict[str, str] = field(default_factory=dict)
     post_install: list[str] = field(default_factory=list)
+    # content-addressed inputs for post_install steps: [{ref, mount_as}].
+    # THIS is what makes an escape hatch portable — the sources travel with
+    # the env instead of the step secretly depending on the controller's
+    # filesystem. Hashed into the EnvID (they are refs; that is honest).
+    post_install_inputs: list[dict] = field(default_factory=list)
     extends: str | None = None  # "spec:v1:<sha256>" of the parent spec
     # pixi [system-requirements]: lets a CUDA stack solve on a GPU-less
     # controller by asserting what the *target* provides (e.g. {"cuda": "12.4"})
@@ -110,6 +115,7 @@ class EnvSpec:
             "name", "platforms", "channels", "deps", "variants", "modules",
             "container_base", "env_vars", "post_install", "extends",
             "system_requirements", "notes", "step_notes",
+            "post_install_inputs",
         }
         if unknown:
             raise WeftError(
@@ -119,8 +125,8 @@ class EnvSpec:
                 hints={"known_fields": [
                     "name", "platforms", "channels", "deps.<ecosystem>",
                     "variants", "modules", "container_base", "env_vars",
-                    "post_install", "extends", "system_requirements",
-                    "notes", "step_notes",
+                    "post_install", "post_install_inputs", "extends",
+                    "system_requirements", "notes", "step_notes",
                 ]},
             )
         variants = {
@@ -140,6 +146,8 @@ class EnvSpec:
             container_base=d.get("container_base"),
             env_vars={k: str(v) for k, v in (d.get("env_vars") or {}).items()},
             post_install=list(d.get("post_install") or []),
+            post_install_inputs=[dict(x) for x in
+                                 (d.get("post_install_inputs") or [])],
             extends=d.get("extends"),
             system_requirements={
                 k: str(v) for k, v in (d.get("system_requirements") or {}).items()
@@ -162,6 +170,7 @@ class EnvSpec:
             "container_base": self.container_base,
             "env_vars": self.env_vars,
             "post_install": self.post_install,
+            "post_install_inputs": self.post_install_inputs,
             "extends": self.extends,
             "system_requirements": self.system_requirements,
             "notes": self.notes,
@@ -205,6 +214,8 @@ class EnvSpec:
             container_base=self.container_base or parent.container_base,
             env_vars={**parent.env_vars, **self.env_vars},
             post_install=parent.post_install + self.post_install,
+            post_install_inputs=parent.post_install_inputs
+            + self.post_install_inputs,
             extends=None,  # fully merged specs stand alone
             system_requirements={**parent.system_requirements,
                                  **self.system_requirements},

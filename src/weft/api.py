@@ -82,7 +82,8 @@ class Weft:
         # "skypilot" is the intended production entry; tests register mocks.
         self.provisioners: dict = {}
         from .session import SessionManager
-        self.sessions = SessionManager(self.store, self.envman, self.runner)
+        self.sessions = SessionManager(self.store, self.envman, self.runner,
+                                       self.dataman, self.adapters)
         from .kernel import KernelManager
         self.kernels = KernelManager(self.store, self.adapters, self.runner)
         from .service import ServiceManager
@@ -478,20 +479,26 @@ class Weft:
             session_id, self._session_adapter(session_id), conda, pypi)
 
     def session_run_installer(self, session_id: str, cmd: str,
-                              note: str = "") -> dict:
+                              note: str = "", source: str | None = None) -> dict:
         """Run a bespoke install that no index expresses (R
-        install.packages, pip install -e, vendored make install). A normal
+        install.packages, pip install -e, a vendored make install). A normal
         move — it is captured and a snapshot carries it as a labeled
-        post_install step (grade: escape-hatch). `note` records why."""
+        post_install step (grade: escape-hatch). Pass `source=<local path>`
+        if the command needs local files: weft content-addresses them so the
+        step travels with the env and rebuilds ANYWHERE. `note` records why."""
         return self.sessions.run_installer(
-            session_id, self._session_adapter(session_id), cmd, note)
+            session_id, self._session_adapter(session_id), cmd, note, source)
 
     def session_snapshot(self, session_id: str, name: str | None = None,
-                         notes: list[str] | None = None) -> dict:
+                         notes: list[str] | None = None,
+                         verify: bool = True) -> dict:
         """Freeze the session's additions into a real, citable EnvID (a
-        fresh whole-spec solve). Bespoke installers ride along as labeled
-        post_install steps; `notes` records the rationale."""
-        return self.sessions.snapshot(session_id, name, notes)
+        fresh whole-spec solve). Captured installers ride along as labeled
+        post_install steps with their sources content-addressed. With
+        verify=True (default) weft REALIZES the minted env before handing it
+        back — a citable EnvID that cannot be rebuilt is worse than an
+        error. `notes` records the rationale."""
+        return self.sessions.snapshot(session_id, name, notes, verify)
 
     def session_stop(self, session_id: str) -> dict:
         return self.sessions.stop(session_id, self._session_adapter(session_id))
@@ -758,6 +765,12 @@ class Weft:
         from . import evict as _evict
         return _evict.footprint(self, site)
 
+    def gc_orphans(self, site: str, confirm: bool = False) -> dict:
+        """Remove directories no record claims (crashed session clones, stale
+        kernel sandboxes). Free bytes nothing else can reclaim."""
+        from . import evict as _evict
+        return _evict.gc_orphans(self, site, confirm=confirm)
+
     def gc_events(self, older_than_days: float = 30) -> dict:
         """Prune old events (terminal digests and failures are kept)."""
         pruned = self.store.prune_events(older_than_days)
@@ -860,7 +873,7 @@ PUBLIC_TOOLS = [
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_result", "array_retry",
     "events_poll", "doctor", "reconcile", "provenance",
-    "gc_plan", "gc_sweep", "gc_events", "gc_packages",
+    "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",
     "env_evict", "site_footprint",
     "session_start", "session_exec", "session_install", "session_snapshot",
     "session_run_installer", "session_stop",

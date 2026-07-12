@@ -72,10 +72,20 @@ def grade_env(canonical: dict) -> dict:
             "component": "site modules", "grade": "attested",
             "why": f"site-provided: {extras['modules']} (named, not pinned)"})
     if extras.get("post_install"):
+        # portability is the question that actually matters: does this
+        # rebuild anywhere, or does it secretly depend on one filesystem?
+        portable = bool(extras.get("post_install_inputs"))
         components.append({
             "component": "post_install", "grade": "escape-hatch",
+            "portable": portable,
             "why": f"{len(extras['post_install'])} adaptive install step(s); "
-                   "effects not content-pinned"})
+                   + ("sources travel with the env (content-addressed), so it "
+                      "rebuilds anywhere — effects still not content-pinned"
+                      if portable else
+                      "NO post_install_inputs: if a step reads local paths or "
+                      "the network, this env may not rebuild elsewhere — "
+                      "register the sources and reference them to make it "
+                      "portable")})
 
     grade = _worst([c["grade"] for c in components])
     return {"grade": grade, "meaning": MEANING[grade], "components": components}

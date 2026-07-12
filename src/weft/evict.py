@@ -43,13 +43,19 @@ def evict(weft, env_id: str, site: str, archive: bool = False) -> dict:
                 "note": "nothing realized here to evict"}
     adapter = weft.adapters[site]
     rel = env_dir_rel(env_id)
-    freed = real["bytes"] or 0
 
     archived = None
     if archive:
         archived = _archive_to_controller(weft, env_id, site, adapter)
 
+    # measure what is ACTUALLY reclaimed: a prefix hardlinks most of its
+    # bytes from the shared package cache, so its apparent size (du) is not
+    # what the filesystem gets back (live-agent eval: 2.4x overstatement)
+    before = _free_bytes(adapter)
+    apparent = real["bytes"] or 0
     adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))}")
+    after = _free_bytes(adapter)
+    freed = max(0, after - before) if (before and after) else apparent
     weft.store.set_realization(
         env_id, site, real["strategy"], rel, "evicted",
         log=f"evicted {'with archive' if archived else '(cache-warm rebuild)'}")
@@ -60,12 +66,27 @@ def evict(weft, env_id: str, site: str, archive: bool = False) -> dict:
     out = {
         "env_id": env_id, "site": site, "state": "evicted",
         "freed_bytes": freed,
+        "apparent_bytes": apparent,
+        "note": "freed_bytes is measured from the filesystem; apparent_bytes "
+                "is the prefix's size, most of which is hardlinked from the "
+                "shared package cache and therefore not reclaimed by this"
+        if apparent > freed else None,
         "rebuild": "seconds, offline (site package cache is warm)"
         if not archived else "offline from the controller's archive",
     }
     if archived:
         out["archive_ref"] = archived
     return out
+
+
+def _free_bytes(adapter) -> int:
+    r = adapter.run_cmd(
+        f"df -PB1 {shlex.quote(adapter.root)} 2>/dev/null | awk 'NR==2{{print $4}}'",
+        timeout=60)
+    try:
+        return int(r.out.strip())
+    except (ValueError, AttributeError):
+        return 0
 
 
 def _archive_to_controller(weft, env_id: str, site: str, adapter) -> str | None:
@@ -172,23 +193,71 @@ def footprint(weft, site: str) -> dict:
     cache = du("cache")
     cas = du("cas")
     reals = []
+    known = set()
     for x in weft.store.realizations_for_site(site):
         if x["state"] != "ready":
             continue
+        known.add(x["env_id"].rsplit(":", 1)[-1])
         reals.append({
             "env_id": x["env_id"], "bytes": x["bytes"],
             "last_used": x["last_used"],
             "idle_days": round((time.time() - (x["last_used"] or 0)) / 86400, 1)
             if x["last_used"] else None,
+            # everything here is evictable: rebuilds are cheap. The host's
+            # policy decides WHICH — weft just refuses to hide the option.
+            "evictable": True,
         })
     reals.sort(key=lambda r: r["last_used"] or 0)
+
+    # dirs weft left behind that no record claims (crashed sessions, stale
+    # kernels): the live-agent eval found 174 MB of these unreclaimable
+    orphans = []
+    for area, live in (
+        ("envs", known),
+        ("sessions", {s["location"].rsplit("/", 1)[-1]
+                      for s in weft.store.list_sessions(site)
+                      if s["state"] == "active"}),
+        ("kernels", {k["jobdir"].rsplit("/", 1)[-1]
+                     for k in weft.store.list_kernels(state="running")}),
+    ):
+        r = adapter.run_cmd(
+            f"ls {shlex.quote(adapter.path(area))} 2>/dev/null", timeout=60)
+        for entry in r.out.split():
+            if entry.rstrip("/") not in live and not entry.endswith(".lease"):
+                orphans.append({"area": area, "name": entry,
+                                "bytes": du(f"{area}/{entry}")})
+    orphan_bytes = sum(o["bytes"] for o in orphans)
+
     return {
         "site": site,
+        "free_bytes": _free_bytes(adapter),
         "prefixes_bytes": envs, "package_cache_bytes": cache,
         "data_cache_bytes": cas,
+        "orphan_bytes": orphan_bytes, "orphans": orphans[:20],
         "realizations": reals,
-        "note": "evicting prefixes reclaims prefixes_bytes and leaves "
-                "rebuilds at seconds (the package cache stays warm); "
-                "gc_packages additionally reclaims package_cache_bytes but "
-                "makes rebuilds need the index",
+        "note": "every ready realization is evictable (env_evict) — rebuilds "
+                "are seconds while the package cache stays warm. gc_packages "
+                "additionally reclaims package_cache_bytes but makes rebuilds "
+                "need the index. gc_orphans clears leftovers no record claims.",
     }
+
+
+def gc_orphans(weft, site: str, confirm: bool = False) -> dict:
+    """Directories weft left behind that no record claims — crashed session
+    clones, stale kernel sandboxes, evicted-but-not-removed env dirs."""
+    fp = footprint(weft, site)
+    if not confirm:
+        return {"site": site, "orphans": fp["orphans"],
+                "orphan_bytes": fp["orphan_bytes"],
+                "note": "pass confirm=true to remove these"}
+    adapter = weft.adapters[site]
+    freed = 0
+    for o in fp["orphans"]:
+        adapter.run_cmd(
+            f"rm -rf {shlex.quote(adapter.path(o['area'] + '/' + o['name']))}")
+        freed += o["bytes"]
+    weft.store.audit_log("user", "gc.orphans", site=site,
+                         result=f"freed={freed}")
+    weft.store.emit("gc.orphans", site=site, freed_bytes=freed,
+                    count=len(fp["orphans"]))
+    return {"site": site, "removed": len(fp["orphans"]), "freed_bytes": freed}

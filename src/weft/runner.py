@@ -246,7 +246,8 @@ class JobRunner:
         site_row = self.store.get_site(site) or {}
         pack_tools = {"pixi_pack": self.pixi_pack, "cas": self.cas,
                       "transfers": self.transfers,
-                      "solvers": self.envman.solvers, "store": self.store}
+                      "solvers": self.envman.solvers, "store": self.store,
+                      "dataman": self.dataman}
         adapter = self.adapters[site]
         try:
             real = ensure_realization(
