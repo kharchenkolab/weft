@@ -39,6 +39,7 @@ class SSHAdapter(SiteAdapter):
         port: int | None = None,
         ssh_opts: list[str] | None = None,
         pixi_source: str | None = None,
+        pixi_unpack_source: str | None = None,
         connect_timeout: int = 10,
     ):
         self.name = name
@@ -48,6 +49,7 @@ class SSHAdapter(SiteAdapter):
         self._root = root.rstrip("/")
         self.extra_opts = list(ssh_opts or [])
         self.pixi_source = pixi_source
+        self.pixi_unpack_source = pixi_unpack_source
         self.connect_timeout = connect_timeout
         # status polls use a tighter timeout so outages surface quickly
         # (a blocked poll is indistinguishable from a slow one until it times out)
@@ -147,6 +149,8 @@ class SSHAdapter(SiteAdapter):
         self.write_file("bin/weft-shim", SHIM_SRC.read_bytes(), mode=0o755)
         if self.pixi_source and not self.file_exists("bin/pixi"):
             self._push_binary(Path(self.pixi_source), "bin/pixi")
+        if self.pixi_unpack_source and not self.file_exists("bin/pixi-unpack"):
+            self._push_binary(Path(self.pixi_unpack_source), "bin/pixi-unpack")
         smoke = self.shim(["version"])
         if smoke.rc != 0:
             raise WeftError(

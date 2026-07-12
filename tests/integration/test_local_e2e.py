@@ -114,6 +114,23 @@ def test_walltime_enforced_uniformly(weft):
     assert "suggestion" in job["error"]["hints"]
 
 
+def test_oom_classified_with_sizing_hints(weft):
+    """A memory kill must come back as job.oom with the observed-vs-asked
+    numbers the agent needs to right-size the resubmission (doc 05 §3)."""
+    r = weft.task_submit({
+        "command": "ulimit -v 262144; "
+                   "python3 -c 'x = bytearray(1024*1024*1024)'",
+        "resources": {"mem_gb": 1},
+        "site": "local",
+    })
+    job = _wait(weft, r["job_id"])
+    assert job["state"] == "FAILED"
+    err = job["error"]
+    assert err["error"] == "job.oom"
+    assert "resubmit with a larger mem_gb" in err["hints"]["suggestion"]
+    assert err["hints"]["requested_gb"] == 1
+
+
 def test_cancel(weft):
     r = weft.task_submit({"command": "sleep 300", "site": "local"})
     time.sleep(1.5)

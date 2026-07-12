@@ -24,7 +24,8 @@ from .data import LOG_TAIL_LINES, DataManager
 from .envman import EnvManager
 from .errors import WeftError
 from .placement import rank_sites
-from .realize import ensure_prefix_realization, env_dir_rel
+from .policy import enforce_policy, site_policy, storage_env_vars
+from .realize import ensure_realization
 from .store import Store
 from .task import Task
 
@@ -53,6 +54,7 @@ class JobRunner:
         transfers: dict,
         poll_interval: float = 0.5,
         max_concurrent: int = 8,
+        pixi_pack: str | None = None,
     ):
         self.store = store
         self.cas = cas
@@ -61,8 +63,10 @@ class JobRunner:
         self.adapters = adapters
         self.transfers = transfers
         self.poll_interval = poll_interval
+        self.pixi_pack = pixi_pack
         self._slots = threading.Semaphore(max_concurrent)
         self._threads: dict[str, threading.Thread] = {}
+        self._lost: dict[str, int] = {}
 
     # -- submission ----------------------------------------------------------
 
@@ -151,10 +155,19 @@ class JobRunner:
 
     def _check_capabilities(self, task: Task, site: str) -> None:
         row = self.store.get_site(site)
+        policy = site_policy(row)
+        active = len([j for j in self.store.nonterminal_jobs()
+                      if j["site"] == site])
+        enforce_policy(policy, task.resources.to_dict(), active, site)
         caps = (row or {}).get("capabilities")
         if not caps:
             return  # unprobed site: fail later with real signals, not guesses
-        ok, hints = satisfies_resources(caps, task.resources.to_dict())
+        partitions = (caps.get("scheduler") or {}).get("partitions")
+        allowed = policy.get("partitions_allowed")
+        if partitions and allowed:
+            partitions = [p for p in partitions if p["name"] in allowed]
+        ok, hints = satisfies_resources(caps, task.resources.to_dict(),
+                                        partitions=partitions)
         if not ok:
             raise WeftError(
                 "site.capability_violation",
@@ -180,6 +193,9 @@ class JobRunner:
         caps = (row or {}).get("capabilities") or {}
         plan["queue"] = "none (interactive)" if scheduler_type(caps) == "none" \
             else scheduler_type(caps)
+        notes = site_policy(row).get("notes")
+        if notes:
+            plan["site_policy_notes"] = notes  # user guidance — respect it
         return plan
 
     # -- lifecycle -----------------------------------------------------------
@@ -219,9 +235,13 @@ class JobRunner:
                 raise WeftError("task.invalid", f"unknown EnvID {task.env}", stage="realize")
             extras = env_row["canonical"]["extras"]
             spec_env_vars = extras.get("env_vars") or {}
-            real = ensure_prefix_realization(
+            site_row = self.store.get_site(job["site"]) or {}
+            real = ensure_realization(
                 task.env, env_row, adapter, self.store,
-                modules=extras["modules"] or None,
+                caps=site_row.get("capabilities"),
+                site_config=site_row.get("config"),
+                pack_tools={"pixi_pack": self.pixi_pack, "cas": self.cas,
+                            "transfers": self.transfers},
             )
             activate_line = f". {shlex.quote(adapter.path(real['location']))}/activate.sh"
 
@@ -258,6 +278,10 @@ class JobRunner:
             f"export WEFT_MEM_GB={task.resources.mem_gb}",
             f"export WEFT_GPUS={task.resources.gpus}",
         ]
+        for var, val in storage_env_vars(
+            site_policy(self.store.get_site(adapter.name))
+        ).items():
+            lines.append(f"export {var}={shlex.quote(val)}")
         # env-spec vars first, task vars override (both support {{templates}})
         for k, v in {**(spec_env_vars or {}), **task.env_vars}.items():
             v = v.replace("{{cpus}}", str(task.resources.cpus))
@@ -332,12 +356,36 @@ class JobRunner:
             state = status.get("state")
             if state == "exited":
                 break
-            if state in ("lost", "missing"):
-                # require two consecutive verdicts: a single "lost" can be a
+            if state == "timeout":
+                raise WeftError(
+                    "job.walltime_exceeded",
+                    "scheduler killed the job at its time limit",
+                    stage="running",
+                    hints={"requested": task.resources.walltime,
+                           "slurm_state": status.get("slurm"),
+                           "last_log": self._tail(adapter, jobdir_rel, 30),
+                           "suggestion": "raise resources.walltime or shrink the task"},
+                )
+            if state == "oom":
+                raise WeftError(
+                    "job.oom", "scheduler killed the job for memory",
+                    stage="running",
+                    hints={"requested_gb": task.resources.mem_gb,
+                           "observed_peak_gb": round(
+                               int(status.get("max_rss_kb", 0) or 0) / 1048576, 3),
+                           "suggestion": "resubmit with a larger mem_gb ask"},
+                )
+            if state == "cancelled":
+                # cancelled outside weft (scancel by user/admin) — record it
+                self.store.update_job(job_id, state="CANCELLED")
+                self.store.emit("job.state", job_id=job_id, state="CANCELLED",
+                                by="scheduler")
+                return
+            if state in ("lost", "missing", "unknown"):
+                # require two consecutive verdicts: a single one can be a
                 # transient inconsistency around outages or startup
-                lost_polls = getattr(self, "_lost", {}).setdefault(job_id, 0) + 1
-                self._lost[job_id] = lost_polls
-                if lost_polls >= 2:
+                self._lost[job_id] = self._lost.get(job_id, 0) + 1
+                if self._lost[job_id] >= 2:
                     self._lost.pop(job_id, None)
                     raise WeftError(
                         "sched.node_failure",
@@ -348,11 +396,10 @@ class JobRunner:
                     )
                 time.sleep(max(self.poll_interval, 1.0))
                 continue
-            self._lost = getattr(self, "_lost", {})
             self._lost.pop(job_id, None)
-            if state == "running":
+            if state in ("running", "queued"):
                 job = self.store.get_job(job_id)
-                if job["state"] == "QUEUED":
+                if state == "running" and job["state"] == "QUEUED":
                     self._set_state(job_id, "RUNNING")
                 if job["state"] == "CANCELLED":
                     adapter.cancel(handle, jobdir_rel)

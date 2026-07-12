@@ -48,6 +48,22 @@ def gpu_count(caps: dict) -> int:
     return sum(int(g.get("count", 0)) for g in compute_view(caps).get("gpus", []))
 
 
+def slurm_time_to_s(t: str) -> float | None:
+    """'1-00:00:00', '4:00:00', '30:00', 'infinite' -> seconds (None = no limit)."""
+    t = (t or "").strip().lower()
+    if not t or t in ("infinite", "unlimited", "n/a"):
+        return None
+    days = 0
+    if "-" in t:
+        d, t = t.split("-", 1)
+        days = int(d)
+    parts = [int(p) for p in t.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, s = parts[-3:]
+    return days * 86400 + h * 3600 + m * 60 + s
+
+
 def satisfies_resources(caps: dict, resources: dict, partitions: list[dict] | None = None) -> tuple[bool, dict]:
     """Check a resource ask against capabilities.
 
@@ -67,18 +83,25 @@ def satisfies_resources(caps: dict, resources: dict, partitions: list[dict] | No
         ok = False
         hints["gpus"] = {"asked": resources["gpus"], "max": gpu_count(caps)}
     if partitions:
-        # a scheduler ask must fit at least one partition
+        # a scheduler ask must fit at least one partition (cpus, mem, walltime)
+        asked_wall = slurm_time_to_s(resources.get("walltime", ""))
         fits = []
         for p in partitions:
             fit = resources.get("cpus", 1) <= p.get("cpus_per_node", 10**9) and \
                   resources.get("mem_gb", 0) <= p.get("mem_gb_per_node", 10**9)
+            pmax = slurm_time_to_s(p.get("max_walltime", ""))
+            if fit and asked_wall and pmax is not None and asked_wall > pmax:
+                fit = False
             if fit:
                 fits.append(p["name"])
         if not fits:
             ok = False
             hints["partitions"] = {
-                "asked": {k: resources.get(k) for k in ("cpus", "mem_gb")},
+                "asked": {k: resources.get(k)
+                          for k in ("cpus", "mem_gb", "walltime")},
                 "available": partitions,
+                "suggestion": "shrink the ask to fit a partition, or pick "
+                              "another site",
             }
         else:
             hints["fitting_partitions"] = fits

@@ -68,3 +68,42 @@ def sshd_site(docker_available, tmp_path_factory):
         "ssh_opts": ssh_opts, "root": "/home/physicist/.weft",
     }
     _sh("docker", "rm", "-f", name)
+
+
+@pytest.fixture(scope="session")
+def slurm_site(docker_available, tmp_path_factory):
+    """A dockerized single-node Slurm cluster reachable over SSH."""
+    keydir = tmp_path_factory.mktemp("slurmkeys")
+    build = _sh("sh", str(REPO_ROOT / "tests/fixtures/slurm/build.sh"), str(keydir))
+    if build.returncode != 0:
+        pytest.skip(f"cannot build slurm fixture: {build.stderr[-300:]}")
+    name = f"weft-slurm-{uuid.uuid4().hex[:8]}"
+    run = _sh("docker", "run", "-d", "--rm", "--name", name,
+              "--hostname", "weftslurm", "-p", "127.0.0.1::22", "weft-test-slurm")
+    assert run.returncode == 0, run.stderr
+    port = _sh("docker", "port", name, "22").stdout.strip().rsplit(":", 1)[-1]
+    key = str(keydir / "id_ed25519")
+    ssh_opts = [
+        "-i", key, "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null", "-o", "IdentitiesOnly=yes",
+    ]
+    ready = False
+    for _ in range(120):
+        ok = _sh("ssh", *ssh_opts, "-o", "BatchMode=yes", "-p", port,
+                 "physicist@127.0.0.1",
+                 "sinfo -h -o %a 2>/dev/null | head -1")
+        if ok.returncode == 0 and "up" in ok.stdout.lower():
+            ready = True
+            break
+        time.sleep(0.5)
+    if not ready:
+        logs = _sh("docker", "logs", name).stderr[-500:]
+        _sh("docker", "rm", "-f", name)
+        pytest.skip(f"slurm fixture never became ready: {logs}")
+    yield {
+        "container": name,
+        "host": "127.0.0.1", "port": int(port), "user": "physicist",
+        "ssh_opts": ssh_opts, "root": "/home/physicist/.weft",
+        "modules_init": "export MODULEPATH=/opt/site-modules",
+    }
+    _sh("docker", "rm", "-f", name)

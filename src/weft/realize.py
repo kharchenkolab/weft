@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shlex
 import threading
+from pathlib import Path
 
 from .adapters.base import SiteAdapter
 from .errors import WeftError
@@ -41,19 +42,56 @@ def _has_package(canonical: dict, name: str) -> bool:
     )
 
 
-def module_prelude(modules: list[str]) -> str:
+def module_prelude(modules: list[str], modules_init: str = "") -> str:
+    """Shell prelude for site-module loads. Non-interactive shells often
+    lack the `module` function; source the standard init scripts first.
+    `modules_init` is a site-config snippet for quirks (e.g. MODULEPATH)."""
     lines = []
+    if modules_init:
+        lines.append(modules_init)
+    lines.append(
+        "if ! type module >/dev/null 2>&1; then\n"
+        "  [ -f /usr/share/modules/init/sh ] && . /usr/share/modules/init/sh\n"
+        "  [ -f /usr/share/lmod/lmod/init/sh ] && . /usr/share/lmod/lmod/init/sh\n"
+        "  [ -f /etc/profile.d/modules.sh ] && . /etc/profile.d/modules.sh\n"
+        "fi"
+    )
     for m in modules:
-        lines.append(f"module load {shlex.quote(m)} || {{ echo 'weft: module load {m} failed' >&2; exit 90; }}")
+        lines.append(
+            f"module load {shlex.quote(m)} || "
+            f"{{ echo 'weft: module load {m} failed' >&2; exit 90; }}"
+        )
     return "\n".join(lines)
 
 
-def ensure_prefix_realization(
+def ensure_realization(
     env_id: str, env_row: dict, adapter: SiteAdapter, store: Store,
-    *, modules: list[str] | None = None,
+    *, caps: dict | None = None, site_config: dict | None = None,
+    prefer: str | None = None, pack_tools: dict | None = None,
 ) -> dict:
-    """Idempotent: cache-hit fast path, else build under (EnvID, site) lock."""
-    strategy = "modules+prefix" if modules else "prefix"
+    """Capability-driven strategy selection + idempotent build (doc 03 §4).
+
+    Cache-hit fast path; builds run under a per-(EnvID, site) lock. A
+    marker on site with no store row is re-adopted (crash recovery); a
+    store row with no marker is demoted and rebuilt (scratch purge).
+    """
+    from .strategy import select_strategy
+
+    extras = env_row["canonical"]["extras"]
+    modules = extras.get("modules") or []
+    strategy = select_strategy(
+        caps or {"internet": True, "runtimes": {}},
+        modules=modules,
+        container_base=extras.get("container_base"),
+        prefer=prefer,
+    )
+    if strategy.endswith("container"):
+        # v1: container realization not yet implemented — packed delivers
+        # the same "no site network needed" property (documented deviation)
+        store.emit("realize.fallback", env_id=env_id, site=adapter.name,
+                   requested="container", using="packed")
+        strategy = strategy.replace("container", "packed")
+
     rel = env_dir_rel(env_id)
     with _build_lock(env_id, adapter.name):
         existing = store.get_realization(env_id, adapter.name)
@@ -68,8 +106,14 @@ def ensure_prefix_realization(
             return store.get_realization(env_id, adapter.name)
 
         store.set_realization(env_id, adapter.name, strategy, rel, "building")
+        modules_init = (site_config or {}).get("modules_init", "")
         try:
-            _build_prefix(env_id, env_row, adapter, rel, modules or [])
+            if strategy.endswith("packed"):
+                _build_packed(env_id, env_row, adapter, rel, modules,
+                              modules_init, caps, pack_tools or {})
+            else:
+                _build_prefix(env_id, env_row, adapter, rel, modules,
+                              modules_init)
         except WeftError as e:
             store.set_realization(
                 env_id, adapter.name, strategy, rel, "failed", log=e.detail
@@ -80,7 +124,8 @@ def ensure_prefix_realization(
 
 
 def _build_prefix(
-    env_id: str, env_row: dict, adapter: SiteAdapter, rel: str, modules: list[str]
+    env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
+    modules: list[str], modules_init: str = "",
 ) -> None:
     adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))}")
     adapter.write_file(f"{rel}/pixi.toml", env_row["manifest"].encode())
@@ -113,11 +158,16 @@ def _build_prefix(
         )
     activate = ""
     if modules:
-        activate += module_prelude(modules) + "\n"
+        activate += module_prelude(modules, modules_init) + "\n"
     activate += hook.out
     adapter.write_file(f"{rel}/activate.sh", activate.encode())
+    _spot_check_and_mark(env_id, env_row, adapter, rel, "prefix")
 
-    # post-build spot-check: activation succeeds; interpreter runs if present
+
+def _spot_check_and_mark(
+    env_id: str, env_row: dict, adapter: SiteAdapter, rel: str, strategy: str
+) -> None:
+    """Activation succeeds; interpreter runs if present; then fence-mark."""
     check = f". {shlex.quote(adapter.path(rel))}/activate.sh"
     if _has_package(env_row.get("canonical", {}), "python"):
         check += " && python -c 'import sys; sys.exit(0)'"
@@ -129,4 +179,100 @@ def _build_prefix(
             stage="realize",
             hints={"log_tail": (spot.err or spot.out)[-1000:], "retryable": True},
         )
-    adapter.write_file(f"{rel}/.weft-ready", b'{"strategy": "prefix"}\n')
+    adapter.write_file(f"{rel}/.weft-ready",
+                       f'{{"strategy": "{strategy}"}}\n'.encode())
+
+
+def _build_packed(
+    env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
+    modules: list[str], modules_init: str, caps: dict | None,
+    pack_tools: dict,
+) -> None:
+    """Pack locally (pixi-pack: locked packages + offline installer),
+    ship the archive as an ordinary CAS blob, unpack-verify on site.
+    No network is needed from the site at any point."""
+    import subprocess
+    import tempfile
+
+    pixi_pack = pack_tools.get("pixi_pack")
+    cas = pack_tools.get("cas")
+    transfers = pack_tools.get("transfers", {})
+    if not pixi_pack or cas is None:
+        raise WeftError(
+            "env.realize_failed",
+            "packed strategy needs the pixi-pack tool configured on the "
+            "controller (Weft(pixi_pack=...))",
+            stage="realize",
+            hints={"suggestion": "install pixi-pack next to pixi and pass its path"},
+        )
+    plat = _site_platform(caps)
+    with tempfile.TemporaryDirectory(prefix="weft-pack-") as td:
+        tdp = Path(td)
+        (tdp / "pixi.toml").write_text(env_row["manifest"])
+        (tdp / "pixi.lock").write_text(env_row["native_lock"])
+        out_tar = tdp / "environment.tar"
+        proc = subprocess.run(
+            [pixi_pack, "--environment", "default", "--platform", plat,
+             "--output-file", str(out_tar), str(tdp)],
+            capture_output=True, text=True, timeout=1800,
+        )
+        if proc.returncode != 0 or not out_tar.exists():
+            raise WeftError(
+                "env.realize_failed",
+                "pixi-pack failed on the controller",
+                stage="realize",
+                hints={"log_tail": (proc.stderr or proc.stdout)[-1500:]},
+            )
+        info = cas.register_file(out_tar)
+    digest = info.ref.split(":")[-1]
+
+    # ship the archive through the ordinary data plane (dedup for free)
+    endpoint = adapter.transfer_endpoint()
+    method = transfers.get(endpoint["method"])
+    if method is None:
+        raise WeftError(
+            "data.transfer_failed",
+            f"no transfer method {endpoint['method']!r} for packed delivery",
+            stage="realize",
+        )
+    method.transfer([(digest, info.bytes)], cas, endpoint)
+
+    site_tar = f"{endpoint['cas_root']}/{digest[:2]}/{digest}"
+    dest = adapter.path(rel)
+    adapter.run_cmd(f"rm -rf {shlex.quote(dest)} && mkdir -p {shlex.quote(dest)}")
+    unpack = adapter.run_cmd(
+        f"cd {shlex.quote(dest)} && "
+        f"{shlex.quote(adapter.path('bin/pixi-unpack'))} "
+        f"--output-directory {shlex.quote(dest)} --shell bash "
+        f"{shlex.quote(site_tar)}",
+        timeout=1800,
+    )
+    if unpack.rc != 0:
+        raise WeftError(
+            "env.realize_failed",
+            "pixi-unpack failed on site",
+            stage="realize",
+            hints={"log_tail": (unpack.err or unpack.out)[-1500:],
+                   "retryable": True},
+        )
+    # pixi-unpack writes <dest>/env plus an activation script; wrap it so
+    # the activation contract (modules first, then env) holds
+    adapter.run_cmd(
+        f"mv {shlex.quote(dest)}/activate.sh {shlex.quote(dest)}/activate.inner.sh"
+    )
+    activate = ""
+    if modules:
+        activate += module_prelude(modules, modules_init) + "\n"
+    activate += f". {shlex.quote(dest)}/activate.inner.sh\n"
+    adapter.write_file(f"{rel}/activate.sh", activate.encode())
+    _spot_check_and_mark(env_id, env_row, adapter, rel, "packed")
+
+
+def _site_platform(caps: dict | None) -> str:
+    from .capability import compute_view
+    view = compute_view(caps or {})
+    osname = view.get("os", "linux")
+    arch = view.get("arch", "x86_64")
+    if osname == "darwin":
+        return "osx-arm64" if arch in ("arm64", "aarch64") else "osx-64"
+    return "linux-aarch64" if arch in ("arm64", "aarch64") else "linux-64"

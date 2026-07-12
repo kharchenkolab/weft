@@ -34,13 +34,20 @@ DENY_PATTERNS = [
 class Weft:
     """One instance per workspace. The UI and the agent share this state."""
 
-    def __init__(self, workspace: Path, pixi_bin: str | None = None):
+    def __init__(self, workspace: Path, pixi_bin: str | None = None,
+                 pixi_pack: str | None = None):
         self.workspace = Path(workspace)
         data_dir = self.workspace / ".weft"
         data_dir.mkdir(parents=True, exist_ok=True)
         self.store = Store(data_dir / "state.db")
         self.cas = LocalCAS(data_dir / "cas")
         self.pixi_bin = pixi_bin or "pixi"
+        if pixi_pack is None:
+            sibling = Path(self.pixi_bin).parent / "pixi-pack"
+            pixi_pack = str(sibling) if sibling.exists() else None
+        self.pixi_pack = pixi_pack
+        unpack_sibling = Path(self.pixi_bin).parent / "pixi-unpack"
+        self.pixi_unpack = str(unpack_sibling) if unpack_sibling.exists() else None
         self.envman = EnvManager(self.store, data_dir / "solve", self.pixi_bin)
         self.dataman = DataManager(self.store, self.cas, self.workspace)
         self.adapters: dict[str, SiteAdapter] = {}
@@ -48,8 +55,9 @@ class Weft:
         self.transfers = {"local-link": LocalLink(), "rsync-ssh": RsyncSSH()}
         self.runner = JobRunner(
             self.store, self.cas, self.envman, self.dataman,
-            self.adapters, self.transfers,
+            self.adapters, self.transfers, pixi_pack=self.pixi_pack,
         )
+        self._module_cache: dict[tuple[str, str], bool] = {}
         from .session import SessionManager
         self.sessions = SessionManager(self.store, self.envman)
         self._restore_sites()
@@ -75,11 +83,27 @@ class Weft:
                 user=config.get("user"), port=config.get("port"),
                 ssh_opts=config.get("ssh_opts"),
                 pixi_source=config.get("pixi_source"),
+                pixi_unpack_source=config.get("pixi_unpack_source", self.pixi_unpack),
+            )
+        elif kind == "slurm":
+            from .adapters.slurm import SlurmAdapter
+            sched = config.get("scheduler") or {}
+            policy = config.get("policy") or {}
+            adapter = SlurmAdapter(
+                name, config["host"], config["root"],
+                user=config.get("user"), port=config.get("port"),
+                ssh_opts=config.get("ssh_opts"),
+                pixi_source=config.get("pixi_source"),
+                pixi_unpack_source=config.get("pixi_unpack_source", self.pixi_unpack),
+                account=sched.get("account"),
+                partition=sched.get("partition"),
+                partitions_allowed=policy.get("partitions_allowed"),
+                modules_init=config.get("modules_init", ""),
             )
         else:
             raise WeftError(
                 "task.invalid", f"unknown site kind: {kind}", stage="infra",
-                hints={"known": ["local", "ssh"]},
+                hints={"known": ["local", "ssh", "slurm"]},
             )
         self.adapters[name] = adapter
         return adapter
@@ -91,7 +115,7 @@ class Weft:
         adapter.ensure_bootstrap()
         probe = adapter.probe()
         from .capability import normalize_probe
-        caps = normalize_probe(probe)
+        caps = self._apply_caps_override(normalize_probe(probe), config)
         self.store.set_capabilities(name, caps)
         self.store.audit_log("user", "site.register", site=name)
         self.store.emit("site.registered", site=name, site_kind=kind)
@@ -101,13 +125,18 @@ class Weft:
         out = []
         for row in self.store.list_sites():
             caps = row.get("capabilities") or {}
-            out.append({
+            entry = {
                 "name": row["name"], "kind": row["kind"], "health": row["health"],
                 "cpus": caps.get("cpus"), "mem_gb": caps.get("mem_gb"),
                 "gpus": sum(g.get("count", 0) for g in caps.get("gpus", [])),
                 "scheduler": (caps.get("scheduler") or {}).get("type"),
                 "internet": caps.get("internet"),
-            })
+            }
+            from .policy import site_policy
+            policy = site_policy(row)
+            if policy:
+                entry["policy"] = policy  # user rules + guidance notes
+            out.append(entry)
         return out
 
     def sites_describe(self, name: str) -> dict:
@@ -121,9 +150,39 @@ class Weft:
         """Re-probe on demand (capability drift, doc 02 §7)."""
         adapter = self._adapter(name)
         from .capability import normalize_probe
-        caps = normalize_probe(adapter.probe())
+        config = (self.store.get_site(name) or {}).get("config", {})
+        caps = self._apply_caps_override(normalize_probe(adapter.probe()), config)
         self.store.set_capabilities(name, caps)
         return caps
+
+    @staticmethod
+    def _apply_caps_override(caps: dict, config: dict) -> dict:
+        """Site-config `capabilities_override` patches probed facts — for
+        quirky sites the probe can't see through (and for tests that
+        simulate e.g. air-gapped compute nodes)."""
+        override = config.get("capabilities_override") or {}
+        for k, v in override.items():
+            if isinstance(v, dict) and isinstance(caps.get(k), dict):
+                caps[k] = {**caps[k], **v}
+            else:
+                caps[k] = v
+        return caps
+
+    def module_check(self, site: str, names: list[str]) -> dict:
+        """Lazy per-site module inventory (doc 02 §3), cached."""
+        adapter = self._adapter(site)
+        if not hasattr(adapter, "module_avail"):
+            return {"site": site, "supported": False,
+                    "note": "site kind has no module system"}
+        out = {}
+        for n in names:
+            key = (site, n)
+            if key not in self._module_cache:
+                self._module_cache[key] = adapter.module_avail(n)
+            out[n] = self._module_cache[key]
+        missing = [n for n, ok in out.items() if not ok]
+        return {"site": site, "modules": out, "missing": missing,
+                "satisfiable_here": not missing}
 
     def _adapter(self, name: str) -> SiteAdapter:
         if name not in self.adapters:
