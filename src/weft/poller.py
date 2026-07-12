@@ -279,6 +279,21 @@ class SitePoller:
             )
             return
         w.lost_strikes = 0
+        # idle auto-stop, if the site owner asked for it (policy knob)
+        row = self.runner.store.get_site(self.site) or {}
+        idle_cap = ((row.get("config") or {}).get("policy")
+                    or {}).get("kernel_idle_stop_s")
+        if idle_cap:
+            k = self.runner.store.get_kernel(w.job_id)
+            if k and time.time() - k["last_used"] > float(idle_cap):
+                self.adapter.write_file(f"{w.jobdir_rel}/kernel.stop", b"1\n")
+                self.adapter.cancel(w.handle, w.jobdir_rel)
+                self.runner.store.update_kernel(w.job_id, state="stopped")
+                self.runner.store.emit(
+                    "kernel.idle_stopped", kernel=w.job_id, site=self.site,
+                    idle_s=round(time.time() - k["last_used"], 0),
+                    policy_s=idle_cap)
+                self._unregister(w.job_id)
 
     def _fail(self, w: Watch, err: WeftError) -> None:
         self._unregister(w.job_id)

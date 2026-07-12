@@ -503,12 +503,18 @@ class JobRunner:
             if sig["signature"] == "oom-killed" or (
                 exit_code == 137 and mem_ask and max_rss_gb >= 0.9 * mem_ask
             ):
+                oom_hints = {"observed_peak_gb": max_rss_gb,
+                             "requested_gb": mem_ask, "log_signature": sig}
+                if sig.get("failed_allocation"):
+                    oom_hints["failed_allocation"] = sig["failed_allocation"]
                 raise WeftError(
                     "job.oom", "job was killed for memory", stage="running",
-                    hints={"observed_peak_gb": max_rss_gb, "requested_gb": mem_ask,
-                           "log_signature": sig,
+                    hints={**oom_hints,
                            "suggestion": "resubmit with mem_gb >= "
-                                         "max(2 x requested, 1.5 x observed peak)",
+                                         "max(2 x requested, 1.5 x observed peak"
+                                         + (", failed allocation size" if
+                                            sig.get("failed_allocation") else "")
+                                         + ")",
                            "note": "observed peak UNDERSTATES need when the "
                                    "kill happened during allocation — never "
                                    "size down toward it"},

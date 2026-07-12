@@ -58,6 +58,24 @@ def test_layer_conflict_without_r_base(w):
     assert r["hints"]["needs"] == "r-base in deps.conda"
 
 
+def test_github_tarball_realizes_from_source(w):
+    """A github-ref package compiles from its SHA-pinned tarball (needs
+    the conda layer's toolchain — glue has C code)."""
+    env = w.env_ensure({"name": "r-gh-real",
+                        "deps": {"conda": ["r-base =4.4", "c-compiler", "make"],
+                                 "cran": ["tidyverse/glue@main"]},
+                        "system_requirements": SNAP})
+    assert "env_id" in env, env
+    r = w.task_submit({
+        "command": "Rscript -e 'cat(glue::glue(\"v-{1+1}\"))' > results/g.txt",
+        "env": env["env_id"], "outputs": ["results/"], "site": "local"})
+    job = w.runner.wait(r["job_id"], 1800)
+    assert job["state"] == "DONE", job["error"]
+    out = next(o for o in job["manifest"]["outputs"]
+               if o["path"] == "results/g.txt")
+    assert out["preview"]["lines"] == ["v-2"]
+
+
 def test_cran_layer_realizes_and_runs(w):
     env = w.env_ensure({"name": "r-run",
                         "deps": {**BASE, "cran": ["jsonlite"]},

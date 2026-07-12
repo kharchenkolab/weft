@@ -427,6 +427,9 @@ class Weft:
 
     def kernel_exec(self, kernel_id: str, code: str, wait: bool = True,
                     timeout: float = 120.0) -> dict:
+        """Run a code block against the kernel's persistent state.
+        wait=True returns {rc, out, err, artifacts}; wait=False returns a
+        block handle for kernel_poll (long computations stay watchable)."""
         try:
             return self.kernels.exec(kernel_id, code, wait=wait, timeout=timeout)
         except WeftError as e:
@@ -434,15 +437,20 @@ class Weft:
 
     def kernel_poll(self, kernel_id: str, block: int,
                     timeout: float = 0.0) -> dict:
+        """Check an async block: {"state": "running"} or the full result."""
         return self.kernels.poll(kernel_id, block, timeout=timeout)
 
     def kernel_status(self, kernel_id: str) -> dict:
+        """State (running/died/stopped), current block + blocks_run, idle_s."""
         return self.kernels.status(kernel_id)
 
     def kernel_transcript(self, kernel_id: str, last: int = 20) -> list[dict]:
+        """Ordered (code, rc, output tail) — the exploration's paper trail;
+        the raw material for assembling the citable task."""
         return self.kernels.transcript(kernel_id, last)
 
     def kernel_interrupt(self, kernel_id: str) -> dict:
+        """SIGINT the running block (finishes rc=130); interpreter survives."""
         return self.kernels.interrupt(kernel_id)
 
     def kernel_restart(self, kernel_id: str, replay: str = "successful") -> dict:
@@ -476,9 +484,13 @@ class Weft:
                             stage="infra")
         return {"group": group, **counts,
                 "failed_previews": self.store.failed_in_group(group),
-                "elements": [{"index": j["array_index"], "job_id": j["job_id"],
-                              "state": j["state"]}
-                             for j in self.store.jobs_in_group(group)]}
+                "elements": [
+                    {"index": j["array_index"], "job_id": j["job_id"],
+                     "state": j["state"],
+                     # a memoized element's manifest names its original job
+                     **({"memoized": True} if j["manifest"] and
+                        j["manifest"].get("job_id") != j["job_id"] else {})}
+                    for j in self.store.jobs_in_group(group)]}
 
     def array_retry(self, group: str, indices: list[int] | None = None,
                     command_override: str | None = None) -> dict:
@@ -555,14 +567,23 @@ class Weft:
                 checks.append({"site": name, "ok": False, "error": str(e)[:200]})
                 self.store.set_health(name, "unreachable")
         pending = self.store.nonterminal_jobs()
+        idle_kernels = [
+            {"kernel_id": k["kernel_id"], "site": k["site"], "lang": k["lang"],
+             "idle_s": round(time.time() - k["last_used"], 0)}
+            for k in self.store.list_kernels(state="running")
+            if time.time() - k["last_used"] > 3600
+        ]
         return {
             "sites": checks,
             "nonterminal_jobs": [
                 {"job_id": j["job_id"], "state": j["state"], "site": j["site"]}
                 for j in pending
             ],
+            "idle_kernels": idle_kernels or None,
             "suggestion": "call reconcile() if nonterminal jobs look stale"
-            if pending else None,
+            if pending else
+            ("stop idle kernels (or set policy.kernel_idle_stop_s)"
+             if idle_kernels else None),
         }
 
     def reconcile(self) -> list[dict]:

@@ -302,6 +302,17 @@ class CranSolver:
             'lib <- {lib}; dir.create(lib, showWarnings=FALSE, recursive=TRUE);'
             'p <- c({pkgs}); p <- setdiff(p, rownames(installed.packages(lib.loc=lib)));'
             'if (length(p)) install.packages(p, lib=lib);'
+            # PPM linux binaries assume focal-era glibc; on older hosts they
+            # install but fail to *load* — detect and rebuild those from source
+            'chk <- intersect(c({pkgs}), rownames(installed.packages(lib.loc=lib)));'
+            'bad <- Filter(function(x) inherits(tryCatch('
+            'loadNamespace(x, lib.loc=lib), error=function(e) e), "error"), chk);'
+            'if (length(bad)) {{'
+            ' write(paste("binary load failed, rebuilding from source:",'
+            ' paste(bad, collapse=",")), stderr());'
+            ' srcrepo <- sub("__linux__/[^/]+/", "", {snap});'
+            ' remove.packages(bad, lib=lib);'
+            ' install.packages(bad, lib=lib, repos=srcrepo, type="source") }};'
             't <- c({tarballs});'
             'if (length(t)) install.packages(t, lib=lib, repos=NULL, type="source");'
             'need <- c({top});'

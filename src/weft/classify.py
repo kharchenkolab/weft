@@ -45,5 +45,11 @@ def classify_log(tail: str) -> dict:
         excerpt = "\n".join(lines[tb : tb + 40][-40:])
     else:
         excerpt = "\n".join(lines[max(0, idx - 3) : idx + 5])
-    return {"signature": sig, "all_signatures": [s for s, _ in found],
-            "excerpt": excerpt}
+    out = {"signature": sig, "all_signatures": [s for s, _ in found],
+           "excerpt": excerpt}
+    # the failed allocation size, when the runtime names it (numpy et al.);
+    # bare MemoryError carries none — hints must not pretend otherwise
+    m = re.search(r"[Uu]nable to allocate ([\d.]+\s*[KMGTP]iB)", tail)
+    if m:
+        out["failed_allocation"] = m.group(1)
+    return out
