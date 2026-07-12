@@ -568,6 +568,71 @@ class Weft:
     def reconcile(self) -> list[dict]:
         return self.runner.reconcile()
 
+    # -- provenance -------------------------------------------------------------
+
+    def provenance(self, target: str, depth: int = 5) -> dict:
+        """The full "how was this produced" chain for a job or a DataRef:
+        command + exact env identity (spec, locked layers, snapshot dates,
+        pinned SHAs, attested modules) + input refs, recursing into the
+        jobs that produced those inputs. Everything needed for a methods
+        appendix, machine-readable."""
+        if target.startswith("dref:"):
+            row = self.store.get_dataref(target)
+            if not row:
+                raise WeftError("data.missing", f"unknown ref: {target}",
+                                stage="infra")
+            origin = row["meta"].get("origin", "")
+            node = {"ref": target, "bytes": row["bytes"], "origin": origin}
+            if origin.startswith("job:jobs/") and depth > 0:
+                node["produced_by"] = self.provenance(
+                    origin.split("/", 1)[1], depth - 1)
+            return node
+
+        job = self.store.get_job(target)
+        if not job:
+            raise WeftError("task.invalid", f"unknown job: {target}",
+                            stage="infra")
+        task = job["task"]
+        node = {
+            "job_id": target, "state": job["state"], "site": job["site"],
+            "task_hash": job["task_hash"],
+            "command": task.get("command"),
+            "env_vars": task.get("env_vars") or {},
+            "outputs": [{"path": o["path"], "ref": o["ref"]}
+                        for o in (job["manifest"] or {}).get("outputs", [])],
+        }
+        env_id = task.get("env")
+        if env_id:
+            env = self.store.get_env(env_id)
+            if env:
+                extras = env["canonical"]["extras"]
+                spec = self.store.get_spec(env["spec_hash"])
+                node["environment"] = {
+                    "env_id": env_id, "spec": spec,
+                    "weakly_reproducible": env["weakly_reproducible"],
+                    "modules_attested": extras.get("modules") or [],
+                    "post_install": extras.get("post_install") or [],
+                    "layers": {
+                        eco: {"packages": len(l.get("records", [])),
+                              "snapshot": l.get("snapshot"),
+                              "pinned_shas": {
+                                  r["name"]: r["remote_sha"]
+                                  for r in l.get("records", [])
+                                  if r.get("remote_sha")}}
+                        for eco, l in (env["canonical"].get("layers")
+                                       or {}).items()},
+                }
+        inputs = list(task.get("inputs") or [])
+        if task.get("code"):
+            inputs.append(task["code"])
+        node["inputs"] = [
+            {"mount_as": i["mount_as"],
+             **(self.provenance(i["ref"], depth - 1) if depth > 0
+                else {"ref": i["ref"]})}
+            for i in inputs
+        ]
+        return node
+
     def site_teardown(self, name: str) -> dict:
         """Tear down an ephemeral (cloud) site's instance. Explicit —
         spending-level actions are never implicit (doc 05 §6)."""
