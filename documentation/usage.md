@@ -252,3 +252,25 @@ w.gc_sweep("hpc", confirm=True)  # explicit; content rebuilds on next use
 w.gc_events(older_than_days=30)
 w.task_logs(job_id, follow_cursor=0)   # live log following
 ```
+
+### Services (endpoint-publishing processes)
+
+```python
+r = w.service_start("hpc", {"command": "python app.py --port $WEFT_PORT",
+                            "env": env_id,
+                            "inputs": [{"ref": ref, "mount_as": "d/run.h5"}],
+                            "outputs": ["logs/"]},
+                    ports=[8501])
+r["endpoints"][0]["url"]          # tunneled back to the controller
+w.service_stop(r["service_id"], collect=True)
+```
+Loopback-bound on the site; the SSH tunnel is the auth boundary (Slurm:
+hops login→compute node). `service.ready` / `service.exited` in the feed.
+
+### Remote data ingest, promotion, shared sites
+
+```python
+w.data_register("https://example.org/run.h5", site="hpc")   # into site CAS
+w.kernel_promote(k, blocks=[7])        # transcript-grade manifest
+w.register_site("hpc", "slurm", {..., "shared": True})      # team caches
+```

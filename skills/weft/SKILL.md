@@ -32,6 +32,9 @@ w = Weft(workspace_dir)          # pixi/pixi-pack auto-found next to pixi_bin
   once per site; outputs chain site-side for free.
 - **Task** — env + inputs + command + outputs; content-hashed, so identical
   resubmissions return the recorded manifest (memoization) unless `force`.
+  Three execution shapes share this model: **tasks** (run→manifest),
+  **kernels** (persistent interpreter, block-fed), **services** (run until
+  stopped, publish an endpoint).
 - **Job** — a task in flight; you watch *events*, never block.
 
 ## The golden path
@@ -89,7 +92,10 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
   queue reasons, logs, cancel, memoization, provenance.
 - `references/kernels.md` — persistent interactive interpreters
   (python/R/julia): incremental blocks with live state, interrupt, crash
-  recovery with transcript replay.
+  recovery with transcript replay, promotion into the record.
+- `references/services.md` — long-lived endpoint-publishing processes
+  (dashboards, notebook servers, query APIs near the data): tunneled,
+  readiness-checked, death-reported.
 - `references/failures.md` — full error taxonomy with the remediation
   playbook; crash/outage semantics.
 - `references/scenarios.md` — worked end-to-end patterns (offload,
