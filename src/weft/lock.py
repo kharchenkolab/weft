@@ -62,10 +62,15 @@ def render_pixi_manifest(spec: EnvSpec) -> str:
         f"channels = [{', '.join(_toml_str(c) for c in spec.channels)}]",
         f"platforms = [{', '.join(_toml_str(p) for p in spec.platforms)}]",
     ]
-    if spec.system_requirements:
+    # only pixi-known keys go into the manifest; others (e.g. cran_snapshot)
+    # are consumed by weft-level solvers
+    _PIXI_SYSREQ = {"cuda", "libc", "linux", "macos", "archspec"}
+    pixi_reqs = {k: v for k, v in spec.system_requirements.items()
+                 if k in _PIXI_SYSREQ}
+    if pixi_reqs:
         lines.append("")
         lines.append("[system-requirements]")
-        for k, v in sorted(spec.system_requirements.items()):
+        for k, v in sorted(pixi_reqs.items()):
             lines.append(f"{k} = {_toml_str(v)}")
     lines += ["", "[dependencies]"]
     for dep in spec.conda:

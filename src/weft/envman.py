@@ -21,8 +21,9 @@ class EnvManager:
         self.store = store
         self.solve_dir = Path(solve_dir)
         self.pixi_bin = pixi_bin
-        from .solvers import PixiSolver
+        from .solvers import CranSolver, PixiSolver
         self.solvers: dict = {"conda": PixiSolver(pixi_bin),
+                              "cran": CranSolver(pixi_bin),
                               **(solvers or {})}
 
     def _lookup_spec(self, spec_hash: str) -> EnvSpec | None:
