@@ -542,9 +542,11 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
                     f"mkdir -p {shlex.quote(adapter.path(rel))}")
 
     # a source-built delta needs a compiler that is NOT in the env; weft
-    # brings its own, on PATH for the build only
+    # brings its own, on PATH for the build only. Language layers (R,
+    # julia) get it eagerly — they routinely compile; pypi tries wheels
+    # first and only summons the toolchain if a build actually fails.
     prelude = ""
-    if delta.get("layers_added") or delta.get("pypi_added"):
+    if delta.get("layers_added"):
         from .toolchain import toolchain_fingerprint
         tc = ensure_toolchain(adapter, adapter.pixi_bin)
         if tc:
@@ -573,9 +575,20 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
             pack_tools, parent_env_id))
 
     if delta.get("pypi_added"):
-        activation.append(_overlay_pypi(env_id, env_row, parent_row, adapter,
-                                        rel, parent_dir, delta["pypi_added"],
-                                        prelude))
+        try:
+            activation.append(_overlay_pypi(env_id, env_row, parent_row,
+                                            adapter, rel, parent_dir,
+                                            delta["pypi_added"], prelude))
+        except WeftError:
+            if prelude:
+                raise           # a compiler was already on PATH: real failure
+            tc = ensure_toolchain(adapter, adapter.pixi_bin)
+            if not tc:
+                raise
+            activation.append(_overlay_pypi(
+                env_id, env_row, parent_row, adapter, rel, parent_dir,
+                delta["pypi_added"],
+                build_env_prelude(adapter, tc, parent_dir)))
 
     adapter.write_file(f"{rel}/activate.sh",
                        ("\n".join(activation) + "\n").encode())
