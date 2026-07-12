@@ -49,6 +49,9 @@ class SSHAdapter(SiteAdapter):
         self.extra_opts = list(ssh_opts or [])
         self.pixi_source = pixi_source
         self.connect_timeout = connect_timeout
+        # status polls use a tighter timeout so outages surface quickly
+        # (a blocked poll is indistinguishable from a slow one until it times out)
+        self.poll_timeout = 20.0
         sock_dir = Path(tempfile.gettempdir()) / f"weft-ssh-{os.getuid()}"
         sock_dir.mkdir(mode=0o700, exist_ok=True)
         tag = hashlib.sha256(f"{user}@{host}:{port}".encode()).hexdigest()[:16]
@@ -217,7 +220,8 @@ class SSHAdapter(SiteAdapter):
         return f"pid:{r.json().get('pid', 0)}"
 
     def poll_job(self, handle: str, jobdir_rel: str) -> dict:
-        return self.shim(["status", "--dir", self.path(jobdir_rel)]).json()
+        return self.shim(["status", "--dir", self.path(jobdir_rel)],
+                         timeout=self.poll_timeout).json()
 
     def cancel(self, handle: str, jobdir_rel: str) -> None:
         if handle.startswith("pid:"):

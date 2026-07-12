@@ -1,8 +1,9 @@
 """Durable state: one SQLite database + an in-process event bus (doc 01 §6).
 
-Single-writer by design. WAL mode; a process-wide lock serializes writes so
-background pollers and the API surface can share the store. Remote state is
-the source of truth for running jobs — rows here are reconciled snapshots.
+Single-writer by design. WAL mode; a process-wide RLock serializes *all*
+access (reads included — CPython's sqlite3 does not tolerate concurrent
+cursor use on one connection across threads). Remote state is the source
+of truth for running jobs — rows here are reconciled snapshots.
 """
 
 from __future__ import annotations
@@ -45,6 +46,9 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS audit(
   seq INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, actor TEXT, action TEXT,
   site TEXT, command TEXT, why TEXT, result TEXT);
+CREATE TABLE IF NOT EXISTS sessions(
+  session_id TEXT PRIMARY KEY, base_env_id TEXT, site TEXT, location TEXT,
+  added_conda TEXT, added_pypi TEXT, state TEXT, created_at REAL);
 """
 
 
@@ -58,11 +62,25 @@ class Store:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
         with self._lock, self._conn:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.executescript(_SCHEMA)
         self._subscribers: list[Callable[[dict], None]] = []
+
+    # -- serialized access helpers ------------------------------------------
+
+    def _write(self, sql: str, params: tuple = ()) -> int:
+        with self._lock, self._conn:
+            return self._conn.execute(sql, params).lastrowid
+
+    def _rows(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
+
+    def _row(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:
+        rows = self._rows(sql, params)
+        return rows[0] if rows else None
 
     # -- events ---------------------------------------------------------
 
@@ -70,12 +88,10 @@ class Store:
         self._subscribers.append(fn)
 
     def emit(self, kind: str, job_id: str | None = None, **payload) -> int:
-        with self._lock, self._conn:
-            cur = self._conn.execute(
-                "INSERT INTO events(ts, kind, job_id, payload) VALUES(?,?,?,?)",
-                (time.time(), kind, job_id, _j(payload)),
-            )
-            seq = cur.lastrowid
+        seq = self._write(
+            "INSERT INTO events(ts, kind, job_id, payload) VALUES(?,?,?,?)",
+            (time.time(), kind, job_id, _j(payload)),
+        )
         event = {"seq": seq, "kind": kind, "job_id": job_id, **payload}
         for fn in list(self._subscribers):
             try:
@@ -85,9 +101,9 @@ class Store:
         return seq
 
     def events_since(self, cursor: int, limit: int = 200) -> list[dict]:
-        rows = self._conn.execute(
+        rows = self._rows(
             "SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?", (cursor, limit)
-        ).fetchall()
+        )
         return [
             {
                 "seq": r["seq"], "ts": r["ts"], "kind": r["kind"],
@@ -100,49 +116,42 @@ class Store:
         self, actor: str, action: str, *, site: str = "", command: str = "",
         why: str = "", result: str = "",
     ) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO audit(ts, actor, action, site, command, why, result)"
-                " VALUES(?,?,?,?,?,?,?)",
-                (time.time(), actor, action, site, command, why, result[:4000]),
-            )
+        self._write(
+            "INSERT INTO audit(ts, actor, action, site, command, why, result)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (time.time(), actor, action, site, command, why, result[:4000]),
+        )
 
     def audit_tail(self, n: int = 50) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT * FROM audit ORDER BY seq DESC LIMIT ?", (n,)
-        ).fetchall()
+        rows = self._rows("SELECT * FROM audit ORDER BY seq DESC LIMIT ?", (n,))
         return [dict(r) for r in reversed(rows)]
 
     # -- specs / envs -----------------------------------------------------
 
     def put_spec(self, spec_hash: str, name: str, body: dict) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO specs VALUES(?,?,?,?)",
-                (spec_hash, name, _j(body), time.time()),
-            )
+        self._write(
+            "INSERT OR IGNORE INTO specs VALUES(?,?,?,?)",
+            (spec_hash, name, _j(body), time.time()),
+        )
 
     def get_spec(self, spec_hash: str) -> dict | None:
-        r = self._conn.execute(
-            "SELECT body FROM specs WHERE spec_hash=?", (spec_hash,)
-        ).fetchone()
+        r = self._row("SELECT body FROM specs WHERE spec_hash=?", (spec_hash,))
         return json.loads(r["body"]) if r else None
 
     def put_env(
         self, env_id: str, spec_hash: str, canonical: dict, native_lock: str,
         manifest: str, platforms: list[str], weakly_reproducible: bool = False,
     ) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO envs VALUES(?,?,?,?,?,?,?,?)",
-                (
-                    env_id, spec_hash, _j(canonical), native_lock, manifest,
-                    _j(platforms), int(weakly_reproducible), time.time(),
-                ),
-            )
+        self._write(
+            "INSERT OR IGNORE INTO envs VALUES(?,?,?,?,?,?,?,?)",
+            (
+                env_id, spec_hash, _j(canonical), native_lock, manifest,
+                _j(platforms), int(weakly_reproducible), time.time(),
+            ),
+        )
 
     def get_env(self, env_id: str) -> dict | None:
-        r = self._conn.execute("SELECT * FROM envs WHERE env_id=?", (env_id,)).fetchone()
+        r = self._row("SELECT * FROM envs WHERE env_id=?", (env_id,))
         if not r:
             return None
         return {
@@ -153,10 +162,10 @@ class Store:
         }
 
     def env_for_spec(self, spec_hash: str) -> str | None:
-        r = self._conn.execute(
+        r = self._row(
             "SELECT env_id FROM envs WHERE spec_hash=? ORDER BY created_at DESC LIMIT 1",
             (spec_hash,),
-        ).fetchone()
+        )
         return r["env_id"] if r else None
 
     # -- realizations ------------------------------------------------------
@@ -166,26 +175,24 @@ class Store:
         state: str, log: str = "",
     ) -> None:
         now = time.time()
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO realizations VALUES(?,?,?,?,?,?,?,?) "
-                "ON CONFLICT(env_id, site) DO UPDATE SET strategy=?, location=?,"
-                " state=?, log=?, updated_at=?",
-                (env_id, site, strategy, location, state, log, now, now,
-                 strategy, location, state, log, now),
-            )
+        self._write(
+            "INSERT INTO realizations VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(env_id, site) DO UPDATE SET strategy=?, location=?,"
+            " state=?, log=?, updated_at=?",
+            (env_id, site, strategy, location, state, log, now, now,
+             strategy, location, state, log, now),
+        )
 
     def get_realization(self, env_id: str, site: str) -> dict | None:
-        r = self._conn.execute(
+        r = self._row(
             "SELECT * FROM realizations WHERE env_id=? AND site=?", (env_id, site)
-        ).fetchone()
+        )
         return dict(r) if r else None
 
     def realizations_for(self, env_id: str) -> list[dict]:
-        rows = self._conn.execute(
+        return [dict(r) for r in self._rows(
             "SELECT * FROM realizations WHERE env_id=?", (env_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )]
 
     # -- data locations ------------------------------------------------------
 
@@ -193,14 +200,13 @@ class Store:
         self, ref: str, kind: str, nbytes: int,
         chunks: list[str] | None = None, meta: dict | None = None,
     ) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT OR IGNORE INTO datarefs VALUES(?,?,?,?,?)",
-                (ref, kind, nbytes, _j(chunks) if chunks else None, _j(meta or {})),
-            )
+        self._write(
+            "INSERT OR IGNORE INTO datarefs VALUES(?,?,?,?,?)",
+            (ref, kind, nbytes, _j(chunks) if chunks else None, _j(meta or {})),
+        )
 
     def get_dataref(self, ref: str) -> dict | None:
-        r = self._conn.execute("SELECT * FROM datarefs WHERE ref=?", (ref,)).fetchone()
+        r = self._row("SELECT * FROM datarefs WHERE ref=?", (ref,))
         if not r:
             return None
         return {
@@ -210,56 +216,49 @@ class Store:
         }
 
     def set_location(self, ref: str, site: str, path: str, present: bool = True) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO locations VALUES(?,?,?,?,?) "
-                "ON CONFLICT(ref, site) DO UPDATE SET path=?, present=?, verified_at=?",
-                (ref, site, path, int(present), time.time(),
-                 path, int(present), time.time()),
-            )
+        self._write(
+            "INSERT INTO locations VALUES(?,?,?,?,?) "
+            "ON CONFLICT(ref, site) DO UPDATE SET path=?, present=?, verified_at=?",
+            (ref, site, path, int(present), time.time(),
+             path, int(present), time.time()),
+        )
 
     def refs_present_at(self, site: str) -> set[str]:
-        rows = self._conn.execute(
+        return {r["ref"] for r in self._rows(
             "SELECT ref FROM locations WHERE site=? AND present=1", (site,)
-        ).fetchall()
-        return {r["ref"] for r in rows}
+        )}
 
     def locations_of(self, ref: str) -> list[dict]:
-        rows = self._conn.execute(
+        return [dict(r) for r in self._rows(
             "SELECT * FROM locations WHERE ref=? AND present=1", (ref,)
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )]
 
     def demote_location(self, ref: str, site: str) -> None:
         """Location proved wrong (purged scratch etc.) — plan recomputes."""
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE locations SET present=0 WHERE ref=? AND site=?", (ref, site)
-            )
+        self._write(
+            "UPDATE locations SET present=0 WHERE ref=? AND site=?", (ref, site)
+        )
 
     # -- sites ------------------------------------------------------------
 
     def put_site(self, name: str, kind: str, config: dict) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO sites(name, kind, config) VALUES(?,?,?) "
-                "ON CONFLICT(name) DO UPDATE SET kind=?, config=?",
-                (name, kind, _j(config), kind, _j(config)),
-            )
+        self._write(
+            "INSERT INTO sites(name, kind, config) VALUES(?,?,?) "
+            "ON CONFLICT(name) DO UPDATE SET kind=?, config=?",
+            (name, kind, _j(config), kind, _j(config)),
+        )
 
     def set_capabilities(self, name: str, caps: dict, health: str = "ok") -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "UPDATE sites SET capabilities=?, health=?, probed_at=? WHERE name=?",
-                (_j(caps), health, time.time(), name),
-            )
+        self._write(
+            "UPDATE sites SET capabilities=?, health=?, probed_at=? WHERE name=?",
+            (_j(caps), health, time.time(), name),
+        )
 
     def set_health(self, name: str, health: str) -> None:
-        with self._lock, self._conn:
-            self._conn.execute("UPDATE sites SET health=? WHERE name=?", (health, name))
+        self._write("UPDATE sites SET health=? WHERE name=?", (health, name))
 
     def get_site(self, name: str) -> dict | None:
-        r = self._conn.execute("SELECT * FROM sites WHERE name=?", (name,)).fetchone()
+        r = self._row("SELECT * FROM sites WHERE name=?", (name,))
         if not r:
             return None
         return {
@@ -269,19 +268,18 @@ class Store:
         }
 
     def list_sites(self) -> list[dict]:
-        rows = self._conn.execute("SELECT name FROM sites ORDER BY name").fetchall()
+        rows = self._rows("SELECT name FROM sites ORDER BY name")
         return [self.get_site(r["name"]) for r in rows]
 
     # -- jobs -------------------------------------------------------------
 
     def put_job(self, job_id: str, task_hash: str, task: dict, site: str, state: str) -> None:
         now = time.time()
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO jobs(job_id, task_hash, task, site, state, created_at,"
-                " updated_at) VALUES(?,?,?,?,?,?,?)",
-                (job_id, task_hash, _j(task), site, state, now, now),
-            )
+        self._write(
+            "INSERT INTO jobs(job_id, task_hash, task, site, state, created_at,"
+            " updated_at) VALUES(?,?,?,?,?,?,?)",
+            (job_id, task_hash, _j(task), site, state, now, now),
+        )
 
     def update_job(
         self, job_id: str, *, state: str | None = None,
@@ -298,16 +296,14 @@ class Store:
         if manifest is not None:
             sets.append("manifest=?"); vals.append(_j(manifest))
         vals.append(job_id)
-        with self._lock, self._conn:
-            self._conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=?", vals)
+        self._write(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=?", tuple(vals))
 
     def get_job(self, job_id: str) -> dict | None:
-        r = self._conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+        r = self._row("SELECT * FROM jobs WHERE job_id=?", (job_id,))
         return self._job_row(r) if r else None
 
     def jobs_where(self, state: str | None = None, site: str | None = None) -> list[dict]:
-        q, vals = "SELECT * FROM jobs", []
-        conds = []
+        q, vals, conds = "SELECT * FROM jobs", [], []
         if state:
             conds.append("state=?"); vals.append(state)
         if site:
@@ -315,20 +311,19 @@ class Store:
         if conds:
             q += " WHERE " + " AND ".join(conds)
         q += " ORDER BY created_at"
-        return [self._job_row(r) for r in self._conn.execute(q, vals).fetchall()]
+        return [self._job_row(r) for r in self._rows(q, tuple(vals))]
 
     def nonterminal_jobs(self) -> list[dict]:
-        rows = self._conn.execute(
+        return [self._job_row(r) for r in self._rows(
             "SELECT * FROM jobs WHERE state NOT IN ('DONE','FAILED','CANCELLED')"
-        ).fetchall()
-        return [self._job_row(r) for r in rows]
+        )]
 
     def latest_manifest_for_task(self, task_hash: str) -> dict | None:
-        r = self._conn.execute(
+        r = self._row(
             "SELECT manifest FROM jobs WHERE task_hash=? AND state='DONE' "
             "AND manifest IS NOT NULL ORDER BY updated_at DESC LIMIT 1",
             (task_hash,),
-        ).fetchone()
+        )
         return json.loads(r["manifest"]) if r else None
 
     @staticmethod
@@ -342,5 +337,40 @@ class Store:
             "created_at": r["created_at"], "updated_at": r["updated_at"],
         }
 
+    # -- sessions -----------------------------------------------------------
+
+    def put_session(self, session_id: str, base_env_id: str, site: str,
+                    location: str) -> None:
+        self._write(
+            "INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?)",
+            (session_id, base_env_id, site, location, "[]", "[]",
+             "active", time.time()),
+        )
+
+    def get_session(self, session_id: str) -> dict | None:
+        r = self._row("SELECT * FROM sessions WHERE session_id=?", (session_id,))
+        if not r:
+            return None
+        return {
+            "session_id": r["session_id"], "base_env_id": r["base_env_id"],
+            "site": r["site"], "location": r["location"],
+            "added_conda": json.loads(r["added_conda"]),
+            "added_pypi": json.loads(r["added_pypi"]),
+            "state": r["state"],
+        }
+
+    def session_add_deps(self, session_id: str, conda: list[str], pypi: list[str]) -> None:
+        s = self.get_session(session_id)
+        self._write(
+            "UPDATE sessions SET added_conda=?, added_pypi=? WHERE session_id=?",
+            (_j(s["added_conda"] + conda), _j(s["added_pypi"] + pypi), session_id),
+        )
+
+    def set_session_state(self, session_id: str, state: str) -> None:
+        self._write(
+            "UPDATE sessions SET state=? WHERE session_id=?", (state, session_id)
+        )
+
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()

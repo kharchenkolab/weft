@@ -50,6 +50,8 @@ class Weft:
             self.store, self.cas, self.envman, self.dataman,
             self.adapters, self.transfers,
         )
+        from .session import SessionManager
+        self.sessions = SessionManager(self.store, self.envman)
         self._restore_sites()
 
     # -- site management ---------------------------------------------------
@@ -208,6 +210,41 @@ class Weft:
     def task_cancel(self, job_id: str) -> dict:
         self.store.audit_log("agent", "task.cancel", command=job_id)
         return self.runner.cancel(job_id)
+
+    # -- session environments (doc 03 §7) --------------------------------------
+
+    def session_start(self, env_id: str, site: str) -> dict:
+        try:
+            return self.sessions.start(env_id, self._adapter(site))
+        except WeftError as e:
+            return e.to_dict()
+
+    def _session_adapter(self, session_id: str):
+        s = self.store.get_session(session_id)
+        if not s:
+            raise WeftError("task.invalid", f"unknown session {session_id}", stage="infra")
+        return self._adapter(s["site"])
+
+    def session_exec(self, session_id: str, cmd: str) -> dict:
+        return self.sessions.exec(session_id, self._session_adapter(session_id), cmd)
+
+    def session_install(self, session_id: str, conda: list[str] | None = None,
+                        pypi: list[str] | None = None) -> dict:
+        try:
+            return self.sessions.install(
+                session_id, self._session_adapter(session_id), conda, pypi
+            )
+        except WeftError as e:
+            return e.to_dict()
+
+    def session_snapshot(self, session_id: str, name: str | None = None) -> dict:
+        try:
+            return self.sessions.snapshot(session_id, name)
+        except WeftError as e:
+            return e.to_dict()
+
+    def session_stop(self, session_id: str) -> dict:
+        return self.sessions.stop(session_id, self._session_adapter(session_id))
 
     # -- events / diagnostics -----------------------------------------------------
 

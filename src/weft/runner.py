@@ -333,13 +333,23 @@ class JobRunner:
             if state == "exited":
                 break
             if state in ("lost", "missing"):
-                raise WeftError(
-                    "sched.node_failure",
-                    "job process disappeared without an exit record",
-                    stage="running",
-                    hints={"last_log": self._tail(adapter, jobdir_rel),
-                           "jobdir": adapter.path(jobdir_rel)},
-                )
+                # require two consecutive verdicts: a single "lost" can be a
+                # transient inconsistency around outages or startup
+                lost_polls = getattr(self, "_lost", {}).setdefault(job_id, 0) + 1
+                self._lost[job_id] = lost_polls
+                if lost_polls >= 2:
+                    self._lost.pop(job_id, None)
+                    raise WeftError(
+                        "sched.node_failure",
+                        "job process disappeared without an exit record",
+                        stage="running",
+                        hints={"last_log": self._tail(adapter, jobdir_rel),
+                               "jobdir": adapter.path(jobdir_rel)},
+                    )
+                time.sleep(max(self.poll_interval, 1.0))
+                continue
+            self._lost = getattr(self, "_lost", {})
+            self._lost.pop(job_id, None)
             if state == "running":
                 job = self.store.get_job(job_id)
                 if job["state"] == "QUEUED":

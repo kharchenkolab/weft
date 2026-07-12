@@ -67,6 +67,7 @@ cmd_run() {
     cat > "$jobdir/runner.sh" <<EOF
 #!/bin/sh
 cd "$jobdir"
+echo \$\$ > pid.real
 [ -f activate.sh ] && . ./activate.sh
 start=\$(date +%s)
 $timer sh cmd.sh >> log 2>&1
@@ -100,12 +101,25 @@ cmd_status() {
         echo "{\"state\": \"exited\", \"exit_code\": $rc, \"wall_s\": $wall, \"max_rss_kb\": ${rss_kb:-0}}"
         return
     fi
-    pid=$(cat "$jobdir/pid" 2>/dev/null || echo "")
+    # pid.real is written by the runner itself; the setsid wrapper pid can
+    # exit immediately on some platforms, so it is only a fallback
+    pid=$(cat "$jobdir/pid.real" 2>/dev/null || cat "$jobdir/pid" 2>/dev/null || echo "")
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
         echo "{\"state\": \"running\", \"pid\": $pid}"
     elif [ -n "$pid" ]; then
-        # started but no exit_code and no process: died without epilogue
-        echo '{"state": "lost"}'
+        # no live pid and no exit_code: either truly dead, just-exited (the
+        # exit_code rename is in flight), or just-started (pid.real pending)
+        sleep 1
+        if [ -f "$jobdir/exit_code" ]; then
+            cmd_status --dir "$jobdir"
+        else
+            p2=$(cat "$jobdir/pid.real" 2>/dev/null || echo "$pid")
+            if [ -n "$p2" ] && kill -0 "$p2" 2>/dev/null; then
+                echo "{\"state\": \"running\", \"pid\": $p2}"
+            else
+                echo '{"state": "lost"}'
+            fi
+        fi
     else
         echo '{"state": "not_started"}'
     fi
