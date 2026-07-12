@@ -78,6 +78,8 @@ class Store:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS jobs_by_group ON jobs(array_group)"
             )
+        if "queue_reason" not in cols:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN queue_reason TEXT")
 
     # -- serialized access helpers ------------------------------------------
 
@@ -298,11 +300,13 @@ class Store:
     def update_job(
         self, job_id: str, *, state: str | None = None,
         sched_handle: str | None = None, error: dict | None = None,
-        manifest: dict | None = None,
+        manifest: dict | None = None, queue_reason: str | None = None,
     ) -> None:
         sets, vals = ["updated_at=?"], [time.time()]
         if state is not None:
             sets.append("state=?"); vals.append(state)
+        if queue_reason is not None:
+            sets.append("queue_reason=?"); vals.append(queue_reason)
         if sched_handle is not None:
             sets.append("sched_handle=?"); vals.append(sched_handle)
         if error is not None:
@@ -352,7 +356,12 @@ class Store:
             "created_at": r["created_at"], "updated_at": r["updated_at"],
             "array_group": r["array_group"] if "array_group" in keys else None,
             "array_index": r["array_index"] if "array_index" in keys else None,
+            "queue_reason": r["queue_reason"] if "queue_reason" in keys else None,
         }
+
+    def detach_from_group(self, job_id: str) -> None:
+        """Superseded array element (retried): leaves the group's counts."""
+        self._write("UPDATE jobs SET array_group=NULL WHERE job_id=?", (job_id,))
 
     # -- array groups ---------------------------------------------------------
 

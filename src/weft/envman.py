@@ -75,13 +75,16 @@ class EnvManager:
         row = self.store.get_env(env_id)
         if not row:
             raise WeftError("task.invalid", f"unknown EnvID: {env_id}", stage="solve")
+        realizations = []
+        for r in self.store.realizations_for(env_id):
+            entry = {k: r[k] for k in ("site", "strategy", "state", "location")}
+            if r["state"] == "failed" and r.get("log"):
+                entry["log_tail"] = r["log"][-800:]  # the probe, right here
+            realizations.append(entry)
         return {
             "env_id": env_id,
             "summary": self._summary(row),
-            "realizations": [
-                {k: r[k] for k in ("site", "strategy", "state", "location")}
-                for r in self.store.realizations_for(env_id)
-            ],
+            "realizations": realizations,
         }
 
     def extras(self, env_id: str) -> dict:

@@ -133,6 +133,20 @@ class SlurmAdapter(SSHAdapter):
                 "note": "scheduler gave no estimate (rejected ask or busy)",
                 "raw": r.out.strip()[:300]}
 
+    def module_system_status(self) -> str:
+        """'ok' | 'not_initialized' — distinguishes "module missing" from
+        "module command itself unavailable in non-interactive shells"."""
+        init = (self.modules_init + "; ") if self.modules_init else ""
+        r = self.run_cmd(
+            init +
+            "if ! type module >/dev/null 2>&1; then "
+            "[ -f /usr/share/modules/init/sh ] && . /usr/share/modules/init/sh; "
+            "[ -f /usr/share/lmod/lmod/init/sh ] && . /usr/share/lmod/lmod/init/sh; fi; "
+            "type module >/dev/null 2>&1 && echo ok || echo missing",
+            timeout=30,
+        )
+        return "ok" if r.out.strip().endswith("ok") else "not_initialized"
+
     def module_avail(self, name: str) -> bool:
         """Lazy module-inventory query (doc 02 §3); callers cache."""
         init = (self.modules_init + "; ") if self.modules_init else ""
@@ -261,17 +275,22 @@ class SlurmAdapter(SSHAdapter):
 
         by_jid = {h.split(":", 1)[1]: (h, rel) for h, rel in slurm_items}
         queue_state: dict[str, str] = {}
+        queue_reason: dict[str, str] = {}
         jids = list(by_jid)
         for i in range(0, len(jids), self._CHUNK):
             chunk = ",".join(jids[i : i + self._CHUNK])
             r = self.run_cmd(
-                f"squeue -h -j {shlex.quote(chunk)} -o '%i %T' 2>/dev/null; true",
+                f"squeue -h -j {shlex.quote(chunk)} -o '%i|%T|%r' 2>/dev/null; true",
                 timeout=self.poll_timeout,
             )
             for line in r.out.splitlines():
-                parts = line.split()
-                if len(parts) == 2:
+                parts = line.strip().split("|")
+                if len(parts) >= 2:
                     queue_state[parts[0]] = parts[1]
+                    if len(parts) >= 3 and parts[2] not in ("None", ""):
+                        # PENDING reason names the workaround: Priority,
+                        # Resources, QOSMax*, PartitionTimeLimit, ...
+                        queue_reason[parts[0]] = parts[2]
 
         departed = [j for j in jids if j not in queue_state]
         ctl_state: dict[str, str] = {}
@@ -303,7 +322,8 @@ class SlurmAdapter(SSHAdapter):
         for jid, (handle, rel) in by_jid.items():
             st = queue_state.get(jid) or ctl_state.get(jid, "")
             if st in _QUEUED:
-                out[handle] = {"state": "queued", "slurm": st}
+                out[handle] = {"state": "queued", "slurm": st,
+                               "reason": queue_reason.get(jid, "")}
             elif st in _RUNNING:
                 out[handle] = {"state": "running", "slurm": st}
             elif st == "TIMEOUT":

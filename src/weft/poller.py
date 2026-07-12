@@ -40,6 +40,7 @@ class Watch:
     scheduler: bool              # scheduler sites enforce walltime themselves
     array_group: str | None = None
     last_state: str = ""         # last lifecycle state we recorded
+    last_reason: str = ""        # last scheduler pending-reason recorded
     lost_strikes: int = 0
     cancelled: bool = False
 
@@ -216,6 +217,12 @@ class SitePoller:
             return
         w.lost_strikes = 0
 
+        if state == "queued":
+            reason = status.get("reason") or ""
+            if reason and reason != w.last_reason:
+                # why it pends (Priority/Resources/QOS…) names the workaround
+                w.last_reason = reason
+                self.runner.store.update_job(w.job_id, queue_reason=reason)
         if state == "running" and w.last_state == "QUEUED":
             w.last_state = "RUNNING"
             self.runner.set_job_state(w.job_id, "RUNNING",

@@ -216,8 +216,18 @@ class Weft:
         """Lazy per-site module inventory (doc 02 §3), cached."""
         adapter = self._adapter(site)
         if not hasattr(adapter, "module_avail"):
-            return {"site": site, "supported": False,
+            return {"site": site, "module_system": "absent",
                     "note": "site kind has no module system"}
+        system = adapter.module_system_status() \
+            if hasattr(adapter, "module_system_status") else "ok"
+        if system != "ok":
+            return {"site": site, "module_system": system,
+                    "modules": {n: False for n in names},
+                    "satisfiable_here": False,
+                    "note": "the `module` command is not available in "
+                            "non-interactive shells here — set the site's "
+                            "modules_init config (init script / MODULEPATH) "
+                            "before trusting any 'missing' verdicts"}
         out = {}
         for n in names:
             key = (site, n)
@@ -225,8 +235,8 @@ class Weft:
                 self._module_cache[key] = adapter.module_avail(n)
             out[n] = self._module_cache[key]
         missing = [n for n, ok in out.items() if not ok]
-        return {"site": site, "modules": out, "missing": missing,
-                "satisfiable_here": not missing}
+        return {"site": site, "module_system": "ok", "modules": out,
+                "missing": missing, "satisfiable_here": not missing}
 
     def _adapter(self, name: str) -> SiteAdapter:
         if name not in self.adapters:
@@ -305,12 +315,15 @@ class Weft:
         for j in jobs:
             if j is None:
                 continue
-            out.append({
+            entry = {
                 "job_id": j["job_id"], "state": j["state"], "site": j["site"],
                 "since": j["updated_at"],
                 "error": j["error"],
                 "has_manifest": j["manifest"] is not None,
-            })
+            }
+            if j["state"] == "QUEUED" and j.get("queue_reason"):
+                entry["queue_reason"] = j["queue_reason"]
+            out.append(entry)
         return out
 
     def task_logs(self, job_id: str, tail: int = 100) -> str:
@@ -398,6 +411,39 @@ class Weft:
                 "elements": [{"index": j["array_index"], "job_id": j["job_id"],
                               "state": j["state"]}
                              for j in self.store.jobs_in_group(group)]}
+
+    def array_retry(self, group: str, indices: list[int] | None = None,
+                    command_override: str | None = None) -> dict:
+        """Retry failed elements of an array group (or the given indices).
+        Retries rejoin the group under their index — digests and the
+        roll-up update; the superseded rows leave the group's counts."""
+        jobs = self.store.jobs_in_group(group)
+        if not jobs:
+            raise WeftError("task.invalid", f"unknown array group: {group}",
+                            stage="infra")
+        want = set(indices) if indices is not None else None
+        targets = [j for j in jobs
+                   if (want is not None and j["array_index"] in want)
+                   or (want is None and j["state"] == "FAILED")]
+        if not targets:
+            return {"group": group, "retried": [],
+                    "note": "nothing to retry (no failed elements matched)"}
+        from .task import Task
+        with self.runner._digest_lock:
+            self.runner._done_digests.discard(group)  # allow a new array.done
+        out = []
+        for j in targets:
+            task = dict(j["task"])
+            if command_override:
+                task["command"] = command_override
+            self.store.detach_from_group(j["job_id"])
+            r = self.runner.submit(Task.from_dict(task), force=True,
+                                   _group=group, _index=j["array_index"])
+            out.append({"index": j["array_index"], "superseded": j["job_id"],
+                        **{k: r[k] for k in ("job_id", "site") if k in r}})
+        self.store.audit_log("agent", "array.retry", command=group,
+                             why=f"{len(out)} elements")
+        return {"group": group, "retried": out}
 
     def array_result(self, group: str) -> dict:
         counts = self.store.group_counts(group)
