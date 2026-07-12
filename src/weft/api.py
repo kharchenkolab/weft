@@ -60,6 +60,9 @@ class Weft:
             self.adapters, self.transfers, pixi_pack=self.pixi_pack,
         )
         self._module_cache: dict[tuple[str, str], bool] = {}
+        # cloud provisioner factories: name -> (site_config) -> CloudProvisioner.
+        # "skypilot" is the intended production entry; tests register mocks.
+        self.provisioners: dict = {}
         from .session import SessionManager
         self.sessions = SessionManager(self.store, self.envman)
         self._restore_sites()
@@ -102,10 +105,29 @@ class Weft:
                 partitions_allowed=policy.get("partitions_allowed"),
                 modules_init=config.get("modules_init", ""),
             )
+        elif kind == "cloud":
+            from .adapters.cloud import CloudAdapter
+            prov_name = config.get("provisioner", "skypilot")
+            factory = self.provisioners.get(prov_name)
+            if factory is None:
+                raise WeftError(
+                    "task.invalid",
+                    f"no provisioner {prov_name!r} registered",
+                    stage="infra",
+                    hints={"registered": sorted(self.provisioners)},
+                )
+            adapter = CloudAdapter(
+                name, factory(config),
+                budget=config.get("budget"),
+                synthetic_caps=config.get("resources") or {},
+                pixi_source=config.get("pixi_source"),
+                pixi_unpack_source=config.get("pixi_unpack_source", self.pixi_unpack),
+                emit=self.store.emit,
+            )
         else:
             raise WeftError(
                 "task.invalid", f"unknown site kind: {kind}", stage="infra",
-                hints={"known": ["local", "ssh", "slurm"]},
+                hints={"known": ["local", "ssh", "slurm", "cloud"]},
             )
         self.adapters[name] = adapter
         return adapter
@@ -369,3 +391,13 @@ class Weft:
 
     def reconcile(self) -> list[dict]:
         return self.runner.reconcile()
+
+    def site_teardown(self, name: str) -> dict:
+        """Tear down an ephemeral (cloud) site's instance. Explicit —
+        spending-level actions are never implicit (doc 05 §6)."""
+        adapter = self._adapter(name)
+        if not hasattr(adapter, "teardown"):
+            return {"site": name, "note": "not an ephemeral site; nothing to do"}
+        self.store.audit_log("user", "site.teardown", site=name)
+        adapter.teardown()
+        return {"site": name, "state": "terminated"}
