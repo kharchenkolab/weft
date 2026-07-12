@@ -76,6 +76,12 @@ class EnvSpec:
     # pixi [system-requirements]: lets a CUDA stack solve on a GPU-less
     # controller by asserting what the *target* provides (e.g. {"cuda": "12.4"})
     system_requirements: dict[str, str] = field(default_factory=dict)
+    # IDENTITY-NEUTRAL: why an adaptive step was taken, what to watch on a
+    # re-run. Excluded from the spec hash and the EnvID (same discipline
+    # that keeps site/resources out of task_hash) — documentation, never a
+    # pin. `notes` is free text; `step_notes` annotates post_install by index.
+    notes: list[str] = field(default_factory=list)
+    step_notes: dict[str, str] = field(default_factory=dict)
 
     # -- serialization ------------------------------------------------------
 
@@ -86,7 +92,7 @@ class EnvSpec:
         unknown = set(d) - {
             "name", "platforms", "channels", "deps", "variants", "modules",
             "container_base", "env_vars", "post_install", "extends",
-            "system_requirements",
+            "system_requirements", "notes", "step_notes",
         }
         if unknown:
             raise WeftError(
@@ -94,9 +100,10 @@ class EnvSpec:
                 f"unknown envspec fields: {sorted(unknown)}",
                 stage="solve",
                 hints={"known_fields": [
-                    "name", "platforms", "channels", "deps.conda", "deps.pypi",
+                    "name", "platforms", "channels", "deps.<ecosystem>",
                     "variants", "modules", "container_base", "env_vars",
                     "post_install", "extends", "system_requirements",
+                    "notes", "step_notes",
                 ]},
             )
         variants = {
@@ -120,6 +127,9 @@ class EnvSpec:
             system_requirements={
                 k: str(v) for k, v in (d.get("system_requirements") or {}).items()
             },
+            notes=[str(n) for n in (d.get("notes") or [])],
+            step_notes={str(k): str(v)
+                        for k, v in (d.get("step_notes") or {}).items()},
         )
 
     def to_dict(self) -> dict:
@@ -137,10 +147,18 @@ class EnvSpec:
             "post_install": self.post_install,
             "extends": self.extends,
             "system_requirements": self.system_requirements,
+            "notes": self.notes,
+            "step_notes": self.step_notes,
         }
 
+    IDENTITY_NEUTRAL = ("notes", "step_notes")
+
     def spec_hash(self) -> str:
-        return spec_id(self.to_dict())
+        # notes never perturb identity: an agent may annotate a spec
+        # without forking its EnvID and losing every cached realization
+        body = {k: v for k, v in self.to_dict().items()
+                if k not in self.IDENTITY_NEUTRAL}
+        return spec_id(body)
 
     # -- composition --------------------------------------------------------
 
@@ -173,6 +191,8 @@ class EnvSpec:
             extends=None,  # fully merged specs stand alone
             system_requirements={**parent.system_requirements,
                                  **self.system_requirements},
+            notes=parent.notes + self.notes,
+            step_notes={**parent.step_notes, **self.step_notes},
         )
 
     def weakly_reproducible(self) -> bool:

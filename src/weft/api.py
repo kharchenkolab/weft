@@ -736,10 +736,12 @@ class Weft:
             raise WeftError("task.invalid", f"unknown job: {target}",
                             stage="infra")
         task = job["task"]
+        m = job["manifest"] or {}
         node = {
             "schema": "provenance:v1",
-            "reproducibility": (job["manifest"] or {}).get(
-                "reproducibility", "task"),
+            "reproducibility": m.get("reproducibility", "fully-pinned"),
+            "reproducibility_meaning": m.get("reproducibility_meaning"),
+            "reproducibility_components": m.get("reproducibility_components"),
             "job_id": target, "state": job["state"], "site": job["site"],
             "task_hash": job["task_hash"],
             "command": task.get("command"),
@@ -756,6 +758,10 @@ class Weft:
                 node["environment"] = {
                     "env_id": env_id, "spec": spec,
                     "weakly_reproducible": env["weakly_reproducible"],
+                    # the agent's own rationale for adaptive steps —
+                    # identity-neutral, so annotating never forks the EnvID
+                    "notes": (spec or {}).get("notes") or [],
+                    "step_notes": (spec or {}).get("step_notes") or {},
                     "modules_attested": extras.get("modules") or [],
                     "post_install": extras.get("post_install") or [],
                     "layers": {

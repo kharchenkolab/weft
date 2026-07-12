@@ -593,11 +593,14 @@ class JobRunner:
         self._enrich_previews(adapter, jobdir_rel, task, entries)
         job = self.store.get_job(job_id)
         env_row = self.store.get_env(task.env) if task.env else None
+        from .grade import grade_env, grade_manifest
+        g = grade_manifest(grade_env(env_row["canonical"]) if env_row else None)
         manifest = {
             "schema": "manifest:v1",
-            # the reproducibility ladder: task > transcript > weak
-            "reproducibility": "weak" if (env_row or {}).get(
-                "weakly_reproducible") else "task",
+            # graded confidence (weft grades and reports; the agent decides)
+            "reproducibility": g["grade"],
+            "reproducibility_meaning": g["meaning"],
+            "reproducibility_components": g["components"],
             "job_id": job_id,
             "task_hash": job["task_hash"],
             "env_id": task.env,

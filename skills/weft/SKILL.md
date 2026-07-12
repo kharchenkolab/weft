@@ -70,9 +70,16 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
    failing task more than once.
 3. **Keep bulk data remote.** Reason over previews and digests; fetch
    selectively. Outputs feeding later tasks never need to leave the site.
-4. **Extend specs, don't mutate envs.** New package → new spec (or
-   `extends` layer) → new EnvID. For interactive exploration use a session
-   env, then `session_snapshot` before recording results.
+4. **Adapt freely; let weft label it.** Prefer the clean path (new package
+   → new spec → new EnvID), but **escape hatches are normal, supported
+   moves**: patch a package, build from source, run a bespoke installer,
+   relax a pin. When you take one, weft **grades** the result
+   (`fully-pinned` → `snapshot-pinned` → `attested` → `escape-hatch` →
+   `state-dependent`) and you record *why* in the spec's `notes` /
+   `step_notes` (identity-neutral — annotating never forks the EnvID).
+   Getting the user unblocked *now*, with the soft step visible, beats a
+   perfect env that never runs. Explore in sessions; snapshot when a
+   result is worth keeping.
 5. **Respect user policy.** `sites_list()` shows per-site rules and notes
    ("don't use during the day"); weft enforces the structured ones, you
    honor the prose ones.

@@ -47,10 +47,23 @@ w.env_ensure({
 - **Identity forms:** conda/pypi-only envs are `env:v1:<hash>`; envs with
   extra layers (cran, …) are `env:v2:<hash>`. Both are content-addressed
   cache keys; the version only reflects the lock document's shape.
-- **`weakly_reproducible`** (in `env_status` summaries and provenance):
-  true when the spec uses `post_install` — those commands are hashed into
-  the identity but their *effects* aren't content-pinned. Prefer real
-  dependency layers; keep post_install for the genuinely unpackageable.
+- **Reproducibility is graded, not binary.** `env_status` and every
+  manifest carry `reproducibility` plus the per-component breakdown:
+
+  | grade | means |
+  |---|---|
+  | `fully-pinned` | every package content-hashed; re-materializes exactly |
+  | `snapshot-pinned` | dated snapshots / commit SHAs (CRAN, GitHub, Julia) — reproduces almost always, artifacts not content-hashed |
+  | `attested` | uses site `modules` (or the bare site env) weft cannot pin |
+  | `escape-hatch` | a `post_install` / session installer ran; effects not content-pinned |
+  | `state-dependent` | kernel-promoted from interpreter state; replay the transcript |
+
+  The grade is the *worst* rung any component earns; the components tell
+  you which step is the soft one. **This is information, not a warning.**
+  An adaptive step that unblocks real work is the right call — take it,
+  and say why in `notes` (spec-level) or `step_notes` (per post_install
+  index). Notes are **excluded from the EnvID hash**, so annotating costs
+  nothing: no forked identity, no orphaned caches.
 - **Toolchains are envs too:** no compiler on site → spec
   `{"deps": {"conda": ["cxx-compiler", "make"]}}`; compile as a task with
   the source tree as an input; downstream tasks run the binary via

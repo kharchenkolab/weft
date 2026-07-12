@@ -28,7 +28,7 @@ def test_kernel_promote_makes_a_transcript_manifest(w):
 
     m = w.kernel_promote(k, blocks=[r["block"]])
     assert m["schema"] == "manifest:v1"
-    assert m["reproducibility"] == "transcript"      # the honest rung
+    assert m["reproducibility"] == "state-dependent"   # the honest rung
     # the FULL chain that produced the state is recorded, not just the block
     assert [b["block"] for b in m["transcript"]] == [0, 1, 2]
     assert all(b["rc"] == 0 for b in m["transcript"])
@@ -37,7 +37,7 @@ def test_kernel_promote_makes_a_transcript_manifest(w):
 
     # it's a first-class record: provenance and task_result see it
     p = w.provenance(m["job_id"])
-    assert p["reproducibility"] == "transcript"
+    assert p["reproducibility"] == "state-dependent"
     assert w.task_result(m["job_id"])["job_id"] == m["job_id"]
 
     # failed blocks may not be promoted

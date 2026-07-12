@@ -264,9 +264,16 @@ class KernelManager:
                   "rc": e.get("rc")} for e in transcript
                  if e["block"] <= last]
         job_id = "jb_" + _uuid.uuid4().hex[:12]
+        from .grade import grade_env, grade_manifest
+        env_row = self.store.get_env(k["env_id"]) if k["env_id"] else None
+        g = grade_manifest(
+            grade_env(env_row["canonical"]) if env_row else None,
+            transcript=True)
         manifest = {
             "schema": "manifest:v1",
-            "reproducibility": "transcript",
+            "reproducibility": g["grade"],
+            "reproducibility_meaning": g["meaning"],
+            "reproducibility_components": g["components"],
             "job_id": job_id, "kernel_id": kernel_id,
             "task_hash": task_id({"kernel_transcript": chain,
                                   "env": k["env_id"]}),

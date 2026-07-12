@@ -19,20 +19,42 @@ def test_manifest_and_provenance_carry_schema(w):
     job = w.runner.wait(r["job_id"], 120)
     m = job["manifest"]
     assert m["schema"] == "manifest:v1"
-    assert m["reproducibility"] == "task"
+    # no env: the site's own tools, which weft does not pin — say so
+    assert m["reproducibility"] == "attested"
     p = w.provenance(r["job_id"])
     assert p["schema"] == "provenance:v1"
-    assert p["reproducibility"] == "task"
+    assert p["reproducibility"] == "attested"
 
 
 @pytest.mark.solver
-def test_weak_ladder_position(w):
-    env = w.env_ensure({"name": "wk", "deps": {"conda": ["xz >=5"]},
-                        "post_install": ["true"]})
-    r = w.task_submit({"command": "true", "env": env["env_id"],
+def test_grade_ladder_and_notes_in_the_record(w):
+    plain = w.env_ensure({"name": "pinned", "deps": {"conda": ["xz >=5"]}})
+    r0 = w.task_submit({"command": "true", "env": plain["env_id"],
+                        "site": "local"})
+    j0 = w.runner.wait(r0["job_id"], 600)
+    assert j0["manifest"]["reproducibility"] == "fully-pinned"
+
+    hatched = w.env_ensure({
+        "name": "hatched", "deps": {"conda": ["xz >=5"]},
+        "post_install": ["true"],
+        "notes": ["vendored fix: upstream build is broken on this platform"],
+        "step_notes": {"0": "drop once upstream 1.3 lands"}})
+    st = w.env_status(hatched["env_id"])["summary"]
+    assert st["reproducibility"] == "escape-hatch"
+    assert any(c["component"] == "post_install"
+               for c in st["reproducibility_components"])
+    assert st["notes"]                       # the agent's rationale, kept
+
+    r = w.task_submit({"command": "true", "env": hatched["env_id"],
                        "site": "local"})
     job = w.runner.wait(r["job_id"], 600)
-    assert job["manifest"]["reproducibility"] == "weak"
+    m = job["manifest"]
+    assert m["reproducibility"] == "escape-hatch"
+    assert "not content-pinned" in m["reproducibility_meaning"]
+    p = w.provenance(r["job_id"])
+    assert p["environment"]["notes"] == [
+        "vendored fix: upstream build is broken on this platform"]
+    assert p["environment"]["step_notes"] == {"0": "drop once upstream 1.3 lands"}
 
 
 def test_events_subscribe_push(w):

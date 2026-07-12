@@ -100,15 +100,27 @@ class EnvManager:
         return out
 
     def _summary(self, row: dict) -> dict:
+        from .grade import grade_env
         counts = {
             plat: len(pkgs) for plat, pkgs in row["canonical"]["platforms"].items()
         }
-        return {
+        g = grade_env(row["canonical"])
+        spec = self.store.get_spec(row["spec_hash"]) or {}
+        out = {
             "packages_per_platform": counts,
             "platforms": row["platforms"],
             "modules": row["canonical"]["extras"]["modules"],
+            # graded confidence, with the soft component identified
+            "reproducibility": g["grade"],
+            "reproducibility_meaning": g["meaning"],
+            "reproducibility_components": g["components"],
+            # kept for compatibility; the grade is the richer signal
             "weakly_reproducible": row["weakly_reproducible"],
         }
+        if spec.get("notes") or spec.get("step_notes"):
+            out["notes"] = spec.get("notes") or []
+            out["step_notes"] = spec.get("step_notes") or {}
+        return out
 
     def status(self, env_id: str) -> dict:
         row = self.store.get_env(env_id)
