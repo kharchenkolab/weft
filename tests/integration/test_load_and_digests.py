@@ -22,8 +22,9 @@ def w(tmp_path, pixi_bin, slurm_site):
 
 
 def test_slurm_load_view_reflects_queue_pressure(w):
-    # the fixture cluster is shared: wait for quiescence before asserting
-    for _ in range(60):
+    # the fixture cluster is shared: drain leftovers, wait for quiescence
+    w.adapters["hpc"].run_cmd("scancel -u $USER 2>/dev/null; true")
+    for _ in range(120):
         quiet = w.site_load("hpc", fresh=True)
         if quiet["partitions"]["standard"]["cpus_idle"] == 8:
             break
