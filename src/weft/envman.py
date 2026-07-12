@@ -323,6 +323,23 @@ class EnvManager:
             # the delta cannot be satisfied with the base frozen: that IS the
             # signal to free-solve (and give up the overlay), and the agent
             # should make that call, not us
+            solver_msg = e.hints.get("solver_message", "")
+            if "No Python interpreter" in str(solver_msg):
+                # not a frozen-base problem at all: the parent has no python
+                # and pypi deltas need one — ADDING a package is always
+                # allowed under extends_env
+                suggestion = ("the parent env has no python, which the pypi "
+                              "delta needs — add \"python\" to the delta's "
+                              "deps.conda (adding new packages never "
+                              "conflicts with the frozen base; note a conda "
+                              "delta realizes as a full prefix, not an "
+                              "overlay)")
+            else:
+                suggestion = ("re-ensure with `extends` (the parent's SPEC "
+                              "hash) instead of `extends_env`: that frees "
+                              "the base to move, costs a full solve and a "
+                              "full prefix, and is the right call when the "
+                              "delta genuinely needs a newer base")
             raise WeftError(
                 "env.layer_conflict",
                 "the delta does not fit on this parent without moving base "
@@ -332,12 +349,8 @@ class EnvManager:
                     "parent": merged.extends_env,
                     "delta": merged.conda + merged.pypi
                     + [d for deps in merged.deps_extra.values() for d in deps],
-                    "solver_message": e.hints.get("solver_message", ""),
-                    "suggestion": "re-ensure with `extends` (the parent's SPEC "
-                                  "hash) instead of `extends_env`: that frees "
-                                  "the base to move, costs a full solve and a "
-                                  "full prefix, and is the right call when the "
-                                  "delta genuinely needs a newer base",
+                    "solver_message": solver_msg,
+                    "suggestion": suggestion,
                 },
             ) from e
         soft_hash = None

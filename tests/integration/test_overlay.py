@@ -188,15 +188,25 @@ def test_github_parent_pins_by_sha_in_children(w):
                  ["cran"]["records"] if r["name"] == "glue")
     assert p_rec.get("remote_sha")
 
+    # the delta is another R package (a pypi delta would rightly conflict:
+    # this parent has no python — the hint names that lever)
     child = w.env_ensure({"name": "gh-child", "extends_env": parent,
-                          "deps": {"pypi": ["emcee"]}})
+                          "deps": {"cran": ["R6"]}})
     assert "env_id" in child, child
     assert child["delta"]["layerable"] is True
+    assert child["delta"]["layers_added"]["cran"] == ["R6"]
     c_rec = next(r for r in w.store.get_env(child["env_id"])["canonical"]
                  ["layers"]["cran"]["records"] if r["name"] == "glue")
     # same artifact: same commit, still a github source
     assert c_rec.get("remote_sha") == p_rec["remote_sha"]
     assert c_rec["source"].startswith("github:")
+
+    # a pypi delta on this python-less parent conflicts — and the hint
+    # names the real lever (add python to the delta), not a re-solve
+    r = w.env_ensure({"name": "gh-pypi", "extends_env": parent,
+                      "deps": {"pypi": ["emcee"]}})
+    assert r["error"] == "env.layer_conflict"
+    assert "add \"python\"" in r["hints"]["suggestion"]
 
 
 def test_verification_failure_falls_back_to_a_full_prefix(w, monkeypatch):
