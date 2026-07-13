@@ -161,3 +161,35 @@ site directory), `user`, `port`, `ssh_opts` (raw ssh flags, e.g.
 `pixi_source`, `pixi_unpack_source`, `shared` (cross-user root),
 `capabilities_override`, `policy`. Slurm adds `scheduler`
 ({account, partition}) and `modules_init`.
+
+## Institutional / managed roots (read-only base envs)
+
+When base environments are installed by an admin or service account and
+users may only READ them, list those roots in the site config:
+
+```python
+w.register_site("hpc", "slurm", {..., "root": "/scratch/me/.weft",
+                                 "ro_roots": ["/opt/team/weft-base"]})
+```
+
+- An EnvID already realized under a read-only root is **adopted in
+  place** — verified (marker, digest, activation), never written or
+  leased. Zero user disk; `realize.adopted via=ro-root`.
+- **Writable-first precedence**: your own healthy copy always wins over
+  a read-only one (so a broken base never traps you).
+- Your `extends_env` deltas **overlay over read-only parents** — the
+  overlay only ever reads the parent.
+- Lifecycle honesty: adopted bases are `read_only` in `env_status` /
+  `site_footprint` (`evictable: false`); `env_evict` refuses (not yours);
+  `env_repair` drops the adoption without touching the files. A base that
+  fails integrity is REPORTED (`realize.ro_integrity_failed`, naming the
+  owner's action) and weft builds a private copy in your root so work
+  continues — set site policy `ro_integrity: "fail"` if governance
+  demands stopping instead.
+- Trust note: adoption verifies integrity, not provenance — you trust the
+  read-only root as far as its filesystem permissions imply (same
+  doctrine as `shared: true`). For provenance guarantees, distribute
+  bundles (`bundle_export`/`bundle_import`) instead.
+- For ADMINS: users' overlay children reference your base by fingerprint;
+  evicting or rebuilding it degrades their overlays to private full
+  prefixes at next use (loud, self-healing — but announce big rotations).

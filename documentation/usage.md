@@ -195,7 +195,10 @@ w.module_list("hpc", search="cuda")         # discover site software offerings
 r = w.task_submit({..., "array": 2000})     # fan-out with WEFT_ARRAY_INDEX
 w.events_poll(cursor)                       # compact: array digests, transfer
                                             # progress, job states (non-array)
-w.array_status(r["group"])                  # counts + failure previews
+w.array_status(r["group"])                  # counts + FAILURE BUCKETS (by
+                                            # log signature, sample indices)
+w.array_elements(r["group"], state="FAILED", limit=50)   # page big sweeps
+w.array_retry(r["group"])                   # linked retries; digests heal
 w.array_result(r["group"])                  # roll-up: wall stats, failures
 w.env_repair(env_id, "hpc")                 # clear a corrupt realization
 ```

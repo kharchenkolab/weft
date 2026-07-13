@@ -77,3 +77,14 @@ chaining); `after` only sequences.
 - `dry_run=True` runs placement + capability/policy checks and returns
   the plan (including `resources` as understood — check the partition
   landed) without submitting.
+
+## Large sweeps: triage by bucket, not by element
+
+`array_status(group)` clusters FAILED elements by log signature
+(`failure_buckets`: signature, count, sample indices) — a 2000-element
+sweep with three failure modes reads as three lines. Above ~200 elements
+the per-element list is not inlined; page it with
+`array_elements(group, state="FAILED", offset=, limit=)`. Fix and
+`array_retry(group)` (or `indices=[...]`, optional `command_override=`):
+retries REJOIN the group under their index — digests and `array_result`
+heal; superseded rows drop out of the counts.
