@@ -84,6 +84,8 @@ class Store:
             )
         if "queue_reason" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN queue_reason TEXT")
+        if "superseded_by" not in cols:
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN superseded_by TEXT")
         scols = {r[1] for r in self._conn.execute("PRAGMA table_info(sessions)")}
         for col, ddl in _SESSION_MIGRATIONS:
             if col not in scols:
@@ -107,6 +109,12 @@ class Store:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS site_notes("
             "site TEXT, ts REAL, author TEXT, note TEXT)"
+        )
+        # submit-time plans, queryable post-restart: scope is a job_id, or
+        # a group id for arrays (one plan for the fan-out, not N copies)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS plans("
+            "scope TEXT PRIMARY KEY, plan TEXT, created_at REAL)"
         )
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS site_routes("
@@ -177,14 +185,21 @@ class Store:
             for r in rows
         ]
 
+    # who acts through this workspace: "agent" unless the EMBEDDER (a UI
+    # serving a human, a notebook) says otherwise at construction. Never
+    # settable per call from tool arguments — an agent could then write
+    # someone else's name into the trail.
+    audit_actor = "agent"
+
     def audit_log(
-        self, actor: str, action: str, *, site: str = "", command: str = "",
-        why: str = "", result: str = "",
+        self, actor: str | None, action: str, *, site: str = "",
+        command: str = "", why: str = "", result: str = "",
     ) -> None:
         self._write(
             "INSERT INTO audit(ts, actor, action, site, command, why, result)"
             " VALUES(?,?,?,?,?,?,?)",
-            (time.time(), actor, action, site, command, why, result[:4000]),
+            (time.time(), actor or self.audit_actor, action, site, command,
+             why, result[:4000]),
         )
 
     def audit_tail(self, n: int = 50) -> list[dict]:
@@ -219,6 +234,17 @@ class Store:
         r = self._row("SELECT * FROM site_routes WHERE src=? AND dst=?",
                       (src, dst))
         return dict(r) if r else None
+
+    def forget_site(self, name: str) -> None:
+        """Drop everything the registration created: the site row, its
+        routes (both directions), its realization records, and its data
+        locations. Nothing site-side is touched, and datarefs stay —
+        copies elsewhere (or the workspace CAS) remain fetchable."""
+        self._write("DELETE FROM sites WHERE name=?", (name,))
+        self._write("DELETE FROM site_routes WHERE src=? OR dst=?",
+                    (name, name))
+        self._write("DELETE FROM realizations WHERE site=?", (name,))
+        self._write("DELETE FROM locations WHERE site=?", (name,))
 
     def routes_for(self, site: str) -> list[dict]:
         return [dict(r) for r in self._rows(
@@ -297,9 +323,13 @@ class Store:
                     (native_lock, manifest, env_id))
 
     def list_envs(self) -> list[dict]:
-        return [{"env_id": r["env_id"], "spec_hash": r["spec_hash"]}
+        return [{"env_id": r["env_id"], "spec_hash": r["spec_hash"],
+                 "name": r["name"], "platforms": json.loads(r["platforms"])
+                 if r["platforms"] else [], "created_at": r["created_at"]}
                 for r in self._rows(
-                    "SELECT env_id, spec_hash FROM envs ORDER BY created_at DESC")]
+                    "SELECT e.env_id, e.spec_hash, e.platforms, e.created_at,"
+                    " s.name FROM envs e LEFT JOIN specs s"
+                    " ON e.spec_hash = s.spec_hash ORDER BY e.created_at DESC")]
 
     def env_for_spec(self, spec_hash: str) -> str | None:
         r = self._row(
@@ -492,7 +522,8 @@ class Store:
         r = self._row("SELECT * FROM jobs WHERE job_id=?", (job_id,))
         return self._job_row(r) if r else None
 
-    def jobs_where(self, state: str | None = None, site: str | None = None) -> list[dict]:
+    def jobs_where(self, state: str | None = None, site: str | None = None,
+                   limit: int | None = None, offset: int = 0) -> list[dict]:
         q, vals, conds = "SELECT * FROM jobs", [], []
         if state:
             conds.append("state=?"); vals.append(state)
@@ -501,6 +532,9 @@ class Store:
         if conds:
             q += " WHERE " + " AND ".join(conds)
         q += " ORDER BY created_at"
+        if limit is not None:
+            q += " LIMIT ? OFFSET ?"
+            vals += [limit, offset]
         return [self._job_row(r) for r in self._rows(q, tuple(vals))]
 
     def nonterminal_jobs(self) -> list[dict]:
@@ -529,11 +563,29 @@ class Store:
             "array_group": r["array_group"] if "array_group" in keys else None,
             "array_index": r["array_index"] if "array_index" in keys else None,
             "queue_reason": r["queue_reason"] if "queue_reason" in keys else None,
+            "superseded_by": r["superseded_by"]
+            if "superseded_by" in keys else None,
         }
 
     def detach_from_group(self, job_id: str) -> None:
         """Superseded array element (retried): leaves the group's counts."""
         self._write("UPDATE jobs SET array_group=NULL WHERE job_id=?", (job_id,))
+
+    def put_plan(self, scope: str, plan: dict) -> None:
+        self._write(
+            "INSERT INTO plans(scope, plan, created_at) VALUES(?,?,?) "
+            "ON CONFLICT(scope) DO UPDATE SET plan=excluded.plan",
+            (scope, _j(plan), time.time()))
+
+    def get_plan(self, scope: str) -> dict | None:
+        r = self._row("SELECT plan FROM plans WHERE scope=?", (scope,))
+        return json.loads(r["plan"]) if r else None
+
+    def mark_superseded(self, job_id: str, by_job_id: str) -> None:
+        """Record which retry replaced this row, so consumers can fold it
+        under the group's history instead of showing a mystery duplicate."""
+        self._write("UPDATE jobs SET superseded_by=? WHERE job_id=?",
+                    (by_job_id, job_id))
 
     # -- array groups ---------------------------------------------------------
 

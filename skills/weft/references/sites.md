@@ -17,6 +17,13 @@ w.register_site("beamlab", "ssh", {
 # platform as the controller: registration verifies bin/pixi actually
 # runs on the site and otherwise fetches the pinned release for the
 # site's own platform (a mac laptop driving a linux cluster just works)
+#
+# registration narrates bootstrap.step events (bootstrap → probe →
+# tools → routes). Check a host BEFORE committing with
+# register_site(..., probe_only=True): full capabilities, nothing
+# registered (the ~100KB shim is still written — a real probe needs it).
+# site_unregister(name) forgets a registration (site untouched; refuses
+# while jobs/kernels/services are live; re-registering re-adopts).
 
 # hosts reachable only from inside (the usual alien-cluster shape:
 # internet OUT, ssh-only IN) — model the hops, don't hide them in

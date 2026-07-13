@@ -128,7 +128,7 @@ def evict(weft, env_id: str, site: str, archive: bool = False,
     weft.store.set_realization(
         env_id, site, real["strategy"], rel, "evicted",
         log=f"evicted {'with archive' if archived else '(cache-warm rebuild)'}")
-    weft.store.audit_log("user", "env.evict", site=site, command=env_id,
+    weft.store.audit_log(None, "env.evict", site=site, command=env_id,
                          result=f"freed={freed} archived={bool(archived)}")
     weft.store.emit("env.evicted", env_id=env_id, site=site,
                     freed_bytes=freed, archived=bool(archived))
@@ -306,7 +306,7 @@ def gc_packages(weft, site: str, confirm: bool = False) -> dict:
     adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path('cache/pixi'))}")
     after = _free_bytes(adapter)
     freed = max(0, after - before) if (before and after) else cache_bytes
-    weft.store.audit_log("user", "gc.packages", site=site,
+    weft.store.audit_log(None, "gc.packages", site=site,
                          result=f"freed={freed}")
     weft.store.emit("gc.packages", site=site, freed_bytes=freed)
     return {"site": site, "freed_bytes": freed,
@@ -440,7 +440,7 @@ def gc_orphans(weft, site: str, confirm: bool = False) -> dict:
         adapter.run_cmd(
             f"rm -rf {shlex.quote(adapter.path(o['area'] + '/' + o['name']))}")
         freed += o["bytes"]
-    weft.store.audit_log("user", "gc.orphans", site=site,
+    weft.store.audit_log(None, "gc.orphans", site=site,
                          result=f"freed={freed}")
     weft.store.emit("gc.orphans", site=site, freed_bytes=freed,
                     count=len(fp["orphans"]))

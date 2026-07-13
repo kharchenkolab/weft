@@ -18,9 +18,36 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import uuid
+
 from .errors import WeftError
 from .ids import (DREF_SCHEME, _is_exec, canonical_json, data_ref, hash_file,
                   hash_tree, sha256_bytes)
+
+
+def place_blob(src: Path, dst: Path) -> None:
+    """Hardlink-or-copy src to dst atomically, safely under concurrency.
+
+    The tmp name must be unique per attempt: with a shared `<dst>.tmp`,
+    two stagers of the same blob raced — the loser's os.link hit EEXIST,
+    fell back to copy2, and copy2 refused to copy src onto its own fresh
+    hardlink (SameFileError; found in the wild by weft-ui seeding a
+    24-element array that mounts one ref). With unique names the racers
+    are independent and os.replace makes the last one a harmless no-op.
+    """
+    tmp = dst.with_name(f"{dst.name}.tmp.{uuid.uuid4().hex[:8]}")
+    try:
+        try:
+            os.link(src, tmp)  # hardlink: free and instant
+        except OSError:
+            shutil.copy2(src, tmp)  # cross-device fallback
+        os.replace(tmp, dst)
+    finally:
+        # rename(2) is a successful NO-OP when tmp and dst are hardlinks
+        # of the same inode (exactly what concurrent stagers produce) —
+        # the tmp survives it. Consume it ourselves; also covers the
+        # exception path.
+        tmp.unlink(missing_ok=True)
 
 
 @dataclass
@@ -57,12 +84,7 @@ class LocalCAS:
         if dst.exists():
             return
         dst.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dst.with_suffix(".tmp")
-        try:
-            os.link(src, tmp)  # hardlink: free and instant
-        except OSError:
-            shutil.copy2(src, tmp)  # cross-device fallback
-        os.replace(tmp, dst)
+        place_blob(src, dst)
 
     # A file modified less than this long ago is never trusted to the fast
     # path (git's "racily clean" rule): a same-size rewrite inside timestamp
@@ -119,7 +141,9 @@ class LocalCAS:
         dst = self._blob_path(hexdigest)
         if not dst.exists():
             dst.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dst.with_suffix(".tmp")
+            # unique tmp: concurrent writers of the same content must not
+            # share a scratch name (the loser's replace would ENOENT)
+            tmp = dst.with_name(f"{dst.name}.tmp.{uuid.uuid4().hex[:8]}")
             tmp.write_bytes(data)
             os.replace(tmp, dst)
         return DataRefInfo(data_ref(hexdigest), "file", len(data))

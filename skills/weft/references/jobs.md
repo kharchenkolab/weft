@@ -34,6 +34,17 @@ w.array_retry(group, indices=[3, 17])           # specific ones
 w.array_retry(group, command_override="...")    # with a fixed command
 ```
 
+A replaced element's old row leaves the group's counts but stays
+queryable (`jobs_where`) with `superseded_by` naming its successor —
+fold those under the group's history, they are not duplicates.
+
+**Enumeration** (what exists in this workspace): `jobs_where(state=,
+site=, limit=, offset=)`, `list_envs()`, `list_kernels()`,
+`list_services()`, `audit_tail(n)`. `task_status(job_id)` also carries
+`plan` — the persisted submit-time promise (staging bytes, env action)
+to compare against what actually happened; arrays store one plan for
+the group (`array_status(group)["plan"]`).
+
 ## Crash & outage semantics (what you can rely on)
 
 - Site unreachable → ONE `site.unreachable` event; detached jobs keep

@@ -160,7 +160,7 @@ def export_bundle(weft, job_id: str, out_path: str) -> dict:
         for digest, path in trees.items():
             tar.add(str(path), arcname=f"bundle/trees/{digest}.json")
 
-    weft.store.audit_log("user", "bundle.export", command=job_id,
+    weft.store.audit_log(None, "bundle.export", command=job_id,
                          result=str(out))
     weft.store.emit("bundle.exported", job_id=job_id, path=str(out),
                     jobs=len(jobs), envs=len(envs), blobs=len(blobs))
@@ -234,7 +234,7 @@ def import_bundle(weft, path: str) -> dict:
                                       layerable=bool(e.get("layerable")))
 
     target = man["jobs"][man["target_job"]]
-    weft.store.audit_log("user", "bundle.import", command=man["target_job"],
+    weft.store.audit_log(None, "bundle.import", command=man["target_job"],
                          result=path)
     return {
         "target_job": man["target_job"],

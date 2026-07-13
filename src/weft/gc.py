@@ -131,7 +131,7 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
                     path.unlink()
             weft.store.demote_location(r["ref"], "@workspace")
             evicted += r["bytes"]
-        weft.store.audit_log("user", "gc.sweep", site=site,
+        weft.store.audit_log(None, "gc.sweep", site=site,
                              result=f"bytes={evicted}")
         weft.store.emit("gc.swept", site=site, bytes=evicted)
         return {"site": site, "evicted_bytes": evicted,
@@ -157,7 +157,7 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
             f"rm -f {shlex.quote(endpoint['cas_root'])}/{digest[:2]}/{digest}")
         weft.store.demote_location(r["ref"], site)
         evicted_bytes += r["bytes"]
-    weft.store.audit_log("user", "gc.sweep", site=site,
+    weft.store.audit_log(None, "gc.sweep", site=site,
                          result=f"envs={evicted_envs} bytes={evicted_bytes}")
     weft.store.emit("gc.swept", site=site, realizations=evicted_envs,
                     bytes=evicted_bytes)

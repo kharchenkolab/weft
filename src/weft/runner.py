@@ -158,6 +158,10 @@ class JobRunner:
         stored["site"] = site
         self.store.put_job(job_id, task_hash, stored, site, "PENDING",
                            array_group=_group, array_index=_index)
+        if _group is None:
+            # persisted so promised-vs-actual survives a restart; array
+            # elements ride their group's plan (stored once, not N times)
+            self.store.put_plan(job_id, plan)
         self.store.emit("job.state", job_id=job_id, state="PENDING", site=site,
                         **self.group_payload(_group))
         t = threading.Thread(target=self._drive, args=(job_id,), daemon=True)
@@ -171,6 +175,7 @@ class JobRunner:
         plan = self._plan(task, site)
         if dry_run:
             return {"plan": plan, "site": site, "elements": task.array, "dry_run": True}
+        self.store.put_plan(group, plan)
         # array.done must wait for the whole fan-out, even when elements
         # memoize instantly and the group looks "complete" at size 1
         self._group_expected[group] = task.array
@@ -497,8 +502,14 @@ class JobRunner:
                 if not self._cancelled(job_id):
                     self.store.update_job(job_id, state="FAILED", error=e.to_dict())
                     self._emit_failed(job_id, e)
-            except Exception as e:  # infra bug — still a structured event
-                err = WeftError("state.conflict", f"internal error: {e!r}", stage="infra")
+            except Exception as e:  # infra bug — still a structured event,
+                # under its OWN code: dressing internal bugs as
+                # state.conflict gave them a false "concurrent operation"
+                # meaning and polluted failure triage (weft-ui, in the wild)
+                import traceback
+                err = WeftError(
+                    "internal.error", f"internal error: {e!r}", stage="infra",
+                    hints={"traceback_tail": traceback.format_exc()[-1200:]})
                 self.store.update_job(job_id, state="FAILED", error=err.to_dict())
                 self._emit_failed(job_id, err)
 
@@ -664,8 +675,11 @@ class JobRunner:
                                         **e.to_dict())
                     return
         except Exception as e:
-            err = WeftError("state.conflict",
-                            f"internal collection error: {e!r}", stage="collecting")
+            import traceback
+            err = WeftError(
+                "internal.error", f"internal collection error: {e!r}",
+                stage="collecting",
+                hints={"traceback_tail": traceback.format_exc()[-1200:]})
             self.store.update_job(watch.job_id, state="FAILED", error=err.to_dict())
             self.store.emit("job.failed", job_id=watch.job_id, **err.to_dict())
         finally:

@@ -53,11 +53,18 @@ class Weft:
     """One instance per workspace. The UI and the agent share this state."""
 
     def __init__(self, workspace: Path, pixi_bin: str | None = None,
-                 pixi_pack: str | None = None):
+                 pixi_pack: str | None = None, default_actor: str = "agent"):
+        """default_actor names who acts through THIS instance in the audit
+        trail ("agent" unless the embedder — a UI serving a human, a
+        notebook — says otherwise). Deliberately constructor-only: a
+        per-call actor on the tools would let an agent write someone
+        else's name into the trail. Registration-class actions always
+        audit as "user" (they are user-confirmed by doctrine)."""
         self.workspace = Path(workspace)
         data_dir = self.workspace / ".weft"
         data_dir.mkdir(parents=True, exist_ok=True)
         self.store = Store(data_dir / "state.db")
+        self.store.audit_actor = default_actor
         self.cas = LocalCAS(data_dir / "cas")
         self.pixi_bin = pixi_bin or "pixi"
         if pixi_pack is None:
@@ -161,14 +168,34 @@ class Weft:
         self.adapters[name] = adapter
         return adapter
 
-    def register_site(self, name: str, kind: str, config: dict) -> dict:
-        """User-confirmed action (doc 05 §6): registering a site is always explicit."""
+    def register_site(self, name: str, kind: str, config: dict,
+                      probe_only: bool = False) -> dict:
+        """User-confirmed action (doc 05 §6): registering a site is always
+        explicit. probe_only=True bootstraps and probes WITHOUT
+        registering (no store row, no routes, no site tooling) — the
+        wizard's check-before-commit. Honest caveat: the real probe needs
+        the shim, so ~100KB is written under the configured root even
+        then (re-used by the eventual registration)."""
         adapter = self._make_adapter(name, kind, config)
-        self.store.put_site(name, kind, config)
+        if not probe_only:
+            self.store.put_site(name, kind, config)
+        # progress is narrated: registration can take a minute on real
+        # hosts (bootstrap push, probe, tool fetch, route probes)
+        self.store.emit("bootstrap.step", site=name, step="bootstrap",
+                        note="creating the root tree, pushing the shim")
         adapter.ensure_bootstrap()
+        self.store.emit("bootstrap.step", site=name, step="probe",
+                        note="measuring the site (hardware, scheduler, "
+                             "runtimes, network)")
         probe = adapter.probe()
         from .capability import normalize_probe
         caps = self._apply_caps_override(normalize_probe(probe), config)
+        if probe_only:
+            self.adapters.pop(name, None)
+            return {"site": name, "probe_only": True, "capabilities": caps,
+                    "note": "nothing registered — the shim was written "
+                            "under the root to run a real probe; "
+                            "register_site without probe_only to commit"}
         self.store.set_capabilities(name, caps)
         # the site needs pixi/pixi-unpack built for ITS platform; push the
         # controller's copy when compatible, else fetch the pinned release
@@ -176,6 +203,8 @@ class Weft:
         if hasattr(adapter, "_push_binary"):
             from .realize import _site_platform
             from .site_tools import ensure_site_tools
+            self.store.emit("bootstrap.step", site=name, step="tools",
+                            note="ensuring platform-correct pixi/pixi-unpack")
             try:
                 tools = ensure_site_tools(adapter, _site_platform(caps))
                 self.store.emit("site.tools", site=name, **tools)
@@ -186,6 +215,9 @@ class Weft:
         self.store.emit("site.registered", site=name, site_kind=kind)
         # discover byte routes to/from the other sites (best-effort: a
         # failed probe never fails a registration)
+        if len(self.adapters) > 1:
+            self.store.emit("bootstrap.step", site=name, step="routes",
+                            note="probing byte routes to the other sites")
         for other in list(self.adapters):
             if other == name:
                 continue
@@ -272,7 +304,7 @@ class Weft:
             if direct_ssh:
                 src_addr = f"{dest}:{pport}" if pport else dest
         self.store.set_route(src, dst, shared_fs_path, direct_ssh, src_addr)
-        self.store.audit_log("agent", "site.route_probe",
+        self.store.audit_log(None, "site.route_probe",
                              site=dst, command=f"from {src}")
         out = {"src": src, "dst": dst, "shared_fs_path": shared_fs_path,
                "direct_ssh": direct_ssh}
@@ -298,7 +330,7 @@ class Weft:
         if not note or not note.strip():
             raise WeftError("task.invalid", "empty note", stage="infra")
         self.store.add_site_note(name, note.strip())
-        self.store.audit_log("agent", "site.note", site=name,
+        self.store.audit_log(None, "site.note", site=name,
                              command=note[:200])
         return {"site": name, "notes": self.store.site_notes(name)}
 
@@ -594,7 +626,7 @@ class Weft:
             env_id, site, (real or {}).get("strategy") or "prefix",
             rel, "missing", log="repair requested",
         )
-        self.store.audit_log("agent", "env.repair", site=site, command=env_id)
+        self.store.audit_log(None, "env.repair", site=site, command=env_id)
         self.store.emit("env.repair", env_id=env_id, site=site)
         return {"env_id": env_id, "site": site, "state": "cleared",
                 "note": "next task using this env here rebuilds it from the lockfile"}
@@ -644,7 +676,7 @@ class Weft:
                 task["env"] = self.envman.ensure(task["env"])["env_id"]
             t = Task.from_dict(task)
             r = self.runner.submit(t, force=force, dry_run=dry_run)
-            self.store.audit_log("agent", "task.submit",
+            self.store.audit_log(None, "task.submit",
                                  site=r.get("site", ""), command=t.command[:200])
             return r
         except WeftError as e:
@@ -664,6 +696,10 @@ class Weft:
             }
             if j["state"] == "QUEUED" and j.get("queue_reason"):
                 entry["queue_reason"] = j["queue_reason"]
+            if job_id:  # single-job detail: the promise made at submit
+                entry["plan"] = (self.store.get_plan(j["job_id"])
+                                 or (self.store.get_plan(j["array_group"])
+                                     if j.get("array_group") else None))
             out.append(entry)
         return out
 
@@ -710,7 +746,7 @@ class Weft:
         """Cancel a job. Pass `why` — cancellations are part of the record
         ("hung: no output for 20 min, node memory exhausted"), and the
         cause is what makes the audit trail useful later."""
-        self.store.audit_log("agent", "task.cancel", command=job_id,
+        self.store.audit_log(None, "task.cancel", command=job_id,
                              why=why)
         out = self.runner.cancel(job_id)
         if why:
@@ -778,7 +814,7 @@ class Weft:
         filesystem is the channel."""
         try:
             r = self.kernels.start(site, lang, env_id, walltime, resources)
-            self.store.audit_log("agent", "kernel.start", site=site,
+            self.store.audit_log(None, "kernel.start", site=site,
                                  command=f"{lang} env={env_id}")
             return r
         except WeftError as e:
@@ -838,7 +874,7 @@ class Weft:
         bind 127.0.0.1 on $WEFT_PORT; weft tunnels it back and returns
         local URLs. Same env/staging/provenance as tasks; runs until
         service_stop (or its walltime)."""
-        self.store.audit_log("agent", "service.start", site=site,
+        self.store.audit_log(None, "service.start", site=site,
                              command=str(task.get("command", ""))[:200])
         return self.services.start(site, task, ports, ready_timeout)
 
@@ -851,8 +887,40 @@ class Weft:
         """Stop the service and close its tunnels. collect=True harvests
         the task's declared outputs into refs (the service's side-products
         enter the record)."""
-        self.store.audit_log("agent", "service.stop", command=service_id)
+        self.store.audit_log(None, "service.stop", command=service_id)
         return self.services.stop(service_id, collect=collect)
+
+    # -- read-only enumeration (agent/UI parity: "what exists here?") ----------
+
+    def jobs_where(self, state: str | None = None, site: str | None = None,
+                   limit: int = 100, offset: int = 0) -> dict:
+        """List job rows (oldest first), filterable by state and site.
+        Rows carry array_group/array_index; a retried array element's old
+        row carries `superseded_by` — fold those under the group's history
+        rather than reading them as duplicates."""
+        rows = self.store.jobs_where(state=state, site=site,
+                                     limit=limit, offset=offset)
+        return {"jobs": rows, "count": len(rows), "offset": offset,
+                "limit": limit}
+
+    def list_envs(self) -> dict:
+        """Every solved environment in this workspace (newest first):
+        env_id, spec name, platforms. env_status(env_id) has the rest."""
+        return {"envs": self.store.list_envs()}
+
+    def list_kernels(self, state: str | None = None) -> dict:
+        """Kernels this workspace knows (optionally filtered by state,
+        e.g. 'running'). kernel_status(kernel_id) gives live truth."""
+        return {"kernels": self.store.list_kernels(state=state)}
+
+    def list_services(self, state: str | None = None) -> dict:
+        """Services this workspace knows (optionally filtered by state).
+        service_status(service_id) re-checks endpoints and liveness."""
+        return {"services": self.store.list_services(state=state)}
+
+    def audit_tail(self, n: int = 50) -> dict:
+        """The last n audited actions (user and agent share one trail)."""
+        return {"audit": self.store.audit_tail(n)}
 
     # -- events / diagnostics -----------------------------------------------------
 
@@ -890,6 +958,7 @@ class Weft:
             raise WeftError("task.invalid", f"unknown array group: {group}",
                             stage="infra")
         out = {"group": group, **counts,
+               "plan": self.store.get_plan(group),  # the submit-time promise
                "failed_previews": self.store.failed_in_group(group),
                "failure_buckets": self._failure_buckets(group)}
         if counts["total"] <= self._ARRAY_INLINE_CAP:
@@ -964,9 +1033,11 @@ class Weft:
             self.store.detach_from_group(j["job_id"])
             r = self.runner.submit(Task.from_dict(task), force=True,
                                    _group=group, _index=j["array_index"])
+            if "job_id" in r:
+                self.store.mark_superseded(j["job_id"], r["job_id"])
             out.append({"index": j["array_index"], "superseded": j["job_id"],
                         **{k: r[k] for k in ("job_id", "site") if k in r}})
-        self.store.audit_log("agent", "array.retry", command=group,
+        self.store.audit_log(None, "array.retry", command=group,
                              why=f"{len(out)} elements")
         return {"group": group, "retried": out}
 
@@ -988,7 +1059,7 @@ class Weft:
             )
         for pat in DENY_PATTERNS:
             if pat.search(cmd):
-                self.store.audit_log("agent", f"{actor_action}.DENIED",
+                self.store.audit_log(None, f"{actor_action}.DENIED",
                                      site=site, command=cmd, why=why)
                 raise WeftError(
                     "task.invalid",
@@ -1027,7 +1098,7 @@ class Weft:
             r = adapter.run_cmd(
                 f"cd {shlex.quote(adapter.path(f'jobs/{job_id}'))} "
                 f"&& ( {cmd} )", timeout=timeout)
-        self.store.audit_log("agent", "job.node_exec", site=site,
+        self.store.audit_log(None, "job.node_exec", site=site,
                              command=cmd, why=why, result=f"rc={r.rc}")
         return {"job_id": job_id, "rc": r.rc,
                 "stdout": r.out[-8000:], "stderr": r.err[-4000:]}
@@ -1038,7 +1109,7 @@ class Weft:
         adapter = self._adapter(name)
         scoped = f"cd {shlex.quote(adapter.root)} && ( {cmd} )"
         r = adapter.run_cmd(scoped, timeout=120)
-        self.store.audit_log("agent", "site.exec", site=name, command=cmd,
+        self.store.audit_log(None, "site.exec", site=name, command=cmd,
                              why=why, result=f"rc={r.rc}")
         return {"rc": r.rc, "stdout": r.out[-8000:], "stderr": r.err[-4000:],
                 "cwd": adapter.root}
@@ -1147,7 +1218,7 @@ class Weft:
     def gc_events(self, older_than_days: float = 30) -> dict:
         """Prune old events (terminal digests and failures are kept)."""
         pruned = self.store.prune_events(older_than_days)
-        self.store.audit_log("user", "gc.events", result=f"pruned={pruned}")
+        self.store.audit_log(None, "gc.events", result=f"pruned={pruned}")
         return {"pruned": pruned, "remaining": self.store.events_count()}
 
     # -- provenance -------------------------------------------------------------
@@ -1241,6 +1312,47 @@ class Weft:
         ]
         return node
 
+    def site_unregister(self, name: str) -> dict:
+        """Forget a site's registration. Nothing site-side is touched
+        (contrast site_teardown, which terminates cloud instances): the
+        weft root, realized envs, and staged bytes stay on its disk —
+        re-registering re-adopts them. Refuses while jobs, kernels, or
+        services are live there. Data locations recorded at the site are
+        forgotten; refs whose ONLY copy lived there will need the site
+        re-registered (or a re-fetch from origin) to be staged again."""
+        if not self.store.get_site(name):
+            raise WeftError("task.invalid", f"unknown site: {name}",
+                            stage="infra",
+                            hints={"registered": [s["name"] for s in
+                                                  self.store.list_sites()]})
+        live = {
+            "jobs": [j["job_id"] for j in self.store.nonterminal_jobs()
+                     if j["site"] == name],
+            "kernels": [k["kernel_id"] for k in
+                        self.store.list_kernels(state="running")
+                        if k["site"] == name],
+            "services": [s["service_id"] for s in
+                         self.store.list_services(state="ready")
+                         if s["site"] == name],
+        }
+        busy = {k: v for k, v in live.items() if v}
+        if busy:
+            raise WeftError(
+                "state.conflict",
+                f"site {name} has live work; stop it first", stage="infra",
+                hints={**busy,
+                       "suggestion": "task_cancel / kernel_stop / "
+                                     "service_stop the listed ids, or wait"})
+        adapter = self.adapters.pop(name, None)
+        if adapter is not None and hasattr(adapter, "close_control"):
+            adapter.close_control()
+        self.store.forget_site(name)
+        self.store.audit_log("user", "site.unregister", site=name)
+        self.store.emit("site.unregistered", site=name)
+        return {"site": name, "state": "unregistered",
+                "note": "site-side state untouched; re-registering "
+                        "re-adopts realized envs and staged data"}
+
     def site_teardown(self, name: str) -> dict:
         """Tear down an ephemeral (cloud) site's instance. Explicit —
         spending-level actions are never implicit (doc 05 §6)."""
@@ -1258,12 +1370,13 @@ PUBLIC_TOOLS = [
     "register_site", "sites_list", "sites_describe", "site_probe",
     "site_probe_deep", "site_load", "site_associations", "site_note",
     "site_route_probe", "module_check", "module_list", "site_exec",
-    "job_node_exec", "site_teardown",
+    "job_node_exec", "site_teardown", "site_unregister",
     "env_ensure", "env_status", "env_why", "env_repair", "env_gpu_hint",
     "env_revise", "env_find_near",
     "data_register", "data_describe", "data_fetch",
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_elements", "array_result", "array_retry",
+    "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",
     "events_poll", "doctor", "reconcile", "provenance",
     "bundle_export", "bundle_import",
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",

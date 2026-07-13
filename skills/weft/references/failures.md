@@ -13,6 +13,7 @@ an unchanged failing task more than once.
 | `env.not_realized` | env exists but was never built on this site (kernels need this) | run any task with the env there first (even `true`) |
 | `env.unsatisfiable_on_site` | musl libc, missing module, no runtime | `hints.suggestion` / alternatives; re-place to another site |
 | `env.platform_mismatch` | env locked for other platforms than the site's (e.g. linux-64 env, osx-arm64 site) | add `hints.site_platform` to the spec's `platforms`, `env_ensure` again (new EnvID) |
+| `internal.error` | a weft bug, not a known failure mode | `hints.traceback_tail` has the trace; a retry may or may not help — tell the user, include the trace |
 | `site.capability_violation` | ask exceeds hardware, partition, or **user policy** (`hints.source`) | clamp to `hints.*.max` / `fitting_partitions`, or negotiate with the user — policy is their choice |
 | `sched.rejected` | sbatch refused | `hints.stderr`; check partition/account against `sites_describe` |
 | `job.walltime_exceeded` | time limit hit | raise `resources.walltime` (hints show asked vs elapsed) or shrink the task |

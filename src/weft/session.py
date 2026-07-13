@@ -122,7 +122,7 @@ class SessionManager:
             f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )",
             timeout=600,
         )
-        self.store.audit_log("agent", "session.exec", site=adapter.name,
+        self.store.audit_log(None, "session.exec", site=adapter.name,
                              command=cmd, why=f"session {session_id}",
                              result=f"rc={r.rc}")
         return {"rc": r.rc, "stdout": r.out[-8000:], "stderr": r.err[-4000:]}

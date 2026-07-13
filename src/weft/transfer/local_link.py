@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
-import shutil
 from pathlib import Path
 
-from ..cas import LocalCAS
+from ..cas import LocalCAS, place_blob
 from ..errors import WeftError
 from ..ids import hash_file
 
@@ -34,12 +32,7 @@ class LocalLink:
             if dst.exists():
                 continue
             dst.parent.mkdir(parents=True, exist_ok=True)
-            tmp = dst.with_suffix(".tmp")
-            try:
-                os.link(src, tmp)
-            except OSError:
-                shutil.copy2(src, tmp)
-            os.replace(tmp, dst)
+            place_blob(src, dst)
             # hardlinks share the inode we just hashed from — only copies
             # need re-verification, and only paranoidly
             if dst.stat().st_ino != src.stat().st_ino:
@@ -72,9 +65,4 @@ class LocalLink:
     def _link_into(cas: LocalCAS, src: Path, digest: str) -> None:
         dst = cas.root / digest[:2] / digest
         dst.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dst.with_suffix(".tmp")
-        try:
-            os.link(src, tmp)
-        except OSError:
-            shutil.copy2(src, tmp)
-        os.replace(tmp, dst)
+        place_blob(src, dst)

@@ -317,7 +317,7 @@ class KernelManager:
         self.store.update_job(job_id, manifest=manifest)
         self.store.emit("kernel.promoted", kernel=kernel_id, job_id=job_id,
                         blocks=blocks)
-        self.store.audit_log("agent", "kernel.promote", site=k["site"],
+        self.store.audit_log(None, "kernel.promote", site=k["site"],
                              command=f"{kernel_id} blocks={blocks}")
         return manifest
 

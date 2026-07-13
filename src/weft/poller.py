@@ -152,9 +152,11 @@ class SitePoller:
             except WeftError as e:
                 self._fail(w, e)
             except Exception as e:
+                import traceback
                 self._fail(w, WeftError(
-                    "state.conflict", f"internal poller error: {e!r}",
+                    "internal.error", f"internal poller error: {e!r}",
                     stage="running",
+                    hints={"traceback_tail": traceback.format_exc()[-1200:]},
                 ))
             if w.array_group:
                 dirty_groups.add(w.array_group)

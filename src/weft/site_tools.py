@@ -100,7 +100,8 @@ def fetch_tool(tool: str, platform: str) -> Path:
     except (urllib.error.URLError, OSError):
         pass
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(f".tmp.{os.getpid()}")  # concurrent-fetch safe
+    import uuid as _uuid
+    tmp = dest.with_suffix(f".tmp.{_uuid.uuid4().hex[:8]}")  # concurrent-fetch safe
     tmp.write_bytes(data)
     tmp.chmod(0o755)
     tmp.rename(dest)  # atomic: losers overwrite with identical bytes

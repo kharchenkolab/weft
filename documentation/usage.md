@@ -120,6 +120,7 @@ Read the code, use the hints:
 | `data.verify_failed` | locations demoted → resubmit re-transfers |
 | `env.unsatisfiable_on_site` | alternative sites → re-place |
 | `env.platform_mismatch` | `locked_platforms` vs `site_platform` → add the site's platform to the spec, re-ensure (new EnvID) |
+| `internal.error` | a weft bug, not a known failure mode — `hints.traceback_tail`; retry may not help, report it |
 
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 
@@ -144,6 +145,15 @@ w.register_site("beamlab", "ssh", {
 # and otherwise fetches the release pinned in weft.site_tools for the
 # site's own platform (cross-platform controllers just work; cache:
 # ~/.cache/weft/site-tools, override versions via WEFT_PIXI_VERSION)
+#
+# registration narrates progress as bootstrap.step events (bootstrap →
+# probe → tools → routes). probe_only=True bootstraps + probes and
+# registers NOTHING (check-before-commit; the shim — ~100KB — is still
+# written under the root: a real probe needs it).
+# site_unregister(name) forgets a registration without touching the
+# site (refuses while work is live there; re-registering re-adopts
+# realized envs and staged data). site_teardown remains the cloud
+# instance killer.
 
 # host reachable only from inside (bastion → target): model the hops.
 # weft renders nested ProxyCommand chains (your keys/options apply at
@@ -216,8 +226,18 @@ w.array_status(r["group"])                  # counts + FAILURE BUCKETS (by
                                             # log signature, sample indices)
 w.array_elements(r["group"], state="FAILED", limit=50)   # page big sweeps
 w.array_retry(r["group"])                   # linked retries; digests heal
+                                            # (replaced rows carry
+                                            # superseded_by — fold, don't
+                                            # re-count them)
 w.array_result(r["group"])                  # roll-up: wall stats, failures
 w.env_repair(env_id, "hpc")                 # clear a corrupt realization
+
+w.jobs_where(state="FAILED", limit=50)      # enumerate: jobs …
+w.list_envs(); w.list_kernels(); w.list_services()   # … and everything else
+w.audit_tail(50)                            # one trail, user + agent
+w.task_status(job_id)[0]["plan"]            # the submit-time promise,
+                                            # persisted (survives restarts;
+                                            # arrays store one group plan)
 ```
 
 Partition records carry `gres` (GPU model/count) and `features`; GPU asks
@@ -291,9 +311,16 @@ w.job_node_exec(job_id, "nvidia-smi; free -m",
                 why="job looks stuck")      # INSIDE the job's allocation
 w.site_probe_deep("hpc", partitions=["gpu"])  # compute-node truth via
                                             # probe jobs (measured egress)
-w.store.audit_tail(50)                      # what ran where, and why
+w.audit_tail(50)                            # what ran where, and why
 w.reconcile()                               # after a controller crash/restart
 ```
+
+The trail's actor is set by the EMBEDDER at construction
+(`Weft(default_actor="user")` for a UI serving a human; default
+"agent") — never per call, so nobody can write someone else's name.
+Registration-class actions (`register_site`, `site_unregister`,
+`site_teardown`) always audit as "user": they are user-confirmed by
+doctrine.
 
 ### MCP server
 
