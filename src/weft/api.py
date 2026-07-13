@@ -643,9 +643,14 @@ class Weft:
 
     def kernel_start(self, site: str, lang: str = "python",
                      env_id: str | None = None,
-                     walltime: str = "08:00:00") -> dict:
+                     walltime: str = "08:00:00",
+                     resources: dict | None = None) -> dict:
+        """resources={"gpus": 1, "partition": "gpu"} on a scheduler site
+        holds a node allocation and runs the kernel INSIDE it — live
+        interactive analysis on a GPU node; no ports, the shared
+        filesystem is the channel."""
         try:
-            r = self.kernels.start(site, lang, env_id, walltime)
+            r = self.kernels.start(site, lang, env_id, walltime, resources)
             self.store.audit_log("agent", "kernel.start", site=site,
                                  command=f"{lang} env={env_id}")
             return r

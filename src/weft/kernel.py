@@ -55,7 +55,13 @@ class KernelManager:
     # -- lifecycle ------------------------------------------------------------
 
     def start(self, site: str, lang: str = "python",
-              env_id: str | None = None, walltime: str = "08:00:00") -> dict:
+              env_id: str | None = None, walltime: str = "08:00:00",
+              resources: dict | None = None) -> dict:
+        """`resources` places the INTERACTIVE session like a job: on slurm,
+        {"gpus": 1, "partition": "gpu"} holds a GPU-node allocation and
+        the kernel lives inside it — analysis on the node, not the login
+        host. The file-block protocol needs no ports: the shared
+        filesystem IS the channel."""
         if lang not in LANGUAGES:
             raise WeftError(
                 "task.invalid", f"no kernel driver for lang {lang!r}",
@@ -84,11 +90,34 @@ class KernelManager:
         adapter.write_file(
             f"{jobdir_rel}/cmd.sh",
             f"mkdir -p blocks\nexec {interp} {driver_file}\n".encode())
-        handle = adapter.submit(jobdir_rel, {"resources": {"cpus": 1,
-                                                           "walltime": walltime}})
+        res = {"cpus": 1, "walltime": walltime, **(resources or {})}
+        # the same fence tasks get: an ask no partition can hold would sit
+        # PENDING forever (PartitionTimeLimit) — an interactive session
+        # that silently never starts is the worst kind of wait
+        caps = (self.store.get_site(site) or {}).get("capabilities") or {}
+        parts = (caps.get("scheduler") or {}).get("partitions") or None
+        if parts:
+            if res.get("partition"):
+                parts = [p for p in parts
+                         if p["name"] == res["partition"]] or parts
+            from .capability import satisfies_resources
+            ok, hints = satisfies_resources(caps, res, partitions=parts)
+            if not ok:
+                raise WeftError(
+                    "site.capability_violation",
+                    f"kernel ask exceeds what {site} offers "
+                    "(it would queue forever)",
+                    stage="submit",
+                    hints={**hints,
+                           "suggestion": "shrink walltime/resources to a "
+                                         "fitting partition — interactive "
+                                         "kernels usually want SHORT "
+                                         "walltimes and a re-start, not a "
+                                         "day-long hold"})
+        handle = adapter.submit(jobdir_rel, {"resources": res})
         self.store.put_kernel(kernel_id, site, lang, env_id, jobdir_rel, handle)
         self.store.emit("kernel.started", kernel=kernel_id, site=site,
-                        lang=lang, env_id=env_id)
+                        lang=lang, env_id=env_id, resources=res)
         from .poller import Watch
         from .task import Task
         self.runner.poller_for(site).register(Watch(

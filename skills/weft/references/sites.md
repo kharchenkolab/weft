@@ -89,6 +89,11 @@ w.register_site("cloud-gpu", "cloud", {
   already folds load into its ranking, with reasons.
 - GPU asks validate against partition GRES (login nodes have no GPUs);
   refusals name the fitting partitions and the honest ceiling.
+- **Slurm memory trap**: on clusters without `DefMemPerCPU`, a job that
+  sets no `mem_gb` is granted the node's ENTIRE memory — your other jobs
+  then pend on "Resources" while CPUs sit idle. If jobs serialize
+  unexpectedly, check `task_status(...)['queue_reason']` and set
+  `resources.mem_gb` explicitly.
 
 ## Cloud money rules
 
