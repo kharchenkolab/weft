@@ -67,3 +67,13 @@ gate WHEN a task runs, not WHAT it computes: they are excluded from the
 task hash, so memoization still works stage by stage. Unknown job_ids are
 refused at submit. Chain data the usual way (site-side output→input
 chaining); `after` only sequences.
+
+## Small print
+
+- `task_status(job_id)` returns a LIST (uniform with the state-filter
+  form) — take `[0]` for a single job.
+- `task_cancel(job_id, why="hung: no output 20min")` — give the cause;
+  it lands in the audit trail and the returned payload.
+- `dry_run=True` runs placement + capability/policy checks and returns
+  the plan (including `resources` as understood — check the partition
+  landed) without submitting.

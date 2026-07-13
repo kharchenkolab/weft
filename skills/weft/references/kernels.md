@@ -60,3 +60,14 @@ m["outputs"]           # the blocks' artifacts, content-addressed
 The result is a first-class manifest: `task_result(m["job_id"])` and
 `provenance(...)` work on it, honestly labeled. Nothing is promoted
 implicitly.
+
+## Placement on schedulers
+
+`kernel_start(site, resources={"gpus": 1, "partition": "gpu"},
+walltime="01:00:00")` holds a node allocation and runs the interpreter
+INSIDE it — interactive analysis on the GPU node, not the login host.
+Mind the partition's walltime cap: an over-long ask is REFUSED upfront
+(`site.capability_violation`) because slurm would otherwise queue it
+forever. The file-block protocol needs no ports; the shared filesystem is
+the channel, and `node_exec`-style diagnostics reach the same allocation.
+Interactive sessions want SHORT walltimes and a restart, not a day hold.

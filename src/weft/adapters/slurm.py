@@ -107,9 +107,13 @@ class SlurmAdapter(SSHAdapter):
                 continue
             name, timelimit, cpus, mem_mb, avail, gres, feats = parts
             try:
+                from ..capability import slurm_time_to_s
                 partitions.append({
                     "name": name,
                     "max_walltime": timelimit,
+                    # slurm's display is ambiguous ("1:00" = one MINUTE):
+                    # give agents an unambiguous number too
+                    "max_walltime_s": slurm_time_to_s(timelimit),
                     "cpus_per_node": int(cpus),
                     "mem_gb_per_node": max(1, int(mem_mb) // 1024),
                     "available": avail.lower().startswith("up"),

@@ -604,9 +604,16 @@ class Weft:
             return {"state": "FAILED", **(job["error"] or {})}
         return {"state": job["state"], "note": "not terminal yet — poll events"}
 
-    def task_cancel(self, job_id: str) -> dict:
-        self.store.audit_log("agent", "task.cancel", command=job_id)
-        return self.runner.cancel(job_id)
+    def task_cancel(self, job_id: str, why: str = "") -> dict:
+        """Cancel a job. Pass `why` — cancellations are part of the record
+        ("hung: no output for 20 min, node memory exhausted"), and the
+        cause is what makes the audit trail useful later."""
+        self.store.audit_log("agent", "task.cancel", command=job_id,
+                             why=why)
+        out = self.runner.cancel(job_id)
+        if why:
+            out["why"] = why
+        return out
 
     # -- session environments (doc 03 §7) --------------------------------------
 
@@ -907,6 +914,13 @@ class Weft:
                                  if h["ok"] is False), None)
                     if dead:
                         entry["diagnosis"] = f"chain breaks at {dead}"
+                    else:
+                        # the outage ended between the shim probe and the
+                        # hop walk — never hand back a self-contradictory
+                        # payload without saying why
+                        entry["diagnosis"] = (
+                            "every hop answers NOW: transient outage "
+                            "(likely recovered) — retry the operation")
                 checks.append(entry)
                 self.store.set_health(name, "unreachable")
         pending = self.store.nonterminal_jobs()

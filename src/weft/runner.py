@@ -403,7 +403,9 @@ class JobRunner:
             )
 
     def _plan(self, task: Task, site: str) -> dict:
-        plan: dict = {"site": site}
+        # echo the ask as understood (incl. partition): a dry_run that
+        # hides what would be submitted invites blind submissions
+        plan: dict = {"site": site, "resources": task.resources.to_dict()}
         if task.env:
             real = self.store.get_realization(task.env, site)
             plan["env"] = {

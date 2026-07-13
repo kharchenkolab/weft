@@ -151,3 +151,13 @@ which is hardlinked from the shared cache and therefore not reclaimed by
 dropping the prefix alone.
 Realized envs are the bulk of a quota; the lock that re-materializes them
 is kilobytes. Strip aggressively — `env_evict` is cheap to undo.
+
+## SSH site config schema (all keys)
+
+`host` (required; a ~/.ssh/config alias works), `root` (required: weft's
+site directory), `user`, `port`, `ssh_opts` (raw ssh flags, e.g.
+`["-i", "/path/key", "-o", "StrictHostKeyChecking=no"]`),
+`jump` (hop list, entries `"user@host:port"` — port optional),
+`pixi_source`, `pixi_unpack_source`, `shared` (cross-user root),
+`capabilities_override`, `policy`. Slurm adds `scheduler`
+({account, partition}) and `modules_init`.

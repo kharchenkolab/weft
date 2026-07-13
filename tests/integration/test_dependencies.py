@@ -82,3 +82,15 @@ def test_site_notebook_persists_operational_knowledge(w, tmp_path,
     w2 = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
     notes2 = w2.sites_describe("local")["site_notebook"]
     assert len(notes2) == 2
+
+
+def test_cancel_carries_a_cause(w):
+    """Eval finding (BUG-1): cancellation is part of the record — the
+    cause must have a channel and land in the audit trail."""
+    job = w.task_submit({"command": "sleep 60", "site": "local"})["job_id"]
+    r = w.task_cancel(job, why="hung: no output for 20 min")
+    assert r["state"] == "CANCELLED"
+    assert r["why"] == "hung: no output for 20 min"
+    tail = w.store.audit_tail(5)
+    assert any(a["action"] == "task.cancel"
+               and "no output" in (a.get("why") or "") for a in tail)
