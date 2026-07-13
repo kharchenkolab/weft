@@ -37,3 +37,16 @@ w.data_register(url, expected_sha256="ab12…")                # verify a
 `s3://`, `gs://`, `azure://` work when rclone sits next to pixi. Without an
 expected hash, hash-on-arrival is the identity (`meta.trust =
 "first-fetch"`). Ingest only — discovery and cataloging stay above weft.
+
+## Reproducibility bundles (the record that travels)
+
+`bundle_export(job_id, "result.weft.tgz")` — one file holding a finished
+result's full provenance closure: the task, every env identity (spec +
+canonical lock + native lockfile, incl. captured installer sources),
+every input blob (recursing through the jobs that produced them), and
+the recorded output refs. `bundle_import(path)` loads it into ANY
+workspace; re-running the returned task (force=True) must reproduce the
+recorded output refs — that comparison is the proof of re-derivation.
+Honest limits ride in `reproducibility`: an `escape-hatch` env re-executes
+its captured installers; `attested` modules must exist at the destination;
+`state-dependent` results replay transcripts, not derivations.

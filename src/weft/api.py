@@ -992,6 +992,21 @@ class Weft:
 
     # -- provenance -------------------------------------------------------------
 
+    def bundle_export(self, job_id: str, out_path: str) -> dict:
+        """One file that re-derives a result anywhere: the finished job's
+        provenance closure — task, env identities (specs + locks), every
+        input blob (recursing through producing jobs), recorded outputs —
+        as a tarball. The honest limits ride in `reproducibility`."""
+        from .bundle import export_bundle
+        return export_bundle(self, job_id, out_path)
+
+    def bundle_import(self, path: str) -> dict:
+        """Load a bundle into THIS workspace: envs, specs, input blobs.
+        Returns the target task ready to task_submit (force=True) — equal
+        output refs prove the re-derivation."""
+        from .bundle import import_bundle
+        return import_bundle(self, path)
+
     def provenance(self, target: str, depth: int = 5) -> dict:
         """The full "how was this produced" chain for a job or a DataRef:
         command + exact env identity (spec, locked layers, snapshot dates,
@@ -1090,6 +1105,7 @@ PUBLIC_TOOLS = [
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_result", "array_retry",
     "events_poll", "doctor", "reconcile", "provenance",
+    "bundle_export", "bundle_import",
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",
     "env_evict", "site_footprint",
     "session_start", "session_exec", "session_install", "session_snapshot",
