@@ -170,6 +170,18 @@ class Weft:
         from .capability import normalize_probe
         caps = self._apply_caps_override(normalize_probe(probe), config)
         self.store.set_capabilities(name, caps)
+        # the site needs pixi/pixi-unpack built for ITS platform; push the
+        # controller's copy when compatible, else fetch the pinned release
+        # (best-effort: bare tasks run without them; realize hints name this)
+        if hasattr(adapter, "_push_binary"):
+            from .realize import _site_platform
+            from .site_tools import ensure_site_tools
+            try:
+                tools = ensure_site_tools(adapter, _site_platform(caps))
+                self.store.emit("site.tools", site=name, **tools)
+            except Exception as e:  # never fail a registration on tooling
+                self.store.emit("site.tools", site=name,
+                                error=str(e)[:200])
         self.store.audit_log("user", "site.register", site=name)
         self.store.emit("site.registered", site=name, site_kind=kind)
         # discover byte routes to/from the other sites (best-effort: a

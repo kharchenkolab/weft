@@ -150,10 +150,12 @@ def test_scratch_purge_demotes_and_recovers(tmp_path, pixi_bin, sshd_site):
 
 
 @pytest.mark.solver
-def test_realization_purge_rebuilds(tmp_path, pixi_bin, sshd_site):
+def test_realization_purge_rebuilds(tmp_path, pixi_bin, sshd_site,
+                                    linux_platforms):
     """Purged env realization: marker gone → demote → rebuild on next task."""
     w = _mk_weft(tmp_path, pixi_bin, sshd_site)
-    env_id = w.env_ensure({"name": "tiny", "deps": {"conda": ["xz >=5"]}})["env_id"]
+    env_id = w.env_ensure({"name": "tiny", "platforms": linux_platforms,
+                           "deps": {"conda": ["xz >=5"]}})["env_id"]
     t = {"command": "xz --version > results/v.txt", "env": env_id,
          "outputs": ["results/"], "site": "beamlab"}
     r1 = w.task_submit(t)
@@ -166,10 +168,12 @@ def test_realization_purge_rebuilds(tmp_path, pixi_bin, sshd_site):
 
 
 @pytest.mark.solver
-def test_session_env_lifecycle(tmp_path, pixi_bin, sshd_site):
+def test_session_env_lifecycle(tmp_path, pixi_bin, sshd_site,
+                               linux_platforms):
     """Interactive mode: mutate a scratch clone, snapshot to a real EnvID."""
     w = _mk_weft(tmp_path, pixi_bin, sshd_site)
-    base = w.env_ensure({"name": "sess-base", "deps": {"conda": ["python =3.12"]}})
+    base = w.env_ensure({"name": "sess-base", "platforms": linux_platforms,
+                         "deps": {"conda": ["python =3.12"]}})
     env_id = base["env_id"]
     # realize the base on the site first
     r = w.task_submit({"command": "python -V > results/v.txt", "env": env_id,

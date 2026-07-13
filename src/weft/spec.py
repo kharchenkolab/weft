@@ -24,7 +24,19 @@ from .ids import spec_id
 # _libgcc_mutex) — which only bites when a full lock is fed back as pins
 _NAME_RE = re.compile(r"^\s*([A-Za-z0-9_][A-Za-z0-9._-]*)\s*(.*)$")
 
-DEFAULT_PLATFORMS = ["linux-64"]
+def current_platform() -> str:
+    """Conda subdir of the machine this code runs on (the controller)."""
+    import platform as _platform
+    arm = _platform.machine().lower() in ("arm64", "aarch64")
+    if _platform.system() == "Darwin":
+        return "osx-arm64" if arm else "osx-64"
+    return "linux-aarch64" if arm else "linux-64"
+
+
+# A spec that names no platforms follows the controller it is written on;
+# targeting a foreign-platform site is an explicit declaration (platform
+# membership is part of the EnvID — same spec + more platforms = new env).
+DEFAULT_PLATFORMS = [current_platform()]
 DEFAULT_CHANNELS = ["conda-forge"]
 
 

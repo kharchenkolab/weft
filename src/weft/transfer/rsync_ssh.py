@@ -23,6 +23,19 @@ from ..ids import hash_file
 _PROGRESS_RE = re.compile(r"^\s*([\d,]+)\s+(\d+)%")
 
 
+import functools
+
+
+@functools.lru_cache(maxsize=1)
+def _progress_flag() -> str:
+    # macOS ships openrsync, which lacks --info=progress2; --progress is
+    # the portable fallback (per-file rather than whole-transfer numbers —
+    # the same regex parses both)
+    r = subprocess.run(["rsync", "--info=progress2", "--version"],
+                       capture_output=True)
+    return "--info=progress2" if r.returncode == 0 else "--progress"
+
+
 class RsyncSSH:
     name = "rsync-ssh"
 
@@ -47,7 +60,7 @@ class RsyncSSH:
         import pty
         master, slave = pty.openpty()
         proc = subprocess.Popen(
-            ["rsync", "--info=progress2", *self.extra_args, *args],
+            ["rsync", _progress_flag(), *self.extra_args, *args],
             stdout=slave, stderr=subprocess.PIPE,
         )
         os.close(slave)

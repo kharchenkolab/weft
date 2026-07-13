@@ -86,7 +86,8 @@ def test_never_ready_times_out_with_log(w):
 
 
 @pytest.mark.docker
-def test_service_tunnel_over_ssh(tmp_path, pixi_bin, sshd_site):
+def test_service_tunnel_over_ssh(tmp_path, pixi_bin, sshd_site,
+                                 linux_platforms):
     """The endpoint lives on the remote site, loopback-only; we reach it
     exclusively through the tunnel."""
     w = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
@@ -94,7 +95,8 @@ def test_service_tunnel_over_ssh(tmp_path, pixi_bin, sshd_site):
         "host": sshd_site["host"], "port": sshd_site["port"],
         "user": sshd_site["user"], "ssh_opts": sshd_site["ssh_opts"],
         "root": sshd_site["root"], "pixi_source": pixi_bin})
-    env = w.env_ensure({"name": "svc-py", "deps": {"conda": ["python =3.12"]}})
+    env = w.env_ensure({"name": "svc-py", "platforms": linux_platforms,
+                        "deps": {"conda": ["python =3.12"]}})
     assert "env_id" in env, env
     r0 = w.task_submit({"command": "true", "env": env["env_id"],
                         "site": "beamlab"})

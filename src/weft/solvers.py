@@ -118,9 +118,10 @@ class CranSolver:
         if marker.exists():
             return manifest
         self.home.mkdir(parents=True, exist_ok=True)
+        from .spec import current_platform
         manifest.write_text(
             '[workspace]\nname = "weft-cran-solver"\n'
-            'channels = ["conda-forge"]\nplatforms = ["linux-64"]\n\n'
+            f'channels = ["conda-forge"]\nplatforms = ["{current_platform()}"]\n\n'
             '[dependencies]\nr-base = "*"\n'
         )
         r = subprocess.run(
@@ -507,7 +508,7 @@ class CranSolver:
              # toolchain and the parent prefix embedded in its rpath
              "toolchain_lock": pack_tools.get("toolchain_fingerprint"),
              "parent_prefix": pack_tools.get("parent_prefix")},
-            parent_env_id, "linux-64")
+            parent_env_id, pack_tools.get("site_platform") or "linux-64")
         hit = cached_build(store, key) if store is not None else None
         adapter.run_cmd(f"mkdir -p {shlex.quote(rlib)}")
         if hit and cas is not None:
@@ -726,9 +727,10 @@ class JuliaSolver:
         if (self.home / ".ready").exists():
             return manifest
         self.home.mkdir(parents=True, exist_ok=True)
+        from .spec import current_platform
         manifest.write_text(
             '[workspace]\nname = "weft-julia-solver"\n'
-            'channels = ["conda-forge"]\nplatforms = ["linux-64"]\n\n'
+            f'channels = ["conda-forge"]\nplatforms = ["{current_platform()}"]\n\n'
             '[dependencies]\njulia = "*"\n')
         r = subprocess.run(
             [self.pixi_bin, "install", "--manifest-path", str(manifest)],

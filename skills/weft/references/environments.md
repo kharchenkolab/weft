@@ -11,7 +11,11 @@ with `env.unsatisfiable_on_site` (bare tasks still run).
 ```python
 w.env_ensure({
   "name": "hep-fit",
-  "platforms": ["linux-64"],           # add osx-arm64 for the laptop
+  "platforms": ["linux-64"],           # omitted → the controller's own
+                                       # platform; declare explicitly to
+                                       # target foreign-platform sites
+                                       # (else env.platform_mismatch names
+                                       # the missing one)
   "deps": {"conda": ["python =3.12", "root >=6.32"], "pypi": ["zfit ==0.24.*"]},
   "variants": {"linux-64": {"conda": ["cuda-version <=12.4", "cupy"]}},
   "modules": ["espresso/7.2"],         # site-provided software (check first:

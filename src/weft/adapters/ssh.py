@@ -24,14 +24,19 @@ from ..errors import WeftError
 from .base import ShimResult, SiteAdapter
 
 SHIM_SRC = Path(__file__).resolve().parent.parent / "shim" / "weft-shim"
-BOOTSTRAP_VERSION = 2  # v2: CA bundle pushed for cert-less sites
+BOOTSTRAP_VERSION = 3  # v3: CA bundle found on darwin controllers too
 
 
+import functools
+
+
+@functools.lru_cache(maxsize=1)
 def _controller_ca_bundle() -> Path | None:
     for cand in (
         os.environ.get("SSL_CERT_FILE", ""),
         "/etc/ssl/certs/ca-certificates.crt",
         "/etc/pki/tls/cert.pem",
+        "/etc/ssl/cert.pem",  # macOS (and BSDs) ship a PEM bundle here
     ):
         if cand and Path(cand).is_file():
             return Path(cand)
@@ -219,13 +224,19 @@ class SSHAdapter(SiteAdapter):
 
     def _env_prefix(self) -> str:
         # shared roots: everything created must be group-usable
+        # sites without a system CA store (minimal images) break every
+        # TLS-using tool; the bootstrap pushes the controller's bundle.
+        # Only point at it when the controller actually HAD one to push —
+        # an SSL_CERT_FILE aimed at a never-pushed path breaks TLS harder
+        # than no bundle at all (found via a darwin controller: no PEM,
+        # nothing pushed, every remote https "failed" instantly).
+        ca = (f"SSL_CERT_FILE={shlex.quote(self.path('etc/cacert.pem'))} "
+              if _controller_ca_bundle() is not None else "")
         return (("umask 002; " if self.shared else "") +
             f"WEFT_ROOT={shlex.quote(self.root)} "
             f"PIXI_CACHE_DIR={shlex.quote(self.path('cache/pixi'))} "
             f"PIXI_HOME={shlex.quote(self.path('pixi-home'))} "
-            # sites without a system CA store (minimal images) break every
-            # TLS-using tool; the bootstrap pushes the controller's bundle
-            f"SSL_CERT_FILE={shlex.quote(self.path('etc/cacert.pem'))} "
+            + ca +
             f"PATH={shlex.quote(self.path('bin'))}:$PATH "
         )
 

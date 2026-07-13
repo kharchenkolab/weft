@@ -1,7 +1,7 @@
 [workspace]
 name = "weft"
 channels = ["conda-forge"]
-platforms = ["linux-64"]
+platforms = ["linux-64", "osx-arm64"]
 
 [dependencies]
 python = "3.12.*"

@@ -29,11 +29,14 @@ def weft(tmp_path, pixi_bin):
 
 def test_recovers_from_oom_by_right_sizing(weft):
     agent = ScriptedAgent(weft)
-    # the job's own limit scales with the ask, so a bigger ask really helps
+    # a genuine MemoryError gated on the ask: a bigger ask really helps.
+    # (Simulated, portably: rlimits are not modifiable on macOS; real
+    # kernel kills are covered in the docker/slurm lanes.)
     out = agent.run({
-        "command": "ulimit -v $((WEFT_MEM_GB * 1048576)); "
-                   "python3 -c 'x = bytearray(1500*1024*1024); print(len(x))' "
-                   "> results/alloc.txt",
+        "command": "python3 -c 'import os\n"
+                   "if float(os.environ[\"WEFT_MEM_GB\"]) < 2:\n"
+                   "    raise MemoryError(\"needs ~1.5 GB\")\n"
+                   "print(1572864000)' > results/alloc.txt",
         "outputs": ["results/"],
         "resources": {"mem_gb": 1},
         "site": "local",
@@ -113,8 +116,9 @@ def test_scorecard(weft):
     """Aggregate recovery-rate metric over the local scenarios (doc 06 §3)."""
     agent = ScriptedAgent(weft)
     scenarios = [
-        {"command": "ulimit -v $((WEFT_MEM_GB * 1048576)); "
-                    "python3 -c 'x = bytearray(1500*1024*1024)'",
+        {"command": "python3 -c 'import os\n"
+                    "if float(os.environ[\"WEFT_MEM_GB\"]) < 2:\n"
+                    "    raise MemoryError(\"needs ~1.5 GB\")'",
          "resources": {"mem_gb": 1}, "site": "local"},
         {"command": "sleep 5; true", "resources": {"walltime": "00:00:02"},
          "site": "local"},

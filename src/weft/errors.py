@@ -19,6 +19,7 @@ CODES = {
     "env.realize_failed": "environment build/unpack failed on site",
     "env.not_realized": "environment exists but is not realized on this site yet; realize it (run a task with it) first",
     "env.unsatisfiable_on_site": "spec needs something this site lacks; hints list alternative sites",
+    "env.platform_mismatch": "environment locked for platforms that do not include this site's; hints name both and the spec fix",
     "env.evict_blocked": "overlay environments stack on this prefix; hints name them and the cascade lever",
     "data.transfer_failed": "bulk transfer failed; hints say whether resumable",
     "data.verify_failed": "content hash mismatch after transfer or at use",

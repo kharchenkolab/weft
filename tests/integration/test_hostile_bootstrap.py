@@ -66,7 +66,8 @@ def _weft_for(tmp_path, pixi_bin, box, site_name) -> Weft:
 
 
 @pytest.mark.solver
-def test_rocky8_old_glibc_full_path(tmp_path, pixi_bin, hostile_keys):
+def test_rocky8_old_glibc_full_path(tmp_path, pixi_bin, hostile_keys,
+                                    linux_platforms):
     """RHEL8-era node (glibc 2.28): bootstrap, realize, run — the common
     'old OS on the cluster' case must just work."""
     box = _boot("weft-test-rocky8", hostile_keys)
@@ -74,7 +75,8 @@ def test_rocky8_old_glibc_full_path(tmp_path, pixi_bin, hostile_keys):
         w = _weft_for(tmp_path, pixi_bin, box, "rocky")
         caps = w.sites_describe("rocky")["capabilities"]
         assert caps["glibc"].startswith("2.28")
-        env = w.env_ensure({"name": "r8", "deps": {"conda": ["xz >=5"]}})
+        env = w.env_ensure({"name": "r8", "platforms": linux_platforms,
+                            "deps": {"conda": ["xz >=5"]}})
         r = w.task_submit({"command": "xz --version > results/v.txt",
                            "env": env["env_id"], "outputs": ["results/"],
                            "site": "rocky"})
@@ -126,13 +128,15 @@ def test_bare_debian_no_tools(tmp_path, pixi_bin, hostile_keys):
 
 
 @pytest.mark.solver
-def test_bare_debian_packed_env(tmp_path, pixi_bin, hostile_keys):
+def test_bare_debian_packed_env(tmp_path, pixi_bin, hostile_keys,
+                                linux_platforms):
     """internet=False on the box → strategy picks packed; the archive rides
     ssh-pipe; the env works with zero site-side network."""
     box = _boot("weft-test-bare", hostile_keys)
     try:
         w = _weft_for(tmp_path, pixi_bin, box, "bare2")
-        env = w.env_ensure({"name": "bare-packed", "deps": {"conda": ["xz >=5"]}})
+        env = w.env_ensure({"name": "bare-packed", "platforms": linux_platforms,
+                            "deps": {"conda": ["xz >=5"]}})
         r = w.task_submit({"command": "xz --version > results/v.txt",
                            "env": env["env_id"], "outputs": ["results/"],
                            "site": "bare2"})
@@ -148,7 +152,8 @@ def test_bare_debian_packed_env(tmp_path, pixi_bin, hostile_keys):
 
 @pytest.mark.solver
 def test_musl_box_fails_with_cause_but_runs_bare_tasks(tmp_path, pixi_bin,
-                                                       hostile_keys):
+                                                       hostile_keys,
+                                                       linux_platforms):
     """Alpine/musl: realized envs are impossible — the agent must get
     env.unsatisfiable_on_site naming musl, not a cryptic loader error.
     Env-less tasks still work (busybox userland is enough for the shim)."""
@@ -166,7 +171,8 @@ def test_musl_box_fails_with_cause_but_runs_bare_tasks(tmp_path, pixi_bin,
         assert job["state"] == "DONE", job["error"]
 
         # env tasks: structured refusal with remediation
-        env = w.env_ensure({"name": "nope", "deps": {"conda": ["xz >=5"]}})
+        env = w.env_ensure({"name": "nope", "platforms": linux_platforms,
+                            "deps": {"conda": ["xz >=5"]}})
         r2 = w.task_submit({"command": "xz --version", "env": env["env_id"],
                             "site": "musl"})
         job2 = w.runner.wait(r2["job_id"], 300)

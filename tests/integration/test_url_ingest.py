@@ -56,7 +56,9 @@ def test_url_ingest_to_workspace(w, http_source):
     job = w.runner.wait(t["job_id"], 120)
     out = next(o for o in job["manifest"]["outputs"]
                if o["path"] == "results/n.txt")
-    assert out["preview"]["lines"] == [str(http_source["bytes"])]
+    # BSD wc pads with leading spaces, GNU does not
+    assert [ln.strip() for ln in out["preview"]["lines"]] \
+        == [str(http_source["bytes"])]
 
 
 def test_url_ingest_site_direct(w, http_source):

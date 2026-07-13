@@ -48,7 +48,8 @@ def test_submit_produces_manifest_and_provenance(weft, tmp_path):
     assert fit["preview"]["kind"] == "inline-json"
     assert fit["preview"]["value"]["peak"] == 42.0
     count = next(o for o in m["outputs"] if o["path"] == "results/count.txt")
-    assert count["preview"]["lines"] == ["101"]  # 100 rows + header
+    # 100 rows + header; BSD wc pads with leading spaces, GNU does not
+    assert [ln.strip() for ln in count["preview"]["lines"]] == ["101"]
 
 
 def test_memoization_and_force(weft, tmp_path):
@@ -118,8 +119,9 @@ def test_oom_classified_with_sizing_hints(weft):
     """A memory kill must come back as job.oom with the observed-vs-asked
     numbers the agent needs to right-size the resubmission (doc 05 §3)."""
     r = weft.task_submit({
-        "command": "ulimit -v 262144; "
-                   "python3 -c 'x = bytearray(1024*1024*1024)'",
+        # an impossible allocation raises MemoryError on every platform
+        # (rlimits are not modifiable on macOS, so no ulimit scaffolding)
+        "command": "python3 -c 'x = bytearray(2**62)'",
         "resources": {"mem_gb": 1},
         "site": "local",
     })

@@ -26,6 +26,18 @@ def pixi_bin() -> str:
 
 
 @pytest.fixture(scope="session")
+def linux_platforms() -> list[str]:
+    """Conda subdir of the linux the docker fixtures actually run:
+    containers are host-native (x86_64 on linux CI, aarch64 under
+    OrbStack/Apple silicon). Specs targeting fixture sites must declare
+    it — the default follows the CONTROLLER's platform, which on a mac
+    is not linux at all."""
+    import platform as _plat
+    arm = _plat.machine().lower() in ("arm64", "aarch64")
+    return ["linux-aarch64" if arm else "linux-64"]
+
+
+@pytest.fixture(scope="session")
 def docker_available() -> bool:
     if os.system("docker info >/dev/null 2>&1") != 0:
         pytest.skip("docker not available")

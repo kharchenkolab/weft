@@ -91,6 +91,27 @@ def ensure_realization(
                               "for anything needing a realized environment",
             },
         )
+    site_plat = _site_platform(caps)
+    lock_plats = list(env_row["canonical"].get("platforms") or {})
+    if lock_plats and site_plat not in lock_plats:
+        raise WeftError(
+            "env.platform_mismatch",
+            f"env is locked for {lock_plats} but site {adapter.name} "
+            f"is {site_plat}",
+            stage="realize",
+            hints={
+                "site": adapter.name,
+                "site_platform": site_plat,
+                "locked_platforms": lock_plats,
+                "suggestion": "add the site's platform to the spec's "
+                              "'platforms' and env_ensure again (platform "
+                              "membership is identity: this yields a new "
+                              "EnvID, solved for both)",
+            },
+        )
+    # solvers that compile on site key their build caches on the platform
+    pack_tools = {**(pack_tools or {}), "site_platform": site_plat}
+
     extras = env_row["canonical"]["extras"]
     modules = extras.get("modules") or []
     strategy = select_strategy(

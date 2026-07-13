@@ -85,11 +85,11 @@ def test_chain_heals_after_bastion_restart(w, bastion_chain):
     assert last and last["state"] == "DONE", last
 
 
-def test_service_tunnel_self_heals(w, bastion_chain):
+def test_service_tunnel_self_heals(w, bastion_chain, linux_platforms):
     """A service endpoint through the chain survives a tunnel drop: the
     next status() re-establishes and says so. (The env realizes through
     the hop too — the target has internet OUT, just no reachability IN.)"""
-    env = w.env_ensure({"name": "srv",
+    env = w.env_ensure({"name": "srv", "platforms": linux_platforms,
                         "deps": {"conda": ["python =3.12"]}})["env_id"]
     r = w.service_start("inner", {
         "command": "python -m http.server $WEFT_PORT --bind 127.0.0.1",

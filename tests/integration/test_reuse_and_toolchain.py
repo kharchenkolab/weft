@@ -47,9 +47,11 @@ def _mk(tmp_path, pixi_bin, sshd_site, sub, root=None):
 TINY = {"name": "reuse-tiny", "deps": {"conda": ["xz >=5"]}}
 
 
-def test_cross_workspace_realization_readoption(tmp_path, pixi_bin, sshd_site):
+def test_cross_workspace_realization_readoption(tmp_path, pixi_bin, sshd_site,
+                                                linux_platforms):
     w1 = _mk(tmp_path, pixi_bin, sshd_site, "ws1")
-    env1 = w1.env_ensure(TINY)["env_id"]
+    tiny = {**TINY, "platforms": linux_platforms}
+    env1 = w1.env_ensure(tiny)["env_id"]
     r1 = w1.task_submit({"command": "xz --version > results/v.txt", "env": env1,
                          "outputs": ["results/"], "site": "beamlab"})
     assert w1.runner.wait(r1["job_id"], 600)["state"] == "DONE"
@@ -60,7 +62,7 @@ def test_cross_workspace_realization_readoption(tmp_path, pixi_bin, sshd_site):
     # a different project on the same laptop, same site: fresh store,
     # re-solves the same spec to the same EnvID, re-adopts the realization
     w2 = _mk(tmp_path, pixi_bin, sshd_site, "ws2")
-    env2 = w2.env_ensure(TINY)["env_id"]
+    env2 = w2.env_ensure(tiny)["env_id"]
     assert env2 == env1  # deterministic solve from cached repodata
     r2 = w2.task_submit({"command": "xz --help > results/h.txt", "env": env2,
                          "outputs": ["results/"], "site": "beamlab"})
@@ -73,15 +75,18 @@ def test_cross_workspace_realization_readoption(tmp_path, pixi_bin, sshd_site):
     assert real["state"] == "ready"
 
 
-def test_equivalent_specs_share_envid(tmp_path, pixi_bin, sshd_site):
+def test_equivalent_specs_share_envid(tmp_path, pixi_bin, sshd_site,
+                                      linux_platforms):
     w = _mk(tmp_path, pixi_bin, sshd_site, "ws3")
-    a = w.env_ensure({"name": "a", "deps": {"conda": ["xz >=5", "zlib"]}})
-    b = w.env_ensure({"name": "b-different-label",
+    a = w.env_ensure({"name": "a", "platforms": linux_platforms,
+                      "deps": {"conda": ["xz >=5", "zlib"]}})
+    b = w.env_ensure({"name": "b-different-label", "platforms": linux_platforms,
                       "deps": {"conda": ["zlib", "xz >=5"]}})  # order differs
     assert a["env_id"] == b["env_id"]
 
 
-def test_userspace_toolchain_compile_and_chain(tmp_path, pixi_bin, sshd_site):
+def test_userspace_toolchain_compile_and_chain(tmp_path, pixi_bin, sshd_site,
+                                               linux_platforms):
     w = _mk(tmp_path, pixi_bin, sshd_site, "ws4")
     # the site image ships no compiler at all
     chk = w.site_exec("beamlab", "command -v g++ cc gcc || echo NO-COMPILER",
@@ -95,6 +100,7 @@ def test_userspace_toolchain_compile_and_chain(tmp_path, pixi_bin, sshd_site):
 
     toolchain = w.env_ensure({
         "name": "cxx-toolchain",
+        "platforms": linux_platforms,
         "deps": {"conda": ["cxx-compiler", "make"]},
     })
     assert "env_id" in toolchain, toolchain

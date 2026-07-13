@@ -119,6 +119,7 @@ Read the code, use the hints:
 | `job.nonzero_exit` | `log_signature` + `log_tail` → fix the actual bug |
 | `data.verify_failed` | locations demoted → resubmit re-transfers |
 | `env.unsatisfiable_on_site` | alternative sites → re-place |
+| `env.platform_mismatch` | `locked_platforms` vs `site_platform` → add the site's platform to the spec, re-ensure (new EnvID) |
 
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 

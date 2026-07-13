@@ -5,9 +5,18 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=2
+WEFT_SHIM_VERSION=3
 
 json_bool() { if [ "$1" = "0" ]; then echo true; else echo false; fi; }
+
+# sha256sum is coreutils; BSD/macOS ships shasum (perl) instead
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
 
 cmd_probe() {
     set +e   # a probe must survive whatever it finds; fallbacks are explicit
@@ -16,19 +25,24 @@ cmd_probe() {
     host=$(hostname 2>/dev/null || echo unknown)
     cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
     mem_kb=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    [ "${mem_kb:-0}" -gt 0 ] || mem_kb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 ))
     mem_gb=$((mem_kb / 1048576))
     root="${WEFT_ROOT:-$HOME/.weft}"
     free_kb=$(df -Pk "$(dirname "$root")" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
     free_gb=$((free_kb / 1048576))
-    if command -v curl >/dev/null 2>&1; then
-        if curl -fsm 5 -o /dev/null https://conda.anaconda.org 2>/dev/null
-        then net=0; else net=1; fi
-    elif command -v wget >/dev/null 2>&1; then
-        if wget -q -T 5 -O /dev/null https://conda.anaconda.org 2>/dev/null
-        then net=0; else net=1; fi
-    else
-        net=1
-    fi
+    net_check() {
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsm "$1" -o /dev/null https://conda.anaconda.org 2>/dev/null
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q -T "$1" -O /dev/null https://conda.anaconda.org 2>/dev/null
+        else
+            return 1
+        fi
+    }
+    # one retry with a longer window: first-connection latency on a cold
+    # host (VM network warm-up, slow first DNS) must not mislabel a
+    # networked site as air-gapped for the life of its capability record
+    if net_check 5 || net_check 8; then net=0; else net=1; fi
     apptainer_v=$(apptainer --version 2>/dev/null | awk '{print $NF}' || true)
     docker_ok=1; command -v docker >/dev/null 2>&1 && docker_ok=0
     sched=none
@@ -46,6 +60,12 @@ cmd_probe() {
     gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort | uniq -c \
         | awk '{n=$1; $1=""; sub(/^ /,""); printf "%s{\"model\":\"%s\",\"count\":%d}", sep, $0, n; sep=","}' || true)
     cuda_driver=$(nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9.]*' | awk '{print $3}' | head -1 || true)
+    if [ -z "$gpus" ] && [ "$os" = "darwin" ] && [ "$arch" = "arm64" ]; then
+        # Apple silicon: the integrated GPU is real and MPS-usable; the
+        # model string says which backend so nobody mistakes it for CUDA
+        chip=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple silicon")
+        gpus="{\"model\":\"$chip (Metal/MPS)\",\"count\":1}"
+    fi
     # storage candidates: where could data/scratch live on this machine?
     # (existence, writability, free space; merged under user policy
     # controller-side — policy always wins, this only fills gaps)
@@ -86,11 +106,23 @@ cmd_run() {
     [ -n "$jobdir" ] && [ -f "$jobdir/cmd.sh" ] || { echo "run: need --dir with cmd.sh" >&2; exit 2; }
     jobdir=$(cd "$jobdir" && pwd)
     timer=""
-    command -v /usr/bin/time >/dev/null 2>&1 && /usr/bin/time -v true 2>/dev/null && timer="/usr/bin/time -v -o $jobdir/rusage"
+    if command -v /usr/bin/time >/dev/null 2>&1; then
+        if /usr/bin/time -v true 2>/dev/null; then
+            timer="/usr/bin/time -v -o $jobdir/rusage"       # GNU: rss in kbytes
+        elif /usr/bin/time -l -o /dev/null true 2>/dev/null; then
+            timer="/usr/bin/time -l -o $jobdir/rusage"       # BSD: rss in bytes
+        fi
+    fi
     # backgrounding under a non-interactive shell leaves SIGINT ignored and
     # exec inherits that — interpreters would be un-interruptible. Reset it.
     sigreset=""
     env --default-signal=INT true 2>/dev/null && sigreset="env --default-signal=INT,HUP"
+    if [ -z "$sigreset" ] && command -v perl >/dev/null 2>&1; then
+        # BSD env has no --default-signal; perl resets INT/HUP for the
+        # command subtree only (the runner must keep ignoring INT, or a
+        # group interrupt would kill it before it writes the exit record)
+        sigreset="perl -e '\$SIG{INT}=\"DEFAULT\"; \$SIG{HUP}=\"DEFAULT\"; exec @ARGV or die' --"
+    fi
     cat > "$jobdir/runner.sh" <<EOF
 #!/bin/sh
 # conda activation hooks may contain bashisms — prefer bash when present
@@ -109,7 +141,22 @@ echo "\$rc" > exit_code.tmp && mv exit_code.tmp exit_code
 EOF
     chmod +x "$jobdir/runner.sh"
     : > "$jobdir/log"
-    nohup setsid sh "$jobdir/runner.sh" </dev/null >/dev/null 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+        nohup setsid sh "$jobdir/runner.sh" </dev/null >/dev/null 2>&1 &
+    elif command -v perl >/dev/null 2>&1; then
+        # no setsid(1) (macOS/BSD): perl's POSIX::setsid still gives the
+        # runner its own session+pgid so cancel/interrupt group-kill -pid.
+        # Signals are NOT reset here: the runner must keep INT ignored
+        # (as under linux backgrounding) to survive a group interrupt and
+        # write the exit record; $sigreset handles the command subtree.
+        nohup perl -MPOSIX -e \
+            'POSIX::setsid(); exec "sh", @ARGV or die' \
+            "$jobdir/runner.sh" </dev/null >/dev/null 2>&1 &
+    else
+        # last resort: survives the session, but cancel's group-kill
+        # degrades to the runner process only
+        nohup sh "$jobdir/runner.sh" </dev/null >/dev/null 2>&1 &
+    fi
     echo $! > "$jobdir/pid"
     echo "{\"started\": true, \"pid\": $(cat "$jobdir/pid")}"
 }
@@ -145,7 +192,10 @@ status_of() {
     if [ -f "$jobdir/exit_code" ]; then
         rc=$(cat "$jobdir/exit_code")
         wall=$(cat "$jobdir/wall_s" 2>/dev/null || echo 0)
-        rss_kb=$(awk -F': ' '/Maximum resident set/{print $2}' "$jobdir/rusage" 2>/dev/null || echo 0)
+        # GNU time -v: "Maximum resident set size (kbytes): N" (N last);
+        # BSD time -l: "N  maximum resident set size" (bytes first)
+        rss_kb=$(awk '/[Mm]aximum resident set/{if ($NF ~ /^[0-9]+$/) print $NF; else print int($1/1024)}' \
+                 "$jobdir/rusage" 2>/dev/null || echo 0)
         echo "{\"state\": \"exited\", \"exit_code\": $rc, \"wall_s\": $wall, \"max_rss_kb\": ${rss_kb:-0}}"
         return
     fi
@@ -255,7 +305,7 @@ cmd_hash_tree() {
         else
             x=0; [ -x "$full" ] && x=1
             sz=$(wc -c < "$full" | tr -d ' ')
-            h=$(sha256sum "$full" | awk '{print $1}')
+            h=$(sha256_of "$full")
             printf 'file\t%s\t%s\t%s\t%s\n' "$p" "$x" "$sz" "$h"
         fi
     done
@@ -332,7 +382,7 @@ cmd_unpack_verify() {
             *) echo "unpack-verify: unknown arg $1" >&2; exit 2;;
         esac
     done
-    got=$(sha256sum "$archive" | awk '{print $1}')
+    got=$(sha256_of "$archive")
     if [ "$got" != "$sha" ]; then
         echo "{\"ok\": false, \"error\": \"hash mismatch\", \"expected\": \"$sha\", \"got\": \"$got\"}"
         exit 4
@@ -348,12 +398,21 @@ cmd_unpack_verify() {
 # load: what is realistically available right now (cheap; poll-safe)
 cmd_load() {
     set +e
-    cpus=$(nproc 2>/dev/null || echo 1)
+    cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
     l1=0; l5=0; l15=0
     if [ -r /proc/loadavg ]; then
         read -r l1 l5 l15 _ < /proc/loadavg
+    else
+        # darwin/BSD: vm.loadavg prints "{ 1.80 2.11 2.15 }"
+        set -- $(sysctl -n vm.loadavg 2>/dev/null | tr -d '{}')
+        [ $# -ge 3 ] && { l1=$1; l5=$2; l15=$3; }
     fi
     mem_avail_kb=$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    if [ "${mem_avail_kb:-0}" -eq 0 ] && command -v vm_stat >/dev/null 2>&1; then
+        # darwin: free + inactive + purgeable pages approximate "available"
+        mem_avail_kb=$(vm_stat 2>/dev/null | awk -v ps="$(sysctl -n hw.pagesize 2>/dev/null || echo 4096)" \
+            '/Pages free|Pages inactive|Pages purgeable/{gsub("\\.","",$NF); t+=$NF} END{print int(t*ps/1024)}')
+    fi
     users=$(who 2>/dev/null | wc -l | tr -d ' ')
     # GPUs are often the limiting factor: report live utilization + memory
     gpu_load=$(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total \

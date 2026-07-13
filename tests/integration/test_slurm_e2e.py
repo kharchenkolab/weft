@@ -133,7 +133,7 @@ def test_cancel_queued_or_running(weft_slurm):
 
 
 @pytest.mark.solver
-def test_module_spec_realizes_and_loads(weft_slurm):
+def test_module_spec_realizes_and_loads(weft_slurm, linux_platforms):
     """S4: spec declares a site module; activation loads it; the task sees
     the module's environment (mock espresso/7.2 modulefile)."""
     chk = weft_slurm.module_check("hpc", ["espresso/7.2", "nonexistent/9.9"])
@@ -142,6 +142,7 @@ def test_module_spec_realizes_and_loads(weft_slurm):
 
     env = weft_slurm.env_ensure({
         "name": "dft-post",
+        "platforms": linux_platforms,
         "deps": {"conda": ["xz >=5"]},
         "modules": ["espresso/7.2"],
     })
@@ -166,9 +167,10 @@ def test_module_spec_realizes_and_loads(weft_slurm):
 
 
 @pytest.mark.solver
-def test_missing_module_unsatisfiable_hint(weft_slurm):
+def test_missing_module_unsatisfiable_hint(weft_slurm, linux_platforms):
     env = weft_slurm.env_ensure({
         "name": "needs-missing-module",
+        "platforms": linux_platforms,
         "deps": {"conda": ["xz >=5"]},
         "modules": ["cray-mpich/8.1"],   # not on this "cluster"
     })
@@ -190,7 +192,8 @@ def test_missing_module_unsatisfiable_hint(weft_slurm):
 
 @pytest.mark.solver
 @pytest.mark.slow
-def test_packed_realization_for_airgapped_compute(tmp_path, pixi_bin, slurm_site):
+def test_packed_realization_for_airgapped_compute(tmp_path, pixi_bin,
+                                                  slurm_site, linux_platforms):
     """Compute nodes with no internet (simulated via capabilities_override):
     the strategy selector picks `packed`; pixi-pack builds locally, the
     archive rides the data plane, unpack happens site-side with no network."""
@@ -203,7 +206,8 @@ def test_packed_realization_for_airgapped_compute(tmp_path, pixi_bin, slurm_site
         "capabilities_override": {"internet": False,
                                   "runtimes": {"apptainer": "", "docker": False}},
     })
-    env = w.env_ensure({"name": "packed-env", "deps": {"conda": ["xz >=5"]}})
+    env = w.env_ensure({"name": "packed-env", "platforms": linux_platforms,
+                        "deps": {"conda": ["xz >=5"]}})
     assert "env_id" in env, env
     r = w.task_submit({
         "command": "xz --version > results/v.txt",

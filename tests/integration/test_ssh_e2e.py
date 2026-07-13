@@ -26,7 +26,11 @@ def test_bootstrap_and_probe(weft_ssh):
     beamlab = next(s for s in sites if s["name"] == "beamlab")
     assert beamlab["scheduler"] == "none"
     caps = weft_ssh.sites_describe("beamlab")["capabilities"]
-    assert caps["os"] == "linux" and caps["arch"] == "x86_64"
+    # containers run the host's native arch (x86_64 on linux CI,
+    # aarch64 under OrbStack/Apple silicon)
+    import platform as _plat
+    native = {"arm64": "aarch64"}.get(_plat.machine(), _plat.machine())
+    assert caps["os"] == "linux" and caps["arch"] == native
     assert caps["internet"] is True  # docker bridge has NAT
     # bootstrap is idempotent and cheap the second time
     t0 = time.time()
@@ -93,9 +97,10 @@ def test_fetch_output_back(weft_ssh):
 
 
 @pytest.mark.solver
-def test_remote_prefix_realization(weft_ssh):
+def test_remote_prefix_realization(weft_ssh, linux_platforms):
     """A tiny real env realized over SSH inside the container."""
     ensured = weft_ssh.env_ensure({"name": "tiny-remote",
+                                   "platforms": linux_platforms,
                                    "deps": {"conda": ["xz >=5"]}})
     assert "env_id" in ensured, ensured
     r = weft_ssh.task_submit({
