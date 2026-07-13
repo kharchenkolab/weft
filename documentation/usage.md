@@ -142,9 +142,12 @@ w.register_site("inner", "ssh", {
     "pixi_source": ".env/bin/pixi",
 })
 
-# Slurm cluster through its login node
+# Slurm cluster through its login node. ro_roots: admin-owned base envs
+# are ADOPTED in place (read-only, verified, zero user disk); your own
+# builds and extends_env overlays land in your root
 w.register_site("hpc", "slurm", {
     "host": "login.hpc.example.edu", "root": "/scratch/me/.weft",
+    "ro_roots": ["/opt/team/weft-base"],
     "pixi_source": ".env/bin/pixi",
     "scheduler": {"account": "phys-lab", "partition": None},
     "modules_init": "export MODULEPATH=/opt/site-modules",  # site quirk knob
