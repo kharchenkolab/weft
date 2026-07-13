@@ -50,8 +50,9 @@ cmd_probe() {
     # (existence, writability, free space; merged under user policy
     # controller-side — policy always wins, this only fills gaps)
     cands=""; csep=""
-    for d in "$HOME" /scratch "/scratch/$USER" "/lscratch/$USER" /tmp \
-             /dev/shm "/work/$USER"; do
+    uname_="${USER:-$(id -un 2>/dev/null || echo unknown)}"
+    for d in "${HOME:-/tmp}" /scratch "/scratch/$uname_" \
+             "/lscratch/$uname_" /tmp /dev/shm "/work/$uname_"; do
         [ -d "$d" ] || continue
         wr=1; [ -w "$d" ] && wr=0
         cfree=$(df -Pk "$d" 2>/dev/null | awk 'NR==2{print int($4/1048576)}')
