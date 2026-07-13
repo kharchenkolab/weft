@@ -172,6 +172,16 @@ class Weft:
         self.store.set_capabilities(name, caps)
         self.store.audit_log("user", "site.register", site=name)
         self.store.emit("site.registered", site=name, site_kind=kind)
+        # discover byte routes to/from the other sites (best-effort: a
+        # failed probe never fails a registration)
+        for other in list(self.adapters):
+            if other == name:
+                continue
+            for s, d in ((other, name), (name, other)):
+                try:
+                    self.site_route_probe(s, d)
+                except Exception:
+                    pass
         return {"site": name, "capabilities": caps}
 
     def sites_list(self) -> list[dict]:
@@ -200,7 +210,70 @@ class Weft:
         notes = self.store.site_notes(name)
         if notes:
             row = {**row, "site_notebook": notes}
+        routes = self.store.routes_for(name)
+        if routes:
+            row = {**row, "routes": [
+                {"src": r["src"], "dst": r["dst"],
+                 "via": "shared-fs" if r["shared_fs_path"]
+                 else ("direct-ssh" if r["direct_ssh"] else "controller")}
+                for r in routes]}
         return row
+
+    def site_route_probe(self, src: str, dst: str) -> dict:
+        """Discover how bytes can move src→dst WITHOUT the controller in
+        the middle: (a) shared filesystem — a nonce written under src's
+        root visible from dst at the same path (group NFS, cluster
+        scratch); (b) direct ssh — dst can already reach src with its own
+        keys (weft brokers no identity; this only DISCOVERS what the
+        user's existing config permits). Recorded per (src, dst); staging
+        plans route accordingly, controller detour as fallback."""
+        import uuid as _uuid
+        if src == dst:
+            raise WeftError("task.invalid", "src and dst are the same site",
+                            stage="infra")
+        a, b = self._adapter(src), self._adapter(dst)
+        shared_fs_path = None
+        nonce = f".weft-fsprobe-{_uuid.uuid4().hex[:12]}"
+        try:
+            a.write_file(nonce, b"weft route probe\n")
+            if hasattr(b, "file_exists") and \
+                    b.file_exists(f"{a.root}/{nonce}"):
+                shared_fs_path = str(a.root)
+        finally:
+            a.run_cmd(f"rm -f {shlex.quote(a.path(nonce))} 2>/dev/null; true")
+        direct_ssh, src_addr = False, ""
+        if shared_fs_path is None and hasattr(a, "destination"):
+            # how PEERS reach src may differ from how the controller does
+            # (NAT, port maps): peer_host/peer_port override in site config
+            cfg = (self.store.get_site(src) or {}).get("config") or {}
+            host = cfg.get("peer_host") or cfg.get("host")
+            user = cfg.get("user")
+            pport = cfg.get("peer_port") if cfg.get("peer_host")                 else cfg.get("port")
+            dest = f"{user}@{host}" if user else str(host)
+            port = f"-p {pport} " if pport else ""
+            r = b.run_cmd(
+                f"ssh -o BatchMode=yes -o ConnectTimeout=5 "
+                f"-o StrictHostKeyChecking=accept-new {port}"
+                f"{shlex.quote(dest)} true 2>/dev/null "
+                f"&& echo weft-route-ok || true", timeout=30)
+            direct_ssh = "weft-route-ok" in r.out
+            if direct_ssh:
+                src_addr = f"{dest}:{pport}" if pport else dest
+        self.store.set_route(src, dst, shared_fs_path, direct_ssh, src_addr)
+        self.store.audit_log("agent", "site.route_probe",
+                             site=dst, command=f"from {src}")
+        out = {"src": src, "dst": dst, "shared_fs_path": shared_fs_path,
+               "direct_ssh": direct_ssh}
+        self.store.emit("site.route", **out)
+        if shared_fs_path:
+            out["note"] = ("dst sees src's root on a shared filesystem: "
+                           "transfers become links/copies, no network")
+        elif direct_ssh:
+            out["note"] = ("dst can pull from src directly: transfers skip "
+                           "the controller")
+        else:
+            out["note"] = "no direct route; transfers go via the controller"
+        return out
 
     def site_note(self, name: str, note: str) -> dict:
         """Persist a per-site operational note ('gcc lives in ~/toolchains',
@@ -1172,8 +1245,8 @@ class Weft:
 PUBLIC_TOOLS = [
     "register_site", "sites_list", "sites_describe", "site_probe",
     "site_probe_deep", "site_load", "site_associations", "site_note",
-    "module_check", "module_list", "site_exec", "job_node_exec",
-    "site_teardown",
+    "site_route_probe", "module_check", "module_list", "site_exec",
+    "job_node_exec", "site_teardown",
     "env_ensure", "env_status", "env_why", "env_repair", "env_gpu_hint",
     "env_revise", "env_find_near",
     "data_register", "data_describe", "data_fetch",

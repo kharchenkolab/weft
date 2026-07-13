@@ -109,6 +109,11 @@ class Store:
             "site TEXT, ts REAL, author TEXT, note TEXT)"
         )
         self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS site_routes("
+            "src TEXT, dst TEXT, shared_fs_path TEXT, direct_ssh INTEGER,"
+            " src_addr TEXT, probed_at REAL, PRIMARY KEY(src, dst))"
+        )
+        self._conn.execute(
             "CREATE TABLE IF NOT EXISTS metrics("
             "ts REAL, site TEXT, key TEXT, value REAL)"
         )
@@ -198,6 +203,26 @@ class Store:
             "name=excluded.name, body=excluded.body",
             (spec_hash, name, _j(body), time.time()),
         )
+
+    def set_route(self, src: str, dst: str, shared_fs_path: str | None,
+                  direct_ssh: bool, src_addr: str = "") -> None:
+        self._write(
+            "INSERT INTO site_routes(src, dst, shared_fs_path, direct_ssh,"
+            " src_addr, probed_at) VALUES(?,?,?,?,?,?)"
+            " ON CONFLICT(src, dst) DO UPDATE"
+            " SET shared_fs_path=?, direct_ssh=?, src_addr=?, probed_at=?",
+            (src, dst, shared_fs_path, int(direct_ssh), src_addr,
+             time.time(),
+             shared_fs_path, int(direct_ssh), src_addr, time.time()))
+
+    def get_route(self, src: str, dst: str) -> dict | None:
+        r = self._row("SELECT * FROM site_routes WHERE src=? AND dst=?",
+                      (src, dst))
+        return dict(r) if r else None
+
+    def routes_for(self, site: str) -> list[dict]:
+        return [dict(r) for r in self._rows(
+            "SELECT * FROM site_routes WHERE src=? OR dst=?", (site, site))]
 
     def add_site_note(self, site: str, note: str,
                       author: str = "agent") -> None:

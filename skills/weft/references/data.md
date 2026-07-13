@@ -50,3 +50,19 @@ recorded output refs — that comparison is the proof of re-derivation.
 Honest limits ride in `reproducibility`: an `escape-hatch` env re-executes
 its captured installers; `attested` modules must exist at the destination;
 `state-dependent` results replay transcripts, not derivations.
+
+## Site-to-site routing (the controller carries bytes only as a last resort)
+
+At registration weft probes byte routes between sites: a **shared
+filesystem** (a nonce under src's root visible from dst — group NFS,
+cluster scratch) or **direct ssh** (dst already reaches src with the
+user's own keys; weft brokers no identity, it only discovers what your
+config permits). `sites_describe` lists routes; `site_route_probe(src,
+dst)` re-probes. Staging then moves bytes src→dst as a **link/copy**
+(shared FS) or a **dst-side rsync pull** (direct), hash-verified at the
+destination like every transfer — the controller stays out of the data
+path. No route → the honest fallback: fetch home, ship out (two hops),
+visible in the plan (`staging.site_to_site`) and events (`transfer.done
+via=fs-link|direct-pull|controller-detour`). Sites behind NAT/port-maps
+can set `peer_host`/`peer_port` — the address PEERS use, when it differs
+from the controller's.

@@ -202,7 +202,8 @@ class JobRunner:
         adapter = self.adapters[site]
         group_rel = f"jobs/{group}"
         activate_line, spec_env_vars = self._ensure_env_for(task, site)
-        self.dataman.ensure_at(task.required_refs(), adapter, self.transfers)
+        self.dataman.ensure_at(task.required_refs(), adapter,
+                                self.transfers, adapters=self.adapters)
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(group_rel))}")
         plan_tsv = self.dataman.materialize_plan(task)
         if plan_tsv:
@@ -416,6 +417,23 @@ class JobRunner:
             plan["env"] = {"env_id": None, "action": "bare"}
         staging = self.dataman.plan_for(task.required_refs(), site)
         plan["staging"] = staging.to_dict()
+        # say HOW bytes would move when the workspace never held them:
+        # a probed site-to-site route keeps the controller out of the path
+        routes = []
+        for ref in staging.to_transfer:
+            if self.dataman.cas.kind_of(ref) is not None:
+                continue
+            for loc in self.store.locations_of(ref):
+                if loc["site"] in ("@workspace", site) or not loc["present"]:
+                    continue
+                r = self.store.get_route(loc["site"], site)
+                if r and (r.get("shared_fs_path") or r.get("direct_ssh")):
+                    routes.append({"ref": ref, "src": loc["site"],
+                                   "via": "fs-link" if r.get("shared_fs_path")
+                                   else "direct-pull"})
+                    break
+        if routes:
+            plan["staging"]["site_to_site"] = routes
         adapter = self.adapters.get(site)
         if staging.bytes_to_move and adapter is not None:
             plan["staging"].update(self._transfer_estimate(adapter, staging))
@@ -545,6 +563,7 @@ class JobRunner:
         self.set_job_state(job_id, "STAGING", **self.group_payload(group))
         refs = task.required_refs()
         staged = self.dataman.ensure_at(refs, adapter, self.transfers,
+                                        adapters=self.adapters,
                                         job_id=job_id)
         jobdir_rel = f"jobs/{job_id}"
         self._prepare_sandbox(adapter, jobdir_rel, task, job_id, activate_line,

@@ -181,10 +181,142 @@ class DataManager:
                             else None
         return out
 
+    def _blob_names_for(self, ref: str) -> list[tuple[str, int]]:
+        """Like blobs_for, but works when the CONTENT is absent from the
+        workspace CAS (only the record exists) — site-to-site routing
+        moves bytes the controller never held."""
+        row = self.store.get_dataref(ref)
+        if row and row.get("chunks"):
+            n = len(row["chunks"])
+            per = (row["bytes"] or 0) // max(n, 1)
+            return [(c, per) for c in row["chunks"]]
+        if self.cas.kind_of(ref) == "tree":
+            return [(e["sha256"], e["size"])
+                    for e in self.cas.tree_manifest(ref)
+                    if e["kind"] == "file"]
+        return [(ref.split(":")[-1], (row or {}).get("bytes", 0) or 0)]
+
+    def _route_from_sites(self, missing: list[str], adapter: SiteAdapter,
+                          adapters: dict, job_id: str | None) -> list[str]:
+        """Site-to-site staging: for refs the workspace CAS does not hold,
+        move bytes DIRECTLY from a site that has them — shared-filesystem
+        link when dst sees src's root, dst-pulls-over-ssh when the user's
+        own keys permit it. Returns the refs it satisfied; the rest fall
+        through to the workspace path."""
+        import shlex as _sh
+        done: list[str] = []
+        for ref in missing:
+            if self.cas.kind_of(ref) == "file":
+                continue      # workspace holds the bytes: normal path wins
+            row = self.store.get_dataref(ref)
+            if row is None:
+                continue
+            if row.get("kind") == "tree":
+                if self.cas.kind_of(ref) is None:
+                    continue  # tree manifest unknown: cannot enumerate
+                if all(self.cas._blob_path(e["sha256"]).exists()
+                       for e in self.cas.tree_manifest(ref)
+                       if e["kind"] == "file"):
+                    continue  # workspace holds every member: normal path
+            sources = [l["site"] for l in self.store.locations_of(ref)
+                       if l["present"] and l["site"] not in
+                       ("@workspace", adapter.name)
+                       and l["site"] in adapters]
+            for src in sources:
+                route = self.store.get_route(src, adapter.name)
+                if not route or not (route.get("shared_fs_path")
+                                     or route.get("direct_ssh")):
+                    continue
+                src_adapter = adapters[src]
+                src_cas = f"{src_adapter.root}/cas"
+                dst_cas = adapter.transfer_endpoint()["cas_root"]
+                blobs = self._blob_names_for(ref)
+                verify = self.verify_map_for([ref])
+                lines = ["set -e"]
+                for digest, _size in blobs:
+                    d = f"{dst_cas}/{digest[:2]}/{digest}"
+                    s = f"{src_cas}/{digest[:2]}/{digest}"
+                    lines.append(f"mkdir -p {_sh.quote(dst_cas)}/{digest[:2]}")
+                    if route.get("shared_fs_path"):
+                        # hardlink when the roots share an inode space;
+                        # copy when they are different FSes on one mount view
+                        lines.append(
+                            f"[ -f {_sh.quote(d)} ] || "
+                            f"ln {_sh.quote(s)} {_sh.quote(d)} 2>/dev/null "
+                            f"|| cp {_sh.quote(s)} {_sh.quote(d)}")
+                    else:
+                        addr = route.get("src_addr") or ""
+                        if ":" in addr.rsplit("@", 1)[-1]:
+                            dest, pnum = addr.rsplit(":", 1)
+                            port = f"-p {pnum}"
+                        else:
+                            dest, port = addr, ""
+                        remote = f"{dest}:{src_cas}/{digest[:2]}/{digest}"
+                        lines.append(
+                            f"[ -f {_sh.quote(d)} ] || "
+                            f"rsync -e 'ssh -o BatchMode=yes {port}' "
+                            f"{_sh.quote(remote)} {_sh.quote(d)}")
+                    want = verify.get(digest)
+                    if want:
+                        lines.append(f"echo {want}  {_sh.quote(d)} "
+                                     f"| sha256sum -c >/dev/null")
+                via = "fs-link" if route.get("shared_fs_path") \
+                    else "direct-pull"
+                r = adapter.run_cmd("\n".join(lines), timeout=3600)
+                if r.rc != 0:
+                    self.store.emit("transfer.route_failed", job_id=job_id,
+                                    site=adapter.name, src=src, via=via,
+                                    log_tail=(r.err or r.out)[-300:])
+                    continue      # try the next source / fall through
+                self.store.set_location(ref, adapter.name, dst_cas)
+                self.store.emit("transfer.done", job_id=job_id,
+                                site=adapter.name, src=src, via=via,
+                                bytes_total=row.get("bytes", 0) or 0,
+                                files=len(blobs))
+                done.append(ref)
+                break
+        return done
+
     def ensure_at(self, refs: list[str], adapter: SiteAdapter, transfers: dict,
-                  job_id: str | None = None) -> dict:
-        """Move missing refs to the site CAS; verify; register locations."""
+                  job_id: str | None = None,
+                  adapters: dict | None = None) -> dict:
+        """Move missing refs to the site CAS; verify; register locations.
+        Refs whose bytes the workspace never held route SITE-TO-SITE first
+        (shared-FS link or direct pull over the user's own keys) when a
+        probed route exists — the controller stays out of the data path."""
         plan = self.plan_for(refs, adapter.name)
+        if plan.to_transfer and adapters:
+            routed = self._route_from_sites(list(plan.to_transfer), adapter,
+                                            adapters, job_id)
+            # controller detour for what no direct route satisfied: pull
+            # the blobs home first, then the normal workspace→site path
+            # ships them (two hops — the honest fallback, and the plan/
+            # events say which route each ref took)
+            for ref in plan.to_transfer:
+                if ref in routed or self.cas.kind_of(ref) is not None:
+                    continue
+                row = self.store.get_dataref(ref)
+                srcs = [l for l in self.store.locations_of(ref)
+                        if l["present"] and l["site"] not in
+                        ("@workspace", adapter.name)
+                        and l["site"] in adapters]
+                if row is None or not srcs or not row.get("bytes"):
+                    continue      # nothing fetchable: blobs_for will say so
+                src_adapter = adapters[srcs[0]["site"]]
+                endpoint = src_adapter.transfer_endpoint()
+                method = transfers.get(endpoint["method"])
+                if method is None:
+                    continue
+                names = self._blob_names_for(ref)
+                method.fetch(names, self.cas, endpoint)
+                self.store.set_location(ref, "@workspace",
+                                        str(self.cas.root))
+                self.store.emit("transfer.done", job_id=job_id,
+                                site="@workspace", src=srcs[0]["site"],
+                                via="controller-detour",
+                                bytes_total=row.get("bytes", 0) or 0,
+                                files=len(names))
+            plan = self.plan_for(refs, adapter.name)
         if plan.to_transfer:
             endpoint = adapter.transfer_endpoint()
             method = transfers.get(endpoint["method"])
