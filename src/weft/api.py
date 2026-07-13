@@ -808,13 +808,17 @@ class Weft:
     def kernel_start(self, site: str, lang: str = "python",
                      env_id: str | None = None,
                      walltime: str = "08:00:00",
-                     resources: dict | None = None) -> dict:
+                     resources: dict | None = None,
+                     label: str = "") -> dict:
         """resources={"gpus": 1, "partition": "gpu"} on a scheduler site
         holds a node allocation and runs the kernel INSIDE it — live
         interactive analysis on a GPU node; no ports, the shared
-        filesystem is the channel."""
+        filesystem is the channel. label ("phonon exploration") is a
+        display handle, carried into status/lists/death events and
+        inherited by kernel_restart's successor."""
         try:
-            r = self.kernels.start(site, lang, env_id, walltime, resources)
+            r = self.kernels.start(site, lang, env_id, walltime, resources,
+                                   label=label)
             self.store.audit_log(None, "kernel.start", site=site,
                                  command=f"{lang} env={env_id}")
             return r

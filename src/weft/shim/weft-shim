@@ -5,7 +5,7 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=3
+WEFT_SHIM_VERSION=4   # v4: storage totals (total_gb) beside free_gb
 
 json_bool() { if [ "$1" = "0" ]; then echo true; else echo false; fi; }
 
@@ -28,8 +28,9 @@ cmd_probe() {
     [ "${mem_kb:-0}" -gt 0 ] || mem_kb=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 ))
     mem_gb=$((mem_kb / 1048576))
     root="${WEFT_ROOT:-$HOME/.weft}"
-    free_kb=$(df -Pk "$(dirname "$root")" 2>/dev/null | awk 'NR==2{print $4}' || echo 0)
-    free_gb=$((free_kb / 1048576))
+    set -- $(df -Pk "$(dirname "$root")" 2>/dev/null | awk 'NR==2{print $4, $2}')
+    free_gb=$(( ${1:-0} / 1048576 ))
+    total_gb=$(( ${2:-0} / 1048576 ))
     net_check() {
         if command -v curl >/dev/null 2>&1; then
             curl -fsm "$1" -o /dev/null https://conda.anaconda.org 2>/dev/null
@@ -75,8 +76,11 @@ cmd_probe() {
              "/lscratch/$uname_" /tmp /dev/shm "/work/$uname_"; do
         [ -d "$d" ] || continue
         wr=1; [ -w "$d" ] && wr=0
-        cfree=$(df -Pk "$d" 2>/dev/null | awk 'NR==2{print int($4/1048576)}')
-        cands="$cands$csep{\"path\":\"$d\",\"writable\":$(json_bool $wr),\"free_gb\":${cfree:-0}}"
+        # free AND total: "how full is /scratch" needs the volume size —
+        # free alone forced consumers to fabricate utilization
+        set -- $(df -Pk "$d" 2>/dev/null | awk 'NR==2{print int($4/1048576), int($2/1048576)}')
+        cfree=${1:-0}; ctotal=${2:-0}
+        cands="$cands$csep{\"path\":\"$d\",\"writable\":$(json_bool $wr),\"free_gb\":$cfree,\"total_gb\":$ctotal}"
         csep=","
     done
     cat <<EOF
@@ -88,7 +92,7 @@ cmd_probe() {
  "scheduler": {"type": "$sched"},
  "module_system": $(json_bool $modules),
  "gpus": [${gpus:-}], "cuda_driver": "${cuda_driver:-}",
- "storage": {"weft_root": "$root", "free_gb": $free_gb,
+ "storage": {"weft_root": "$root", "free_gb": $free_gb, "total_gb": $total_gb,
              "candidates": [${cands:-}]}}
 EOF
 }

@@ -86,6 +86,9 @@ class Store:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN queue_reason TEXT")
         if "superseded_by" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN superseded_by TEXT")
+        kcols = {r[1] for r in self._conn.execute("PRAGMA table_info(kernels)")}
+        if kcols and "label" not in kcols:
+            self._conn.execute("ALTER TABLE kernels ADD COLUMN label TEXT")
         scols = {r[1] for r in self._conn.execute("PRAGMA table_info(sessions)")}
         for col, ddl in _SESSION_MIGRATIONS:
             if col not in scols:
@@ -138,7 +141,7 @@ class Store:
             "CREATE TABLE IF NOT EXISTS kernels("
             "kernel_id TEXT PRIMARY KEY, site TEXT, lang TEXT, env_id TEXT,"
             "jobdir TEXT, handle TEXT, state TEXT, blocks_run INTEGER,"
-            "created_at REAL, last_used REAL)"
+            "created_at REAL, last_used REAL, label TEXT)"
         )
 
     # -- serialized access helpers ------------------------------------------
@@ -763,14 +766,15 @@ class Store:
     # -- kernels ---------------------------------------------------------------
 
     def put_kernel(self, kernel_id: str, site: str, lang: str,
-                   env_id: str | None, jobdir: str, handle: str) -> None:
+                   env_id: str | None, jobdir: str, handle: str,
+                   label: str = "") -> None:
         now = time.time()
         self._write(
             "INSERT INTO kernels(kernel_id, site, lang, env_id, jobdir,"
-            " handle, state, blocks_run, created_at, last_used)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
+            " handle, state, blocks_run, created_at, last_used, label)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (kernel_id, site, lang, env_id, jobdir, handle, "running",
-             0, now, now),
+             0, now, now, label or None),
         )
 
     def get_kernel(self, kernel_id: str) -> dict | None:

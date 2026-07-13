@@ -256,13 +256,27 @@ class SitePoller:
                        "suggestion": "raise resources.walltime or shrink the task"},
             )
 
+    # scheduler verdicts: the scheduler POSITIVELY says the job is gone.
+    # Strikes exist to guard against absence of signal (a poll that could
+    # not see the process); a verdict needs no confirmation — waiting on
+    # strikes here left slurm-killed kernels "running" until slurm forgot
+    # the job, i.e. forever with accounting on (found by weft-ui; walltime
+    # death is the EXPECTED kernel death mode, kernels being
+    # walltime-bounded by design).
+    _VERDICT_CAUSE = {"timeout": "walltime_exceeded", "oom": "oom",
+                      "cancelled": "cancelled"}
+
     def _lease_transition(self, w: Watch, state: str, status: dict) -> None:
         """Leases (kernels, services) have no COLLECTING: an exit is a
         requested stop or a death — reported, with diagnostics."""
-        if state in ("exited", "lost", "missing"):
-            w.lost_strikes += 1
-            if state != "exited" and w.lost_strikes < LOST_STRIKES:
-                return
+        if state in ("exited", "lost", "missing") \
+                or state in self._VERDICT_CAUSE:
+            verdict = self._VERDICT_CAUSE.get(state)
+            if verdict is None:
+                w.lost_strikes += 1
+                if state != "exited" and w.lost_strikes < LOST_STRIKES:
+                    return
+            cause = verdict or ("exited" if state == "exited" else "lost")
             self._unregister(w.job_id)
             if w.lease == "service":
                 s = self.runner.store.get_service(w.job_id)
@@ -272,6 +286,7 @@ class SitePoller:
                 self.runner.store.update_service(w.job_id, state="exited")
                 self.runner.store.emit(
                     "service.exited", service=w.job_id, site=self.site,
+                    cause=cause, slurm_state=status.get("slurm"),
                     exit_code=status.get("exit_code"),
                     log_tail=log_tail[-800:],
                     suggestion="service_status shows the record; "
@@ -291,10 +306,16 @@ class SitePoller:
             self.runner.store.update_kernel(w.job_id, state="died")
             self.runner.store.emit(
                 "kernel.died", kernel=w.job_id, site=self.site,
+                **({"label": k["label"]} if k.get("label") else {}),
+                cause=cause, slurm_state=status.get("slurm"),
                 killing_block=killing, exit_code=status.get("exit_code"),
                 log_tail=log_tail[-800:],
-                suggestion="kernel_restart(kernel_id, replay='successful') "
-                           "rebuilds state; skip the killing block",
+                suggestion=("the allocation hit its walltime — "
+                            "kernel_restart with a longer walltime "
+                            "(and replay='successful') resumes the work"
+                            if cause == "walltime_exceeded" else
+                            "kernel_restart(kernel_id, replay='successful') "
+                            "rebuilds state; skip the killing block"),
             )
             return
         w.lost_strikes = 0

@@ -58,11 +58,29 @@ def test_kernel_runs_inside_a_gpu_allocation(w):
         w.kernel_stop(k)
 
 
-def test_kernel_respects_partition_walltime(w):
-    """The short partition kills a kernel at 1 minute: death is an EVENT
-    naming the killing block, not silence."""
+@pytest.mark.slow
+def test_kernel_walltime_death_is_a_verdict(w):
+    """The short partition kills a kernel at 1 minute — the slurm TIMEOUT
+    verdict must kill the lease IMMEDIATELY (no lost-strikes: a verdict is
+    a positive answer, not absence of signal). The original bug left the
+    kernel "running" for as long as slurm remembered the job (weft-ui,
+    found on this exact repro)."""
+    import time
     r = w.kernel_start("hpc", lang="python", walltime="00:01:00",
                        resources={"partition": "short"})
     assert "kernel_id" in r, r
-    assert w.kernel_status(r["kernel_id"])["state"] == "running"
-    w.kernel_stop(r["kernel_id"])
+    k = r["kernel_id"]
+    assert w.kernel_status(k)["state"] == "running"
+    # slurm enforces time limits at ~1-minute granularity: expect the
+    # kill between 60 and ~180 s
+    deadline = time.time() + 240
+    while time.time() < deadline:
+        if w.kernel_status(k)["state"] == "died":
+            break
+        time.sleep(2)
+    assert w.kernel_status(k)["state"] == "died", w.kernel_status(k)
+    ev = next(e for e in w.events_poll(0, 800, compact=False)["events"]
+              if e["kind"] == "kernel.died" and e["kernel"] == k)
+    assert ev["cause"] == "walltime_exceeded", ev
+    assert "TIMEOUT" in (ev.get("slurm_state") or ""), ev
+    assert "walltime" in ev["suggestion"]

@@ -30,8 +30,13 @@ def test_probe_sees_scheduler_and_partitions(weft_slurm):
     parts = {p["name"]: p for p in caps["scheduler"]["partitions"]}
     assert "standard" in parts and "short" in parts
     assert parts["standard"]["cpus_per_node"] == 8
+    assert parts["standard"]["nodes"] == 1        # "how big is it" (%D)
     assert slurm_time_to_s(parts["short"]["max_walltime"]) == 60
     assert slurm_time_to_s(parts["standard"]["max_walltime"]) == 3600
+    # storage candidates carry totals — utilization is computable, not
+    # fabricated
+    for c in caps["storage"]["candidates"]:
+        assert c["total_gb"] >= c["free_gb"] >= 0
 
 
 def test_batch_job_full_lifecycle(weft_slurm, tmp_path):

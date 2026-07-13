@@ -56,7 +56,7 @@ class KernelManager:
 
     def start(self, site: str, lang: str = "python",
               env_id: str | None = None, walltime: str = "08:00:00",
-              resources: dict | None = None) -> dict:
+              resources: dict | None = None, label: str = "") -> dict:
         """`resources` places the INTERACTIVE session like a job: on slurm,
         {"gpus": 1, "partition": "gpu"} holds a GPU-node allocation and
         the kernel lives inside it — analysis on the node, not the login
@@ -66,6 +66,11 @@ class KernelManager:
             raise WeftError(
                 "task.invalid", f"no kernel driver for lang {lang!r}",
                 stage="infra", hints={"registered": sorted(LANGUAGES)})
+        if len(label) > 200:
+            raise WeftError(
+                "task.invalid",
+                f"label is {len(label)} chars (max 200) — labels are "
+                "display handles, not documents", stage="infra")
         adapter = self._adapter(site)
         driver_file, interp = LANGUAGES[lang]
 
@@ -115,9 +120,11 @@ class KernelManager:
                                          "walltimes and a re-start, not a "
                                          "day-long hold"})
         handle = adapter.submit(jobdir_rel, {"resources": res})
-        self.store.put_kernel(kernel_id, site, lang, env_id, jobdir_rel, handle)
+        self.store.put_kernel(kernel_id, site, lang, env_id, jobdir_rel,
+                              handle, label=label)
         self.store.emit("kernel.started", kernel=kernel_id, site=site,
-                        lang=lang, env_id=env_id, resources=res)
+                        lang=lang, env_id=env_id, resources=res,
+                        **({"label": label} if label else {}))
         from .poller import Watch
         from .task import Task
         self.runner.poller_for(site).register(Watch(
@@ -173,8 +180,9 @@ class KernelManager:
                 self._assert_alive(self._get(kernel_id))
                 return {"kernel_id": kernel_id, "block": block,
                         "state": "running",
-                        "note": "still executing — poll again, watch for "
-                                "kernel.stuck, or kernel_interrupt"}
+                        "note": "still executing — kernel_poll to keep "
+                                "waiting, kernel_status for a look, "
+                                "kernel_interrupt to stop the block"}
             time.sleep(min(0.3, max(deadline - time.time(), 0.05)))
 
     def _assert_alive(self, k: dict) -> None:
@@ -202,6 +210,7 @@ class KernelManager:
         except (WeftError, ValueError):
             pass
         return {"kernel_id": kernel_id, "site": k["site"], "lang": k["lang"],
+                "label": k.get("label") or None,
                 "env_id": k["env_id"], "state": k["state"],
                 "blocks_run": k["blocks_run"], "current_block": current,
                 "idle_s": round(time.time() - k["last_used"], 1)}
@@ -334,7 +343,9 @@ class KernelManager:
                     codes.append(entry["code"])
         if k["state"] == "running":
             self.stop(kernel_id)
-        fresh = self.start(k["site"], k["lang"], k["env_id"])
+        # the label names the WORK, which continues in the successor
+        fresh = self.start(k["site"], k["lang"], k["env_id"],
+                           label=k.get("label") or "")
         replayed = 0
         for code in codes:
             r = self.exec(fresh["kernel_id"], code, wait=True, timeout=300)

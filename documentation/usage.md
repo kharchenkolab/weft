@@ -225,6 +225,21 @@ w.module_list("hpc", search="cuda")         # discover site software offerings
 r = w.task_submit({..., "array": 2000})     # fan-out with WEFT_ARRAY_INDEX
 w.events_poll(cursor)                       # compact: array digests, transfer
                                             # progress, job states (non-array)
+```
+
+**Events contract** (for reducers/consumers): every event is
+`{"seq", "kind", "job_id", ...payload}` — `job_id` is a first-class
+column on the row (often null for non-job events), NOT a payload key.
+Terminal job transitions arrive as THREE kinds, not one: `job.done`,
+`job.failed` (payloads differ — manifest summary vs error dict), and
+CANCELLED as `job.state` with `state="CANCELLED"`. There is no
+`job.state` with DONE/FAILED. Lease deaths are `kernel.died` /
+`service.exited`, each carrying `cause`
+("walltime_exceeded"/"oom"/"cancelled"/"exited"/"lost") and, on
+scheduler sites, the raw `slurm_state`. Unknown kinds should be
+ignored (new kinds are always additive).
+
+```python
 w.array_status(r["group"])                  # counts + FAILURE BUCKETS (by
                                             # log signature, sample indices)
 w.array_elements(r["group"], state="FAILED", limit=50)   # page big sweeps

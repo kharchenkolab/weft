@@ -6,9 +6,12 @@ No sockets: blocks travel as files over the control channel, so kernels
 work through login nodes and survive disconnects.
 
 ```python
-k = w.kernel_start("beamlab", "python", env_id=env_id)["kernel_id"]
+k = w.kernel_start("beamlab", "python", env_id=env_id,
+                   label="phonon exploration")["kernel_id"]
 # env must already be realized on the site (error: env.not_realized —
 # run any task with it first, even `true`)
+# label: display handle (≤200 chars) in kernel_status / list_kernels /
+# kernel.died; kernel_restart's successor inherits it
 
 r = w.kernel_exec(k, "grid = build_grid(200)")        # waits, returns
 r["rc"], r["out"], r["err"], r["artifacts"]           # per-block results
@@ -22,11 +25,15 @@ w.kernel_interrupt(k)       # hung block → finishes with rc 130, state kept
 w.kernel_stop(k)
 ```
 
-## When it dies (native crash, OOM — this happens)
+## When it dies (native crash, OOM, walltime — this happens)
 
-The poller notices and emits **`kernel.died`** with the *killing block*
-and a log tail; `kernel_status` shows `died`; further execs return
-`sched.node_failure` with the recovery named.
+The poller notices and emits **`kernel.died`** with `cause`
+("walltime_exceeded" / "oom" / "cancelled" / "exited" / "lost" — plus
+the raw `slurm_state` on scheduler sites), the *killing block*, and a
+log tail; `kernel_status` shows `died`; further execs return
+`sched.node_failure` with the recovery named. Walltime death is the
+EXPECTED end of a scheduler-site kernel — kernels are walltime-bounded
+by design; restart with a longer walltime if the work needs it.
 
 ```python
 fresh = w.kernel_restart(k, replay="successful")

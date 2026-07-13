@@ -97,15 +97,19 @@ class SlurmAdapter(SSHAdapter):
         return base
 
     def _probe_partitions(self) -> dict:
+        # %D: node count per row — with sort -u the rows are keyed by
+        # (partition, features, ...), so each feature-defined node CLASS
+        # carries its own count ("how big is this partition" was
+        # unanswerable from the record; weft-ui #2)
         r = self.run_cmd(
-            "sinfo -h -o '%R|%l|%c|%m|%a|%G|%f' 2>/dev/null | sort -u",
+            "sinfo -h -o '%R|%l|%c|%m|%a|%G|%f|%D' 2>/dev/null | sort -u",
             timeout=30)
         partitions = []
         for line in r.out.splitlines():
             parts = line.strip().split("|")
-            if len(parts) != 7:
+            if len(parts) != 8:
                 continue
-            name, timelimit, cpus, mem_mb, avail, gres, feats = parts
+            name, timelimit, cpus, mem_mb, avail, gres, feats, nodes = parts
             try:
                 from ..capability import slurm_time_to_s
                 partitions.append({
@@ -116,6 +120,7 @@ class SlurmAdapter(SSHAdapter):
                     "max_walltime_s": slurm_time_to_s(timelimit),
                     "cpus_per_node": int(cpus),
                     "mem_gb_per_node": max(1, int(mem_mb) // 1024),
+                    "nodes": int(nodes),
                     "available": avail.lower().startswith("up"),
                     "gres": parse_gres(gres),
                     "features": [] if feats in ("", "(null)")
