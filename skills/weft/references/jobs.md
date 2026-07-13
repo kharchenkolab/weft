@@ -38,6 +38,11 @@ A replaced element's old row leaves the group's counts but stays
 queryable (`jobs_where`) with `superseded_by` naming its successor —
 fold those under the group's history, they are not duplicates.
 
+Give tasks a `label` ("calibrate run 3", ≤200 chars) — it shows in
+`task_status`/`jobs_where`/`array_status` and on the PENDING event, and
+is NOT part of task identity: relabeling never forks memoization, and a
+memoized resubmission returns the prior job under its original label.
+
 **Enumeration** (what exists in this workspace): `jobs_where(state=,
 site=, limit=, offset=)`, `list_envs()`, `list_kernels()`,
 `list_services()`, `audit_tail(n)`. `task_status(job_id)` also carries

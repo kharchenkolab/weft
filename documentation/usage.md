@@ -46,6 +46,9 @@ r = w.task_submit({
     "outputs": ["results/"],
     "resources": {"cpus": 8, "mem_gb": 16, "walltime": "01:00:00"},
     "site": "auto",                 # placement: ranked sites with reasons
+    "label": "june fit, run 3",     # human handle in lists/events (≤200
+                                    # chars); NOT identity: relabeling
+                                    # never forks memoization
 })
 r["plan"]     # {"env": {"action": "cached"}, "staging": {"bytes_to_move": …}, …}
 

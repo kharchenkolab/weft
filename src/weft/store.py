@@ -553,9 +553,11 @@ class Store:
     @staticmethod
     def _job_row(r: sqlite3.Row) -> dict:
         keys = r.keys()
+        task = json.loads(r["task"])
         return {
             "job_id": r["job_id"], "task_hash": r["task_hash"],
-            "task": json.loads(r["task"]), "site": r["site"], "state": r["state"],
+            "task": task, "label": task.get("label") or None,
+            "site": r["site"], "state": r["state"],
             "sched_handle": r["sched_handle"],
             "error": json.loads(r["error"]) if r["error"] else None,
             "manifest": json.loads(r["manifest"]) if r["manifest"] else None,

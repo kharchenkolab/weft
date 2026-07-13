@@ -52,13 +52,18 @@ class Task:
     # weft holds it controller-side elsewhere. NOT part of task_hash:
     # dependencies say WHEN a task may run, not WHAT it computes.
     after: list[str] = field(default_factory=list)
+    # human handle for lists/events ("calibrate run 3"), ≤200 chars. NOT
+    # part of task_hash: a label says what to CALL a task, not what it
+    # computes — relabeling never forks memoization, and two identically
+    # labeled tasks still memoize against each other.
+    label: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "Task":
         d = dict(d.get("task", d))
         unknown = set(d) - {
             "command", "env", "inputs", "code", "outputs", "resources",
-            "site", "array", "env_vars", "after",
+            "site", "array", "env_vars", "after", "label",
         }
         if unknown:
             raise WeftError(
@@ -66,7 +71,8 @@ class Task:
                 stage="submit",
                 hints={"known_fields": [
                     "command", "env", "inputs", "code", "outputs",
-                    "resources", "site", "array", "env_vars", "after"]},
+                    "resources", "site", "array", "env_vars", "after",
+                    "label"]},
             )
         if not d.get("command"):
             raise WeftError("task.invalid", "task.command is required", stage="submit")
@@ -92,11 +98,17 @@ class Task:
             array=int(d["array"]) if d.get("array") else None,
             env_vars={k: str(v) for k, v in (d.get("env_vars") or {}).items()},
             after=[str(x) for x in d.get("after", [])],
+            label=str(d.get("label", "")),
         )
         t.validate()
         return t
 
     def validate(self) -> None:
+        if len(self.label) > 200:
+            raise WeftError(
+                "task.invalid",
+                f"label is {len(self.label)} chars (max 200) — labels are "
+                "display handles, not documents", stage="submit")
         for mount in [i.mount_as for i in self.inputs] + (
             [self.code.mount_as] if self.code else []
         ) + list(self.outputs):
@@ -147,4 +159,5 @@ class Task:
             "array": self.array,
             "env_vars": self.env_vars,
             "after": self.after,
+            "label": self.label,
         }

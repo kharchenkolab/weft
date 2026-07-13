@@ -163,6 +163,7 @@ class JobRunner:
             # elements ride their group's plan (stored once, not N times)
             self.store.put_plan(job_id, plan)
         self.store.emit("job.state", job_id=job_id, state="PENDING", site=site,
+                        **({"label": task.label} if task.label else {}),
                         **self.group_payload(_group))
         t = threading.Thread(target=self._drive, args=(job_id,), daemon=True)
         self._threads[job_id] = t

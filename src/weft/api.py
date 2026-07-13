@@ -690,6 +690,7 @@ class Weft:
                 continue
             entry = {
                 "job_id": j["job_id"], "state": j["state"], "site": j["site"],
+                "label": (j.get("task") or {}).get("label") or None,
                 "since": j["updated_at"],
                 "error": j["error"],
                 "has_manifest": j["manifest"] is not None,
@@ -957,7 +958,10 @@ class Weft:
         if counts["total"] == 0:
             raise WeftError("task.invalid", f"unknown array group: {group}",
                             stage="infra")
+        members = self.store.jobs_in_group(group, limit=1)
         out = {"group": group, **counts,
+               "label": (members[0].get("task") or {}).get("label") or None
+               if members else None,   # elements share the submit's label
                "plan": self.store.get_plan(group),  # the submit-time promise
                "failed_previews": self.store.failed_in_group(group),
                "failure_buckets": self._failure_buckets(group)}
