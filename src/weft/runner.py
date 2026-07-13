@@ -134,8 +134,22 @@ class JobRunner:
                         "manifest": prior,
                         "note": "identical task already completed; pass force=true to re-run"}
 
+        for d in task.after:
+            if not self.store.get_job(d):
+                raise WeftError(
+                    "task.invalid", f"unknown dependency job: {d}",
+                    stage="submit",
+                    hints={"suggestion": "`after` takes job_ids returned "
+                                         "by task_submit"})
+
         site = self._place(task)
         plan = self._plan(task, site)
+        if task.after:
+            plan["after"] = {
+                "jobs": task.after,
+                "semantics": "starts only when every dependency is DONE; "
+                             "a failed dependency fails this job as "
+                             "task.dep_failed without starting it"}
         if dry_run:
             return {"plan": plan, "site": site, "dry_run": True}
 
@@ -476,9 +490,47 @@ class JobRunner:
         if group:
             self.emit_group_digest(group)
 
+    def _await_deps(self, job_id: str, deps: list[str]) -> None:
+        """Hold this job until every dependency is DONE. Raises when a dep
+        fails/cancels/disappears — a pipeline stage must not run on
+        missing upstream outputs, and must say WHICH stage broke it."""
+        self.store.update_job(
+            job_id, queue_reason=f"waiting on {len(deps)} dependencies")
+        pending = list(deps)
+        while pending:
+            if self._cancelled(job_id):
+                raise WeftError("state.conflict", "cancelled while waiting "
+                                "on dependencies", stage="submit")
+            still = []
+            for d in pending:
+                j = self.store.get_job(d)
+                state = j["state"] if j else "UNKNOWN"
+                if state == "DONE":
+                    continue
+                if state in ("FAILED", "CANCELLED", "UNKNOWN"):
+                    raise WeftError(
+                        "task.dep_failed",
+                        f"dependency {d} is {state} — this job was not "
+                        "started",
+                        stage="submit",
+                        hints={"dependency": d, "dependency_state": state,
+                               "dependency_error":
+                               (j or {}).get("error"),
+                               "suggestion": "fix and re-run the upstream "
+                                             "job, then resubmit this one "
+                                             "(its inputs were never "
+                                             "produced)"})
+                still.append(d)
+            pending = still
+            if pending:
+                time.sleep(max(0.3, self.poll_interval))
+        self.store.update_job(job_id, queue_reason="")
+
     def _drive_inner(self, job_id: str) -> None:
         job = self.store.get_job(job_id)
         task = Task.from_dict(job["task"])
+        if task.after:
+            self._await_deps(job_id, task.after)
         adapter = self.adapters[job["site"]]
         group = job.get("array_group")
 

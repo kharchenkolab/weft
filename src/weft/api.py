@@ -197,7 +197,25 @@ class Weft:
         if not row:
             raise WeftError("task.invalid", f"unknown site: {name}", stage="infra",
                             hints={"registered": [s["name"] for s in self.store.list_sites()]})
+        notes = self.store.site_notes(name)
+        if notes:
+            row = {**row, "site_notebook": notes}
         return row
+
+    def site_note(self, name: str, note: str) -> dict:
+        """Persist a per-site operational note ('gcc lives in ~/toolchains',
+        'module load is broken on the gpu partition') — the knowledge that
+        otherwise dies with the session. Notes ride along in
+        sites_describe; newest last. Append-only and audited."""
+        if not self.store.get_site(name):
+            raise WeftError("task.invalid", f"unknown site: {name}",
+                            stage="infra")
+        if not note or not note.strip():
+            raise WeftError("task.invalid", "empty note", stage="infra")
+        self.store.add_site_note(name, note.strip())
+        self.store.audit_log("agent", "site.note", site=name,
+                             command=note[:200])
+        return {"site": name, "notes": self.store.site_notes(name)}
 
     def site_associations(self, name: str) -> dict:
         """What am *I* allowed to ask for on this scheduler: my accounts,
@@ -1063,8 +1081,9 @@ class Weft:
 # exactly what the MCP server exposes. One list, one source of truth.
 PUBLIC_TOOLS = [
     "register_site", "sites_list", "sites_describe", "site_probe",
-    "site_probe_deep", "site_load", "site_associations", "module_check",
-    "module_list", "site_exec", "job_node_exec", "site_teardown",
+    "site_probe_deep", "site_load", "site_associations", "site_note",
+    "module_check", "module_list", "site_exec", "job_node_exec",
+    "site_teardown",
     "env_ensure", "env_status", "env_why", "env_repair", "env_gpu_hint",
     "env_revise", "env_find_near",
     "data_register", "data_describe", "data_fetch",

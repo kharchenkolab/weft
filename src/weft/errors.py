@@ -35,6 +35,7 @@ CODES = {
     "quota.storage": "site storage quota pressure prevents the operation",
     "budget.exceeded": "operation would exceed a configured spending cap",
     "task.invalid": "task specification is malformed or references unknown objects",
+    "task.dep_failed": "an upstream dependency failed or vanished; this job never started",
     "state.conflict": "concurrent operation already in progress for this resource",
 }
 

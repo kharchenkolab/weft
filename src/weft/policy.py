@@ -42,6 +42,19 @@ def enforce_policy(
     user"), so the agent knows this is a *choice* to respect, not a
     hardware limit to negotiate with.
     """
+    allowed = policy.get("partitions_allowed")
+    if allowed and resources.get("partition") \
+            and resources["partition"] not in allowed:
+        raise WeftError(
+            "site.capability_violation",
+            f"partition {resources['partition']!r} is outside the user's "
+            f"allowlist on {site}",
+            stage="submit",
+            hints={"rule": "partitions_allowed", "allowed": allowed,
+                   "source": "site policy set by the user",
+                   "suggestion": f"pick one of {allowed} or ask the user "
+                                 "to widen the allowlist"},
+        )
     max_gpus = policy.get("max_gpus")
     if max_gpus is not None and resources.get("gpus", 0) > max_gpus:
         raise WeftError(

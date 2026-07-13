@@ -56,3 +56,14 @@ out["log"], out["cursor"], out["state"]        # the returned cursor
 ```
 Byte-exact and gap-free; stop when state goes terminal. Plain
 `task_logs(job_id, tail=100)` for a one-shot look.
+
+## Pipelines: `after` (control-flow chaining)
+
+`task_submit({..., "after": [job_a, job_b]})` holds the job until every
+dependency is DONE — no polling between stages. A failed/cancelled
+upstream fails the downstream job as `task.dep_failed` (it NEVER runs on
+missing inputs), with the culprit and its error in the hints. Dependencies
+gate WHEN a task runs, not WHAT it computes: they are excluded from the
+task hash, so memoization still works stage by stage. Unknown job_ids are
+refused at submit. Chain data the usual way (site-side output→input
+chaining); `after` only sequences.

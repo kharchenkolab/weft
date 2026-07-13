@@ -94,6 +94,12 @@ w.register_site("cloud-gpu", "cloud", {
   then pend on "Resources" while CPUs sit idle. If jobs serialize
   unexpectedly, check `task_status(...)['queue_reason']` and set
   `resources.mem_gb` explicitly.
+- **`site_note(site, "...")`** — the site notebook: persist operational
+  knowledge ("gcc lives in ~/toolchains", "module load broken on gpu
+  partition") so it survives your session. Notes ride along in
+  `sites_describe` (`site_notebook`, newest last). Write one whenever you
+  learn something about a site the hard way — the next agent (or you,
+  tomorrow) starts from it.
 
 ## Cloud money rules
 

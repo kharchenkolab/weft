@@ -102,6 +102,10 @@ class Store:
             "spec_hash TEXT PRIMARY KEY, env_id TEXT, created_at REAL)"
         )
         self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS site_notes("
+            "site TEXT, ts REAL, author TEXT, note TEXT)"
+        )
+        self._conn.execute(
             "CREATE TABLE IF NOT EXISTS metrics("
             "ts REAL, site TEXT, key TEXT, value REAL)"
         )
@@ -191,6 +195,18 @@ class Store:
             "name=excluded.name, body=excluded.body",
             (spec_hash, name, _j(body), time.time()),
         )
+
+    def add_site_note(self, site: str, note: str,
+                      author: str = "agent") -> None:
+        self._write(
+            "INSERT INTO site_notes(site, ts, author, note) VALUES(?,?,?,?)",
+            (site, time.time(), author, note))
+
+    def site_notes(self, site: str, limit: int = 50) -> list[dict]:
+        rows = self._rows(
+            "SELECT ts, author, note FROM site_notes WHERE site=? "
+            "ORDER BY ts DESC LIMIT ?", (site, limit))
+        return [dict(r) for r in reversed(rows)]
 
     def put_spec_alias(self, spec_hash: str, env_id: str) -> None:
         """A spec that reached an existing env through an adaptive path

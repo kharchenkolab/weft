@@ -26,10 +26,14 @@ class Resources:
     mem_gb: int = 0          # 0 = unspecified
     gpus: int = 0
     walltime: str = ""       # "HH:MM:SS", empty = unspecified
+    partition: str = ""      # scheduler partition; empty = site default
 
     def to_dict(self) -> dict:
-        return {"cpus": self.cpus, "mem_gb": self.mem_gb, "gpus": self.gpus,
-                "walltime": self.walltime}
+        out = {"cpus": self.cpus, "mem_gb": self.mem_gb, "gpus": self.gpus,
+               "walltime": self.walltime}
+        if self.partition:
+            out["partition"] = self.partition
+        return out
 
 
 @dataclass
@@ -43,13 +47,18 @@ class Task:
     site: str = "auto"
     array: int | None = None          # N elements; WEFT_ARRAY_INDEX in [0, N)
     env_vars: dict[str, str] = field(default_factory=dict)
+    # control-flow chaining: job_ids that must finish (DONE) first. The
+    # scheduler holds the job natively where it can (sbatch --dependency);
+    # weft holds it controller-side elsewhere. NOT part of task_hash:
+    # dependencies say WHEN a task may run, not WHAT it computes.
+    after: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Task":
         d = dict(d.get("task", d))
         unknown = set(d) - {
             "command", "env", "inputs", "code", "outputs", "resources",
-            "site", "array", "env_vars",
+            "site", "array", "env_vars", "after",
         }
         if unknown:
             raise WeftError(
@@ -57,7 +66,7 @@ class Task:
                 stage="submit",
                 hints={"known_fields": [
                     "command", "env", "inputs", "code", "outputs",
-                    "resources", "site", "array", "env_vars"]},
+                    "resources", "site", "array", "env_vars", "after"]},
             )
         if not d.get("command"):
             raise WeftError("task.invalid", "task.command is required", stage="submit")
@@ -77,10 +86,12 @@ class Task:
                 mem_gb=int(res.get("mem_gb", 0)),
                 gpus=int(res.get("gpus", 0)),
                 walltime=str(res.get("walltime", "")),
+                partition=str(res.get("partition", "")),
             ),
             site=d.get("site", "auto"),
             array=int(d["array"]) if d.get("array") else None,
             env_vars={k: str(v) for k, v in (d.get("env_vars") or {}).items()},
+            after=[str(x) for x in d.get("after", [])],
         )
         t.validate()
         return t
@@ -135,4 +146,5 @@ class Task:
             "site": self.site,
             "array": self.array,
             "env_vars": self.env_vars,
+            "after": self.after,
         }

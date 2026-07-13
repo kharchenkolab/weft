@@ -68,10 +68,11 @@ w.data_fetch(m["outputs"][0]["ref"], "results/scan.h5")
 | `inputs` | `[{ref, mount_as}]` — sandbox-relative mounts, read-only by convention |
 | `code` | same shape; code is just data (hash-addressed like everything) |
 | `outputs` | declared result paths; a missing declared output fails the job |
-| `resources` | `cpus, mem_gb, gpus, walltime` — validated against site capabilities |
+| `resources` | `cpus, mem_gb, gpus, walltime, partition` — validated against site capabilities AND user policy |
 | `site` | site name or `"auto"` |
 | `array` | N: fan out N element jobs with `WEFT_ARRAY_INDEX` = 0…N-1 |
 | `env_vars` | exported in the job; `{{cpus}}`/`{{mem_gb}}`/`{{gpus}}` templated |
+| `after` | job_ids that must be DONE first — pipelines without polling; a failed upstream fails this job as `task.dep_failed` (it never starts) |
 
 Sandbox contract: the job's working directory contains its mounted inputs,
 pre-created output dirs, and `tmp/`; guaranteed variables `WEFT_JOB_ID`,
