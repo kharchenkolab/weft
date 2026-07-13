@@ -5,8 +5,13 @@ import pytest
 
 from weft.api import Weft
 from weft.envman import diff_envs
+from weft.spec import current_platform
 
 pytestmark = pytest.mark.solver
+
+# live locks resolve for the controller's platform; the lock-corruption
+# helpers must poke at that subdir's URLs, not a hardcoded linux-64
+PLAT = current_platform()
 
 
 @pytest.fixture
@@ -40,7 +45,7 @@ def _break_lock(w, env_id):
     with w.store._lock, w.store._conn:
         w.store._conn.execute(
             "UPDATE envs SET native_lock=? WHERE env_id=?",
-            (row["native_lock"].replace("/linux-64/xz-", "/linux-64/xz-GONE-"),
+            (row["native_lock"].replace(f"/{PLAT}/xz-", f"/{PLAT}/xz-GONE-"),
              env_id))
 
 
@@ -76,12 +81,12 @@ def test_drift_revises_instead_of_dead_ending(w):
     # spec now yields a different package set (hence a different EnvID).
     old_canonical = {**row["canonical"]}
     old_canonical["platforms"] = {
-        "linux-64": [{**p, "version": "0.0.0-withdrawn"}
-                     for p in row["canonical"]["platforms"]["linux-64"]]}
+        PLAT: [{**p, "version": "0.0.0-withdrawn"}
+               for p in row["canonical"]["platforms"][PLAT]]}
     env_id = "env:v1:" + "d" * 64          # the historical EnvID
     w.store.put_env(env_id, row["spec_hash"], old_canonical,
-                    row["native_lock"].replace("/linux-64/xz-",
-                                               "/linux-64/xz-GONE-"),
+                    row["native_lock"].replace(f"/{PLAT}/xz-",
+                                               f"/{PLAT}/xz-GONE-"),
                     row["manifest"], row["platforms"])
 
     r = w.task_submit({"command": "xz --version > results/v.txt",
@@ -112,7 +117,7 @@ def test_strict_default_still_dead_ends(tmp_path, pixi_bin):
     with w.store._lock, w.store._conn:
         w.store._conn.execute(
             "UPDATE envs SET native_lock=? WHERE env_id=?",
-            (row["native_lock"].replace("/linux-64/xz-", "/linux-64/xz-GONE-"),
+            (row["native_lock"].replace(f"/{PLAT}/xz-", f"/{PLAT}/xz-GONE-"),
              env["env_id"]))
     r = w.task_submit({"command": "true", "env": env["env_id"],
                        "site": "local"})

@@ -189,11 +189,12 @@ def _archive_caveats(weft, env_id: str) -> list[str]:
 
 
 def _free_bytes(adapter) -> int:
+    # -Pk is POSIX (1024-byte blocks); GNU-only -B1 breaks on BSD/darwin df
     r = adapter.run_cmd(
-        f"df -PB1 {shlex.quote(adapter.root)} 2>/dev/null | awk 'NR==2{{print $4}}'",
+        f"df -Pk {shlex.quote(adapter.root)} 2>/dev/null | awk 'NR==2{{print $4}}'",
         timeout=60)
     try:
-        return int(r.out.strip())
+        return int(r.out.strip()) * 1024
     except (ValueError, AttributeError):
         return 0
 
@@ -205,14 +206,22 @@ def _archive_to_controller(weft, env_id: str, site: str, adapter) -> str | None:
     if not env_row:
         raise WeftError("task.invalid", f"unknown EnvID: {env_id}",
                         stage="realize")
-    if not weft.pixi_pack:
-        raise WeftError(
-            "env.realize_failed",
-            "archive=True needs the pixi-pack tool on the controller",
-            stage="realize",
-            hints={"suggestion": "install pixi-pack next to pixi, or evict "
-                                 "without archive (rebuild uses the site's "
-                                 "package cache)"})
+    pixi_pack = weft.pixi_pack
+    if not pixi_pack:
+        # no sibling binary next to pixi: fetch the pinned release for
+        # the controller's platform (cached once under site-tools)
+        try:
+            from .site_tools import fetch_tool
+            from .spec import current_platform
+            pixi_pack = str(fetch_tool("pixi-pack", current_platform()))
+        except WeftError:
+            raise WeftError(
+                "env.realize_failed",
+                "archive=True needs the pixi-pack tool on the controller",
+                stage="realize",
+                hints={"suggestion": "install pixi-pack next to pixi, or "
+                                     "evict without archive (rebuild uses "
+                                     "the site's package cache)"})
     layers = env_row["canonical"].get("layers") or {}
     unpackable = [eco for eco in layers
                   if not hasattr(weft.envman.solvers.get(eco), "pack_layer")]
@@ -235,7 +244,7 @@ def _archive_to_controller(weft, env_id: str, site: str, adapter) -> str | None:
         (tdp / "pixi.lock").write_text(env_row["native_lock"])
         out_tar = tdp / "environment.tar"
         r = subprocess.run(
-            [weft.pixi_pack, "--environment", "default", "--platform", plat,
+            [pixi_pack, "--environment", "default", "--platform", plat,
              "--output-file", str(out_tar), str(tdp)],
             capture_output=True, text=True, timeout=1800)
         if r.returncode != 0 or not out_tar.exists():
@@ -264,9 +273,10 @@ def gc_packages(weft, site: str, confirm: bool = False) -> dict:
     needs the index (or an archive). `env_evict` alone leaves rebuilds at
     seconds; this is what trades that away for disk.
     """
+    from .runner_util import du_apparent_bytes_cmd
     adapter = weft.adapters[site]
     r = adapter.run_cmd(
-        f"du -sb {shlex.quote(adapter.path('cache/pixi'))} 2>/dev/null | cut -f1",
+        du_apparent_bytes_cmd(shlex.quote(adapter.path("cache/pixi"))),
         timeout=300)
     cache_bytes = int(r.out.strip().split()[0]) if r.out.strip() else 0
     ready = [x for x in weft.store.realizations_for_site(site)
@@ -311,8 +321,9 @@ def footprint(weft, site: str) -> dict:
     adapter = weft.adapters[site]
 
     def du(rel: str) -> int:
+        from .runner_util import du_apparent_bytes_cmd
         r = adapter.run_cmd(
-            f"du -sb {shlex.quote(adapter.path(rel))} 2>/dev/null | cut -f1",
+            du_apparent_bytes_cmd(shlex.quote(adapter.path(rel))),
             timeout=300)
         try:
             return int(r.out.strip().split()[0])

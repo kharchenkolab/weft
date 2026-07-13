@@ -33,7 +33,10 @@ def test_footprint_metadata_and_cache_warm_rebuild(w):
     assert fp["realizations"][0]["env_id"] == env
 
     out = w.env_evict(env, "local")
-    assert out["state"] == "evicted" and out["freed_bytes"] > 0
+    # freed_bytes can be honestly ~0: on APFS (clonefile) and hardlinking
+    # filesystems the prefix shares its blocks with the package cache, so
+    # dropping it reclaims little — the measured df delta says so
+    assert out["state"] == "evicted" and out["freed_bytes"] >= 0
     assert "seconds, offline" in out["rebuild"]
     assert w.store.get_realization(env, "local")["state"] == "evicted"
     # the prefix is gone from disk; the shared package cache is NOT

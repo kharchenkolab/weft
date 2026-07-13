@@ -357,8 +357,9 @@ def _prefix_bytes(adapter: SiteAdapter, rel: str) -> int | None:
     """Footprint of a realized prefix — the LRU/quota number a host policy
     needs. Best-effort: an unreadable du must never fail a build."""
     try:
+        from .runner_util import du_apparent_bytes_cmd
         r = adapter.run_cmd(
-            f"du -sb {shlex.quote(adapter.path(rel))} 2>/dev/null | cut -f1",
+            du_apparent_bytes_cmd(shlex.quote(adapter.path(rel))),
             timeout=120)
         return int(r.out.strip().split()[0]) if r.out.strip() else None
     except (WeftError, ValueError, IndexError):

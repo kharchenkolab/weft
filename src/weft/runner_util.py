@@ -11,3 +11,11 @@ def parse_walltime(w: str) -> float | None:
         parts.insert(0, 0)
     h, m, s = parts[-3:]
     return h * 3600 + m * 60 + s
+
+
+def du_apparent_bytes_cmd(path_quoted: str) -> str:
+    """Shell snippet printing a directory's apparent size in bytes.
+    GNU du has -sb; BSD/darwin needs -A -sk (apparent KB). `grep .` turns
+    GNU-absent empty output into a failure so the fallback fires."""
+    return (f"du -sb {path_quoted} 2>/dev/null | cut -f1 | grep . || "
+            f"du -A -sk {path_quoted} 2>/dev/null | awk '{{print $1 * 1024}}'")
