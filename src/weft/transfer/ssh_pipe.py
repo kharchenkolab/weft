@@ -94,7 +94,7 @@ class SshPipe:
         if not checklist:
             return
         v = subprocess.run(
-            self._ssh(endpoint, f"cd {root} && sha256sum -c >/dev/null"),
+            self._ssh(endpoint, f"cd {root} && sha256sum -c - >/dev/null"),
             input=checklist.encode(), capture_output=True, timeout=1800,
         )
         if v.returncode != 0:

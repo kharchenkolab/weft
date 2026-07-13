@@ -258,8 +258,10 @@ class DataManager:
                             f"{_sh.quote(remote)} {_sh.quote(d)}")
                     want = verify.get(digest)
                     if want:
+                        # explicit '-': darwin sha256sum rejects bare
+                        # stdin -c (GNU and busybox accept both)
                         lines.append(f"echo {want}  {_sh.quote(d)} "
-                                     f"| sha256sum -c >/dev/null")
+                                     f"| sha256sum -c - >/dev/null")
                 via = "fs-link" if route.get("shared_fs_path") \
                     else "direct-pull"
                 r = adapter.run_cmd("\n".join(lines), timeout=3600)

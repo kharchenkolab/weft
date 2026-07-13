@@ -287,7 +287,7 @@ class SSHAdapter(SiteAdapter):
         r = self._run(
             f"cat > {shlex.quote(dest)}.tmp && "
             # busybox sha256sum has no --quiet; discard the OK lines instead
-            f"echo {digest}  {shlex.quote(dest)}.tmp | sha256sum -c >/dev/null && "
+            f"echo {digest}  {shlex.quote(dest)}.tmp | sha256sum -c - >/dev/null && "
             f"chmod 755 {shlex.quote(dest)}.tmp && mv {shlex.quote(dest)}.tmp {shlex.quote(dest)}",
             input_bytes=local.read_bytes(), timeout=600,
         )
