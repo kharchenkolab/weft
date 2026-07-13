@@ -84,19 +84,33 @@ def test_cran_layer_packed_for_airgapped_site(tmp_path, pixi_bin):
 
 @pytest.mark.solver
 def test_unpackable_layer_says_so(tmp_path, pixi_bin):
-    """Julia has no packer yet: an air-gapped site must fail with a cause,
+    """A solver WITHOUT pack_layer (every built-in now has one — this
+    injects a stub ecosystem): an air-gapped site must fail with a cause,
     not a mystery."""
+    class StubSolver:
+        ecosystem = "stub"
+        conda_requirements = ()
+
+        def solve(self, deps, spec, workdir):
+            return {"records": [{"name": d, "version": "1", "sha256": ""}
+                                for d in deps],
+                    "native": "{}", "from_source": [], "top_level": deps}
+
+        def realize_layer(self, layer, adapter, env_rel):
+            return "true"
+
     w = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
+    w.envman.solvers["stub"] = StubSolver()
     w.register_site("dark", "local", {
         "root": str(tmp_path / "site-dark2"), "pixi_source": pixi_bin,
         "capabilities_override": {"internet": False,
                                   "runtimes": {"apptainer": "", "docker": False}},
     })
-    env = w.env_ensure({"name": "jl-dark",
-                        "deps": {"conda": ["julia"], "julia": ["Example"]}})
+    env = w.env_ensure({"name": "stub-dark",
+                        "deps": {"conda": ["xz >=5"], "stub": ["thing"]}})
     assert "env_id" in env, env
     r = w.task_submit({"command": "true", "env": env["env_id"], "site": "dark"})
     job = w.runner.wait(r["job_id"], 1800)
     assert job["state"] == "FAILED"
     assert job["error"]["error"] == "env.unsatisfiable_on_site"
-    assert job["error"]["hints"]["layer"] == "julia"
+    assert job["error"]["hints"]["layer"] == "stub"
