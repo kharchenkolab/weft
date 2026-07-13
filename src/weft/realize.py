@@ -870,6 +870,15 @@ def _build_packed(
     pixi_pack = pack_tools.get("pixi_pack")
     cas = pack_tools.get("cas")
     transfers = pack_tools.get("transfers", {})
+    if not pixi_pack:
+        # no sibling binary next to pixi: fetch the pinned release for
+        # the controller's platform (cached once under site-tools)
+        try:
+            from .site_tools import fetch_tool
+            from .spec import current_platform
+            pixi_pack = str(fetch_tool("pixi-pack", current_platform()))
+        except WeftError:
+            pixi_pack = None
     if not pixi_pack or cas is None:
         raise WeftError(
             "env.realize_failed",

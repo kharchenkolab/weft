@@ -3,8 +3,16 @@
 import pytest
 
 from weft.api import Weft
+from weft.spec import current_platform
 
 pytestmark = [pytest.mark.solver, pytest.mark.slow]
+
+# conda-forge ships julia only for linux-64/osx-64: local-site julia is
+# impossible on an Apple-silicon controller (the solve refuses honestly);
+# linux lanes keep the coverage
+needs_julia = pytest.mark.skipif(
+    current_platform() == "osx-arm64",
+    reason="no conda-forge julia for osx-arm64")
 
 
 @pytest.fixture
@@ -21,6 +29,7 @@ def test_julia_requires_interpreter_layer(w):
     assert "julia" in r["hints"]["needs"]
 
 
+@needs_julia
 def test_julia_solve_and_run(w):
     env = w.env_ensure({"name": "jl", "deps": {"conda": ["julia"],
                                                "julia": ["Example"]}})
@@ -41,6 +50,7 @@ def test_julia_solve_and_run(w):
     assert out["preview"]["lines"] == ["Hello, weft"]
 
 
+@needs_julia
 def test_julia_layer_packed_for_airgapped_site(tmp_path, pixi_bin):
     """G6 (design B2, julia): the controller instantiates the locked
     Manifest into a throwaway depot, ships the subset as one blob, and the

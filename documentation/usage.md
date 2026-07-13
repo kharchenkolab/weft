@@ -140,6 +140,10 @@ w.register_site("beamlab", "ssh", {
     "host": "beamlab", "root": "/data/$USER/.weft",
     "pixi_source": ".env/bin/pixi",     # pushed once, hash-verified
 })
+# pixi_source is optional; registration checks bin/pixi RUNS on the site
+# and otherwise fetches the release pinned in weft.site_tools for the
+# site's own platform (cross-platform controllers just work; cache:
+# ~/.cache/weft/site-tools, override versions via WEFT_PIXI_VERSION)
 
 # host reachable only from inside (bastion → target): model the hops.
 # weft renders nested ProxyCommand chains (your keys/options apply at

@@ -13,6 +13,10 @@ w.register_site("beamlab", "ssh", {
     "root": "/data/me/.weft",           # everything weft places lives here
     "pixi_source": "/path/to/pixi",     # pushed once, hash-verified
 })
+# pixi_source is optional and only useful when the site runs the SAME
+# platform as the controller: registration verifies bin/pixi actually
+# runs on the site and otherwise fetches the pinned release for the
+# site's own platform (a mac laptop driving a linux cluster just works)
 
 # hosts reachable only from inside (the usual alien-cluster shape:
 # internet OUT, ssh-only IN) — model the hops, don't hide them in

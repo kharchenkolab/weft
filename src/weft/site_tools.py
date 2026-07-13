@@ -39,6 +39,10 @@ _TOOLS = {
     "pixi": ("prefix-dev/pixi", PIXI_VERSION, "WEFT_PIXI_VERSION"),
     "pixi-unpack": ("Quantco/pixi-pack", PIXI_UNPACK_VERSION,
                     "WEFT_PIXI_UNPACK_VERSION"),
+    # pixi-pack runs on the CONTROLLER (packed-strategy builds), fetched
+    # for the controller's own platform when no sibling binary exists
+    "pixi-pack": ("Quantco/pixi-pack", PIXI_UNPACK_VERSION,
+                  "WEFT_PIXI_UNPACK_VERSION"),
 }
 
 
@@ -96,10 +100,10 @@ def fetch_tool(tool: str, platform: str) -> Path:
     except (urllib.error.URLError, OSError):
         pass
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".tmp")
+    tmp = dest.with_suffix(f".tmp.{os.getpid()}")  # concurrent-fetch safe
     tmp.write_bytes(data)
     tmp.chmod(0o755)
-    tmp.rename(dest)
+    tmp.rename(dest)  # atomic: losers overwrite with identical bytes
     return dest
 
 

@@ -99,6 +99,21 @@ class LocalAdapter(SiteAdapter):
     def transfer_endpoint(self) -> dict:
         return {"method": "local-link", "cas_root": self.path("cas")}
 
+    def _push_binary(self, local: Path, rel: str) -> None:
+        # same seam the ssh adapter exposes, so site-tools acquisition
+        # (pixi/pixi-unpack for THIS platform) covers local sites too —
+        # a bare `pixi` on PATH has no pixi-unpack sibling to link
+        dst = self._root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if dst.exists():
+            dst.unlink()
+        try:
+            os.link(local, dst)
+        except OSError:
+            import shutil
+            shutil.copy2(local, dst)
+        dst.chmod(0o755)
+
     # -- job control ------------------------------------------------------
 
     def submit(self, jobdir_rel: str, task: dict) -> str:
