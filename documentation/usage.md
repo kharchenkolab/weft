@@ -122,6 +122,15 @@ Read the code, use the hints:
 
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 
+### Data between sites
+
+Routes are probed at registration (`site_route_probe(src, dst)` re-probes):
+a shared filesystem or a direct dst→src ssh path (your own keys — weft
+stores none). Staging then links/pulls site-to-site with the controller
+detour as fallback; the submit plan (`staging.site_to_site`) and
+`transfer.done via=...` events show which route each ref took. Sites
+behind NAT/port maps set `peer_host`/`peer_port`.
+
 ### Remote sites
 
 ```python

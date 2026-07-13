@@ -59,6 +59,12 @@ w.register_site("cloud-gpu", "cloud", {
   means conda-forge envs are impossible there. `overridden_fields` names
   facts that came from config, not measurement.
 - `site_probe(name)` — re-probe after drift (quota moved, module renamed).
+- **`site_route_probe(src, dst)`** — how bytes can move BETWEEN two sites
+  without the controller: shared filesystem (nonce visibility) or direct
+  ssh with the user's own keys. Probed automatically at registration;
+  `sites_describe` lists routes (`via: shared-fs | direct-ssh |
+  controller`). Staging uses them transparently — see data.md
+  "Site-to-site routing".
 - **`site_probe_deep(name, partitions=[...])`** — COMPUTE-NODE truth: runs
   the probe as a tiny job on each partition and records what the nodes
   actually are (GPUs, glibc, **measured egress** — "login has internet"
@@ -158,9 +164,11 @@ is kilobytes. Strip aggressively — `env_evict` is cheap to undo.
 site directory), `user`, `port`, `ssh_opts` (raw ssh flags, e.g.
 `["-i", "/path/key", "-o", "StrictHostKeyChecking=no"]`),
 `jump` (hop list, entries `"user@host:port"` — port optional),
-`pixi_source`, `pixi_unpack_source`, `shared` (cross-user root),
-`capabilities_override`, `policy`. Slurm adds `scheduler`
-({account, partition}) and `modules_init`.
+`peer_host`/`peer_port` (the address OTHER SITES use to reach this one,
+when NAT or port maps make it differ from the controller's view — feeds
+direct site-to-site pulls), `pixi_source`, `pixi_unpack_source`,
+`shared` (cross-user root), `capabilities_override`, `policy`. Slurm
+adds `scheduler` ({account, partition}) and `modules_init`.
 
 ## Institutional / managed roots (read-only base envs)
 

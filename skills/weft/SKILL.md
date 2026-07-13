@@ -72,7 +72,9 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
    apply it (see references/failures.md). Never resubmit an unchanged
    failing task more than once.
 3. **Keep bulk data remote.** Reason over previews and digests; fetch
-   selectively. Outputs feeding later tasks never need to leave the site.
+   selectively. Outputs feeding later tasks never need to leave the site —
+   and cross-SITE inputs route directly (shared FS or dst-pulls-from-src)
+   when a probed route exists; the plan's `staging.site_to_site` says so.
 4. **Adapt freely; let weft label it.** Prefer the clean path (new package
    → new spec → new EnvID), but **escape hatches are normal, supported
    moves**: patch a package, build from source, run a bespoke installer,
@@ -114,7 +116,9 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
   `extends_env` + overlay realization), sessions+snapshot, GPU/CUDA
   pinning, realization strategies, repair, reuse, eviction semantics.
 - `references/data.md` — DataRefs, staging plans, chaining, fetch,
-  transfer progress, chunked big files, reproducibility bundles.
+  transfer progress, chunked big files, site-to-site routing (shared-FS
+  links / direct pulls — the controller carries bytes only as a last
+  resort), reproducibility bundles.
 - `references/jobs.md` — lifecycle, arrays & digests & retry, monitoring,
   queue reasons, logs, cancel, memoization, provenance.
 - `references/kernels.md` — persistent interactive interpreters
