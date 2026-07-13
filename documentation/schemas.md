@@ -45,3 +45,29 @@ Ref node (when the target is a `dref:`): `ref`, `bytes`, `origin`
 
 Guarantee: every field needed to regenerate a result — or to state
 honestly why regeneration isn't content-pinned — is in these two shapes.
+
+
+## `capabilities:v2`
+
+Versioned site capability record. Top level = where the control plane
+runs (login node / direct host); `scheduler.partitions[*]` each carry
+`gres` ([{type, model, count}]), `features`, `max_walltime` +
+unambiguous `max_walltime_s`, scontrol detail (default_walltime,
+priority_tier, oversubscribe), and — after `site_probe_deep` — a
+`compute` sub-record measured ON a node of that partition (same schema,
+`measured_on`/`probed_at` provenance, measured `internet`). Fields set by
+`capabilities_override` are listed in `overridden_fields`: declared, not
+measured. `storage.candidates` = probed [{path, writable, free_gb}].
+
+## `bundle:v1`
+
+One-file provenance closure of a finished job: `target_job`, `jobs`
+(task + task_hash + manifest per job in the input-producing closure),
+`envs` (spec body + spec_hash + canonical lock + native lockfile +
+platforms + parent/layerable), `datarefs` (rows incl. chunk lists), and
+content under `bundle/blobs/<sha256>` (verified on import) +
+`bundle/trees/<hash>.json`. Contract: `bundle_import` into any workspace,
+re-run the returned task with force=True — output refs must equal
+`recorded_outputs` (the re-derivation proof). `reproducibility` carries
+the honest limits (escape-hatch re-executes captured installers; attested
+modules must exist at the destination).

@@ -24,6 +24,8 @@ an unchanged failing task more than once.
 | `budget.exceeded` | cloud cap (pre-launch or watchdog) | never loop; report spend from hints and ask the user about the cap |
 | `quota.storage` | site disk pressure | suggest GC / another storage root to the user |
 | `task.invalid` | malformed request | fix your call; hints list valid fields/values |
+| `task.dep_failed` | an `after` dependency failed/vanished — this job never ran | fix + re-run the upstream job (`hints.dependency`), then resubmit this one |
+| `env.evict_blocked` | overlay children or live jobs/sessions/kernels use this env | hints name them: cascade=True for children, cancel/stop for live work |
 
 Kernel deaths are events, not job errors: **`kernel.died`** carries the
 killing block and log tail; recover with

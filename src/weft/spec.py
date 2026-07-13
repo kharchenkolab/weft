@@ -105,6 +105,13 @@ class EnvSpec:
     # pixi [system-requirements]: lets a CUDA stack solve on a GPU-less
     # controller by asserting what the *target* provides (e.g. {"cuda": "12.4"})
     system_requirements: dict[str, str] = field(default_factory=dict)
+    # R layers: extra CRAN-like repositories resolved JOINTLY with the base
+    # snapshot (r-universe, drat, institutional mirrors), and repositories
+    # pinned by a provider's named RELEASE line (a release freezes a
+    # coherent package set — semantically a snapshot, so it pins identity
+    # the same way). Both hashed: they change what resolves.
+    r_repositories: list[str] = field(default_factory=list)
+    r_release_repos: list[dict] = field(default_factory=list)
     # IDENTITY-NEUTRAL: why an adaptive step was taken, what to watch on a
     # re-run. Excluded from the spec hash and the EnvID (same discipline
     # that keeps site/resources out of task_hash) — documentation, never a
@@ -123,6 +130,7 @@ class EnvSpec:
             "container_base", "env_vars", "post_install", "extends",
             "system_requirements", "notes", "step_notes",
             "post_install_inputs", "extends_env",
+            "r_repositories", "r_release_repos",
         }
         if unknown:
             raise WeftError(
@@ -133,8 +141,8 @@ class EnvSpec:
                     "name", "platforms", "channels", "deps.<ecosystem>",
                     "variants", "modules", "container_base", "env_vars",
                     "post_install", "post_install_inputs", "extends",
-                    "extends_env", "system_requirements", "notes",
-                    "step_notes",
+                    "extends_env", "system_requirements", "r_repositories",
+                    "r_release_repos", "notes", "step_notes",
                 ]},
             )
         variants = {
@@ -158,6 +166,9 @@ class EnvSpec:
                                  (d.get("post_install_inputs") or [])],
             extends=d.get("extends"),
             extends_env=d.get("extends_env"),
+            r_repositories=[str(x) for x in (d.get("r_repositories") or [])],
+            r_release_repos=[dict(x) for x in
+                             (d.get("r_release_repos") or [])],
             system_requirements={
                 k: str(v) for k, v in (d.get("system_requirements") or {}).items()
             },
@@ -183,6 +194,8 @@ class EnvSpec:
             "extends": self.extends,
             "extends_env": self.extends_env,
             "system_requirements": self.system_requirements,
+            "r_repositories": self.r_repositories,
+            "r_release_repos": self.r_release_repos,
             "notes": self.notes,
             "step_notes": self.step_notes,
         }
@@ -230,6 +243,11 @@ class EnvSpec:
             extends_env=self.extends_env or parent.extends_env,
             system_requirements={**parent.system_requirements,
                                  **self.system_requirements},
+            r_repositories=_prepend_unique(self.r_repositories,
+                                           parent.r_repositories),
+            r_release_repos=self.r_release_repos + [
+                r for r in parent.r_release_repos
+                if r not in self.r_release_repos],
             notes=parent.notes + self.notes,
             # child steps land AFTER the parent's in the merged list — their
             # notes shift with them (else they annotate, and clobber notes

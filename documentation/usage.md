@@ -216,6 +216,15 @@ Off-CI regression scenarios live in `misc/scenarios/scenarios.py`
 
 ### Multi-ecosystem environments (R/CRAN/GitHub, more to come)
 
+R specs can widen the repository universe beyond the dated base mirror:
+`r_repositories` (extra CRAN-like repos, resolved jointly for the closure)
+and `r_release_repos` (`{provider, release}` — a registered provider
+expands a named release line to its repo set + required R version,
+validated against the conda layer). Both are identity: they change what
+resolves, so they change the EnvID; packed/air-gapped delivery and
+`extends_env` overlays compose unchanged.
+
+
 ```python
 env = w.env_ensure({
     "name": "r-analysis",

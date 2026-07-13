@@ -172,3 +172,31 @@ full-prefix realizations to byte-identical task outputs.
   realization is a full prefix: honest, automatic.
 - **Air-gapped sites don't overlay** (delta installs need index access) —
   they get packed/archive realization of the same EnvID.
+
+## R: beyond the base mirror (extra + release-pinned repositories)
+
+The R layer resolves against a dated base-mirror snapshot BY DEFAULT; a
+spec can widen the universe, with identity pinned the same way:
+
+```python
+{"deps": {"conda": ["r-base =4.4"], "cran": ["somePkg"]},
+ # CRAN-like repos resolved JOINTLY with the base mirror (r-universe,
+ # drat, institutional mirrors — a package here may depend on base-mirror
+ # packages and vice versa); part of the EnvID
+ "r_repositories": ["https://<org>.r-universe.dev"],
+ # curated repos versioned by a RELEASE LINE: the provider expands the
+ # release id to its repo set (companion repos included) and its required
+ # R version — weft validates release ↔ r-base upfront
+ # (env.layer_conflict names the release, the required R, and the fix)
+ "r_release_repos": [{"provider": "<name>", "release": "3.20"}]}
+```
+
+Providers are a registry (like solvers/fetchers/transfers): hosts register
+`weft.solvers.register_release_repo_provider(name, fn)` where
+`fn(release) -> {"repos": [urls], "r_version": "4.4"|None}`. A release IS
+a snapshot — same grade rung (`snapshot-pinned`), same EnvID discipline
+(two release lines are two envs even when the package sets coincide,
+because what was ASKED differs). Everything downstream composes
+unchanged: records carry the repo that served each package, `pack_layer`
+downloads from it for air-gapped delivery, and `extends_env` children
+inherit the whole repo universe (their pins could not resolve otherwise).

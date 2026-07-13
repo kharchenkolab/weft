@@ -86,19 +86,35 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
 5. **Respect user policy.** `sites_list()` shows per-site rules and notes
    ("don't use during the day"); weft enforces the structured ones, you
    honor the prose ones.
-6. **When confused, look.** `doctor()`, `site_load()`, `task_logs()`,
-   `site_exec(site, cmd, why=...)` (audited, deny-listed), `reconcile()`
-   after a controller restart.
+6. **When confused, look.** `doctor()` (multi-hop sites: which hop died),
+   `site_load()`, `task_logs()`, `site_exec(site, cmd, why=...)` and
+   `job_node_exec(job_id, cmd, why=...)` — INSIDE a running job's
+   allocation (both audited, deny-listed) — `reconcile()` after a
+   controller restart. Cancel with a cause: `task_cancel(id, why=...)`.
+7. **On a new cluster, discover before you submit.** `sites_describe`
+   (partitions with GRES/features/limits) → `site_associations` (MY
+   QOS/GPU ceilings) → `module_list(search=...)` → `site_probe_deep`
+   (compute-node truth, measured egress) → per-partition ETAs via
+   `site_load(resources=, partitions=[...])`. Write what you learn to the
+   site notebook (`site_note`) — it outlives your session.
+8. **Chain, don't poll.** `after=[job_ids]` sequences pipeline stages
+   (failed upstream → `task.dep_failed`, downstream never runs); big
+   sweeps triage by `failure_buckets`, page with `array_elements`, heal
+   with `array_retry`. A finished result travels as a bundle
+   (`bundle_export` → `bundle_import` → re-run proves re-derivation).
 
 ## References
 
-- `references/sites.md` — registering local/ssh/slurm/cloud, policy blocks,
-  capability probing, live load & queue/ETA, modules, budgets, teardown.
+- `references/sites.md` — registering local/ssh/slurm/cloud (incl. bastion
+  `jump` chains and read-only institutional roots), policy blocks,
+  capability probing + compute-node probe-jobs, associations/QOS ceilings,
+  live load & per-partition ETAs, module discovery, the site notebook,
+  budgets, teardown.
 - `references/environments.md` — spec schema, layering (`extends` /
   `extends_env` + overlay realization), sessions+snapshot, GPU/CUDA
   pinning, realization strategies, repair, reuse, eviction semantics.
 - `references/data.md` — DataRefs, staging plans, chaining, fetch,
-  transfer progress, chunked big files.
+  transfer progress, chunked big files, reproducibility bundles.
 - `references/jobs.md` — lifecycle, arrays & digests & retry, monitoring,
   queue reasons, logs, cancel, memoization, provenance.
 - `references/kernels.md` — persistent interactive interpreters

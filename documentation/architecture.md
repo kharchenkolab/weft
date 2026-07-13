@@ -387,6 +387,50 @@ producing jobs down to user-registered data. All links were already in
 the store; this API is the one-call join an agent or a methods appendix
 needs.
 
+## Cluster readiness (rounds A–G)
+
+**Discovery** is decision-grade: `capabilities:v2` records partitions with
+GRES/features/limits + scontrol detail; `site_associations` returns the
+caller's accounts, per-QOS ceilings (structured; None = unknown, never
+unlimited), fairshare; `module_list` enumerates site software;
+`site_probe_deep` submits the shim probe as a job per partition and stores
+per-partition `compute` records with MEASURED node egress — realization
+strategy keys on node truth, not login-node guesses.
+
+**Multi-hop transport**: `jump: [...]` renders nested ProxyCommand chains
+(ssh's `-J` does not propagate command-line options to hops), the
+multiplexer carries keepalives and evicts a stale master on transport
+failure (a bastion restart self-heals), tunnels emit lost/restored and
+re-establish on status; `doctor` walks the chain and names the dead hop.
+
+**Node verbs**: `job_node_exec` joins a running allocation via
+`srun --overlap` (audited, deny-listed); kernels place like jobs
+(`resources={"gpus", "partition"}`) and run INSIDE allocations — the
+file-block protocol needs no ports. A walltime fence refuses asks no
+partition can hold (slurm would accept and pend forever).
+
+**Control flow**: `after=[job_ids]` holds jobs controller-side until
+dependencies are DONE; a failed upstream fails downstream as
+`task.dep_failed` without running it. Arrays triage by `failure_buckets`
+(log-signature clusters) with paged `array_elements` and group-linked
+`array_retry`.
+
+**Records that travel**: `bundle_export` packs a finished job's provenance
+closure (specs+locks, input blobs through producing jobs, captured
+installers); `bundle_import` + re-run proves re-derivation byte-for-byte.
+
+**Institutional roots**: `ro_roots` adopt admin-owned, read-only base envs
+in place (verified, never written/leased; writable-first precedence);
+`extends_env` overlays compose over read-only parents (audited: the
+overlay only reads the parent; Julia stacks depots); integrity on adopted
+bases is verify-and-REPORT (owner named) with a private fall-through
+build (site policy `ro_integrity: "fail"` stops instead). Cross-ownership
+eviction cannot be coordinated (separate stores by design) — the two-deep
+fence degrades affected overlays to private full prefixes, loudly.
+
+**Site notebook**: `site_note` persists per-site operational knowledge,
+surfaced in `sites_describe`.
+
 ## Deviations & decisions log
 
 | decision | rationale |

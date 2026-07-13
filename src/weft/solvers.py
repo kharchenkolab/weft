@@ -71,6 +71,19 @@ class PixiSolver:
         return out[-3000:] if out else f"{package}: not found in the conda layer"
 
 
+# Release-pinned repository providers: given a release id, return the
+# repository URLs that release freezes (possibly several companion repos
+# under one version) and the runtime it requires. A release IS a snapshot
+# — it pins identity exactly like a dated mirror. Hosts register their
+# own; the registry mirrors the solver/fetcher/transfer pattern.
+#   fn(release: str) -> {"repos": [url, ...], "r_version": "4.4" | None}
+RELEASE_REPO_PROVIDERS: dict[str, object] = {}
+
+
+def register_release_repo_provider(name: str, fn) -> None:
+    RELEASE_REPO_PROVIDERS[name] = fn
+
+
 class CranSolver:
     """CRAN + GitHub R dependencies, without pak.
 
@@ -203,8 +216,70 @@ class CranSolver:
 
     # -- Solver interface --------------------------------------------------------
 
-    def solve(self, deps: list[str], spec, workdir: Path) -> dict:
+    def _repo_set(self, spec) -> tuple[list[str], str, list[dict]]:
+        """The full ordered repository set: the dated base snapshot, any
+        extra CRAN-like repos the spec names, and every repo a release-
+        pinned provider expands to. Resolved JOINTLY — a package in a
+        secondary repo may depend on base-mirror packages and vice versa."""
         import datetime
+        date = (getattr(spec, "system_requirements", {}) or {}).get(
+            "cran_snapshot") or datetime.date.today().isoformat()
+        snapshot = self.PPM.format(date=date)
+        repos = [snapshot]
+        for url in getattr(spec, "r_repositories", None) or []:
+            if url not in repos:
+                repos.append(url)
+        releases = []
+        for rr in getattr(spec, "r_release_repos", None) or []:
+            provider = RELEASE_REPO_PROVIDERS.get(rr.get("provider", ""))
+            if provider is None:
+                raise WeftError(
+                    "task.invalid",
+                    f"no release-repo provider {rr.get('provider')!r} "
+                    "registered", stage="solve",
+                    hints={"registered": sorted(RELEASE_REPO_PROVIDERS),
+                           "suggestion": "register one with weft.solvers."
+                                         "register_release_repo_provider"})
+            info = provider(rr["release"])
+            releases.append({"provider": rr["provider"],
+                             "release": rr["release"],
+                             "repos": list(info["repos"]),
+                             "r_version": info.get("r_version")})
+            for url in info["repos"]:
+                if url not in repos:
+                    repos.append(url)
+            self._check_release_runtime(rr, info, spec)
+        return repos, snapshot, releases
+
+    @staticmethod
+    def _check_release_runtime(rr: dict, info: dict, spec) -> None:
+        """A release line is tied to an interpreter version: reject a spec
+        whose conda r-base cannot match, BEFORE any solving is paid for."""
+        need = info.get("r_version")
+        if not need:
+            return
+        from .spec import split_constraint
+        have = None
+        for dep in getattr(spec, "conda", []) or []:
+            name, constraint = split_constraint(dep)
+            if name == "r-base" and constraint not in ("*",):
+                have = constraint.lstrip("=").split()[0]
+                break
+        if have is None:
+            return      # unpinned r-base: the joint solve may still pick
+                        # a compatible one; nothing provable to reject here
+        if not have.startswith(need):
+            raise WeftError(
+                "env.layer_conflict",
+                f'release {rr["provider"]}/{rr["release"]} requires '
+                f"r-base {need}.*, but the conda layer pins r-base {have}",
+                stage="solve",
+                hints={"release": rr, "requires_r": need, "have_r": have,
+                       "suggestion": f'pin "r-base ={need}" in deps.conda, '
+                                     "or pick the release line matching "
+                                     "your R version"})
+
+    def solve(self, deps: list[str], spec, workdir: Path) -> dict:
         import json as _json
         workdir.mkdir(parents=True, exist_ok=True)
         parsed = [self._parse(d) for d in deps]
@@ -214,14 +289,12 @@ class CranSolver:
         want = [p["name"] for p in cran_direct] + \
                [d for g in gh for d in g["deps"]]
         # a dated snapshot is the reproducibility anchor: same date, same
-        # answers, forever. Pin via system_requirements.cran_snapshot;
-        # otherwise today's date is captured at first solve.
-        date = (getattr(spec, "system_requirements", {}) or {}).get(
-            "cran_snapshot") or datetime.date.today().isoformat()
-        snapshot = self.PPM.format(date=date)
+        # answers, forever (extra repos and release lines pin the same way
+        # — a release IS a snapshot of a coherent set).
+        repos, snapshot, releases = self._repo_set(spec)
         out = workdir / "closure.tsv"
         code = (
-            'options(repos=c(CRAN={snap}));'
+            'options(repos=c({repovec}));'
             'ap <- available.packages();'
             'base <- rownames(installed.packages(priority=c("base","recommended")));'
             'want <- setdiff(c({want}), c(base, ""));'
@@ -233,9 +306,13 @@ class CranSolver:
             # topological ordering (packed layers, design-next B2)
             'dg <- tools::package_dependencies(cl, db=ap, recursive=FALSE);'
             'dgs <- vapply(cl, function(p) paste(setdiff(intersect(dg[[p]], cl), base), collapse=","), "");'
-            'write.table(data.frame(ap[cl, "Package"], ap[cl, "Version"], dgs), {out}, sep="\\t", '
+            # which repository actually serves each package (joint
+            # resolution across the whole set — identity records reality)
+            'rp <- sub("/src/contrib.*$", "", ap[cl, "Repository"]);'
+            'write.table(data.frame(ap[cl, "Package"], ap[cl, "Version"], dgs, rp), {out}, sep="\\t", '
             'row.names=FALSE, col.names=FALSE, quote=FALSE)'
-        ).format(snap=_json.dumps(snapshot),
+        ).format(repovec=", ".join(
+                     f"R{i}={_json.dumps(u)}" for i, u in enumerate(repos)),
                  want=", ".join(_json.dumps(x) for x in want) or '""',
                  out=_json.dumps(str(out)))
         if want:
@@ -244,17 +321,21 @@ class CranSolver:
                 msg = (r.stderr or r.stdout)[-1200:]
                 raise WeftError(
                     "env.solve_conflict",
-                    "cran layer is unsatisfiable against the snapshot",
+                    "cran layer is unsatisfiable against the repository set",
                     stage="solve",
                     hints={"ecosystem": "cran", "user_pins": deps,
-                           "snapshot": snapshot, "solver_message": msg,
-                           "suggestion": "package name typo, or not on CRAN "
-                                         "— use owner/repo@ref for github"},
+                           "snapshot": snapshot, "repos": repos,
+                           "solver_message": msg,
+                           "suggestion": "package name typo, not in any "
+                                         "configured repo (add it via "
+                                         "r_repositories / r_release_repos) "
+                                         "— or owner/repo@ref for github"},
                 )
             rows = [l.split("\t") for l in out.read_text().splitlines() if l]
         else:
             rows = []
-        records = [{"name": r[0], "version": r[1], "source": snapshot,
+        records = [{"name": r[0], "version": r[1],
+                    "source": (r[3] if len(r) > 3 and r[3] else snapshot),
                     "sha256": "",
                     "deps": [d for d in (r[2] if len(r) > 2 else ""
                                          ).split(",") if d]}
@@ -286,7 +367,18 @@ class CranSolver:
         records.sort(key=lambda x: (x["name"], x["version"]))
         gh_names = {g["name"] for g in gh}
         return {"records": records, "snapshot": snapshot,
-                "native": _json.dumps({"snapshot": snapshot,
+                "repos": repos, "releases": releases,
+                # what an extends_env child must inherit to re-solve
+                # against the SAME repository universe
+                "spec_config": {
+                    k: v for k, v in (
+                        ("r_repositories",
+                         list(getattr(spec, "r_repositories", None) or [])),
+                        ("r_release_repos",
+                         list(getattr(spec, "r_release_repos", None) or [])),
+                    ) if v},
+                "native": _json.dumps({"snapshot": snapshot, "repos": repos,
+                                       "releases": releases,
                                        "records": records}, indent=1),
                 "from_source": sorted(gh_names),
                 "top_level": sorted({p["name"] for p in cran_direct}
@@ -329,8 +421,9 @@ class CranSolver:
         tarballs = [r["tarball"] for r in layer["records"]
                     if r.get("remote_sha")]
         top = layer.get("top_level", [])
+        repos = layer.get("repos") or [layer["snapshot"]]
         rcode = (
-            'options(repos=c(CRAN={snap}), HTTPUserAgent=sprintf('
+            'options(repos=c({repovec}), HTTPUserAgent=sprintf('
             '"R/%s R (%s)", getRversion(), paste(getRversion(), '
             'R.version$platform, R.version$arch, R.version$os)));'
             'lib <- {lib}; dir.create(lib, showWarnings=FALSE, recursive=TRUE);'
@@ -344,7 +437,7 @@ class CranSolver:
             'if (length(bad)) {{'
             ' write(paste("binary load failed, rebuilding from source:",'
             ' paste(bad, collapse=",")), stderr());'
-            ' srcrepo <- sub("__linux__/[^/]+/", "", {snap});'
+            ' srcrepo <- sub("__linux__/[^/]+/", "", getOption("repos"));'
             ' remove.packages(bad, lib=lib);'
             ' install.packages(bad, lib=lib, repos=srcrepo, type="source") }};'
             't <- c({tarballs});'
@@ -352,7 +445,8 @@ class CranSolver:
             'need <- c({top});'
             'ok <- need %in% rownames(installed.packages(lib.loc=lib));'
             'if (!all(ok)) {{ write(paste("FAILED:", paste(need[!ok], collapse=",")), stderr()); quit(status=4) }}'
-        ).format(snap=_json.dumps(layer["snapshot"]),
+        ).format(repovec=", ".join(
+                     f"R{i}={_json.dumps(u)}" for i, u in enumerate(repos)),
                  lib=_json.dumps(rlib),
                  pkgs=", ".join(_json.dumps(x) for x in cran_names) or '""',
                  tarballs=", ".join(_json.dumps(x) for x in tarballs) or 'character(0)',
@@ -436,7 +530,7 @@ class CranSolver:
         cran_names = [r["name"] for r in recs if not r.get("remote_sha")]
         tarballs = [r["tarball"] for r in recs if r.get("remote_sha")]
         rcode = (
-            'options(repos=c(CRAN={snap}), HTTPUserAgent=sprintf('
+            'options(repos=c({repovec}), HTTPUserAgent=sprintf('
             '"R/%s R (%s)", getRversion(), paste(getRversion(), '
             'R.version$platform, R.version$arch, R.version$os)));'
             'lib <- {lib}; dir.create(lib, showWarnings=FALSE, recursive=TRUE);'
@@ -448,7 +542,9 @@ class CranSolver:
             'need <- c({need});'
             'ok <- need %in% rownames(installed.packages(lib.loc=lib));'
             'if (!all(ok)) {{ write(paste("FAILED:", paste(need[!ok], collapse=",")), stderr()); quit(status=4) }}'
-        ).format(snap=_json.dumps(layer["snapshot"]),
+        ).format(repovec=", ".join(
+                     f"R{i}={_json.dumps(u)}" for i, u in enumerate(
+                         layer.get("repos") or [layer["snapshot"]])),
                  lib=_json.dumps(rlib), plib=_json.dumps(parent_rlib),
                  pkgs=", ".join(_json.dumps(x) for x in cran_names) or 'character(0)',
                  tarballs=", ".join(_json.dumps(x) for x in tarballs) or 'character(0)',
@@ -521,8 +617,10 @@ class CranSolver:
             for rec in order:
                 if rec.get("remote_sha"):        # github: tarball by SHA
                     url, fn = rec["tarball"], f"{rec['name']}.tar.gz"
-                else:                            # cran: source tarball
-                    base = layer["snapshot"].replace("__linux__/focal/", "")
+                else:            # source tarball from the repo that SERVED
+                                 # it (base snapshot or a secondary repo)
+                    base = (rec.get("source") or layer["snapshot"]).replace(
+                        "__linux__/focal/", "")
                     url = (f"{base}/src/contrib/"
                            f"{rec['name']}_{rec['version']}.tar.gz")
                     fn = f"{rec['name']}_{rec['version']}.tar.gz"

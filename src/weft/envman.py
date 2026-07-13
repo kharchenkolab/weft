@@ -169,6 +169,12 @@ class EnvManager:
                     out.system_requirements.setdefault(k, v)
             else:
                 pins = list(layer.get("top_level") or [])
+            # solver-declared spec fields a child must inherit to re-solve
+            # against the SAME universe (extra repos, release lines): the
+            # parent's setting applies unless the child overrides it
+            for k, v in (layer.get("spec_config") or {}).items():
+                if not getattr(out, k, None):
+                    setattr(out, k, v)
             child = out.deps_extra.get(eco, [])
             merged, pinned_names = [], {}
             for p in pins:
