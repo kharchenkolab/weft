@@ -42,6 +42,18 @@ def evict(weft, env_id: str, site: str, archive: bool = False,
         return {"env_id": env_id, "site": site,
                 "state": (real or {}).get("state", "absent"),
                 "note": "nothing realized here to evict"}
+    if real.get("read_only"):
+        root = real["location"].rsplit("/envs/", 1)[0]
+        raise WeftError(
+            "task.invalid",
+            "this realization is ADOPTED from a read-only root — not "
+            "yours to evict", stage="infra",
+            hints={"location": real["location"],
+                   "owner_action": f"the owner of {root} manages its "
+                                   "lifecycle",
+                   "suggestion": "to stop using it, just stop using it — "
+                                 "it costs you no disk; your own copy (if "
+                                 "any) is what env_evict reclaims"})
 
     # live work first: a queued/running job, an open session/kernel, or a
     # running service will activate this exact prefix — evicting it under
@@ -317,14 +329,18 @@ def footprint(weft, site: str) -> dict:
             known.add(x["env_id"].rsplit(":", 1)[-1])
         if x["state"] != "ready":
             continue
+        ro = bool(x.get("read_only"))
         reals.append({
             "env_id": x["env_id"], "bytes": x["bytes"],
             "last_used": x["last_used"],
             "idle_days": round((time.time() - (x["last_used"] or 0)) / 86400, 1)
             if x["last_used"] else None,
-            # everything here is evictable: rebuilds are cheap. The host's
-            # policy decides WHICH — weft just refuses to hide the option.
-            "evictable": True,
+            # everything OWNED here is evictable: rebuilds are cheap. The
+            # host's policy decides WHICH — weft just refuses to hide the
+            # option. Read-only adoptions cost the caller nothing and are
+            # not theirs to reclaim.
+            "evictable": not ro,
+            **({"read_only": True} if ro else {}),
         })
     reals.sort(key=lambda r: r["last_used"] or 0)
 

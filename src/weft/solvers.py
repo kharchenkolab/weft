@@ -703,6 +703,86 @@ class JuliaSolver:
                            + (workdir / "Manifest.toml").read_text()),
                 "from_source": [], "top_level": deps}
 
+    def pack_layer(self, layer: dict, adapter, env_rel: str,
+                   pack_tools: dict) -> str:
+        """Air-gapped delivery (the same seam as CRAN's, design B2): the
+        CONTROLLER instantiates the locked Manifest into a throwaway depot
+        (packages + build artifacts land there), ships the depot subset as
+        one CAS blob, and the site instantiates OFFLINE against it."""
+        import shlex
+        import subprocess
+        import tarfile
+        import tempfile
+
+        cas = pack_tools.get("cas")
+        transfers = pack_tools.get("transfers", {})
+        if cas is None:
+            raise WeftError(
+                "env.realize_failed",
+                "packed julia layer needs the controller CAS",
+                stage="realize")
+        manifest = self._ensure_solver_env()
+        proj, _, man = layer["native"].partition("\n###WEFT-MANIFEST###\n")
+        with tempfile.TemporaryDirectory(prefix="weft-juliapack-") as td:
+            tdp = Path(td)
+            (tdp / "proj").mkdir()
+            (tdp / "proj" / "Project.toml").write_text(proj)
+            (tdp / "proj" / "Manifest.toml").write_text(man)
+            depot = tdp / "depot"
+            r = subprocess.run(
+                [self.pixi_bin, "run", "--manifest-path", str(manifest),
+                 "julia", f"--project={tdp / 'proj'}", "-e",
+                 "using Pkg; Pkg.instantiate()"],
+                capture_output=True, text=True, timeout=3600,
+                env={**__import__("os").environ,
+                     "JULIA_DEPOT_PATH": str(depot)})
+            if r.returncode != 0:
+                raise WeftError(
+                    "env.realize_failed",
+                    "controller-side julia depot build failed",
+                    stage="realize",
+                    hints={"ecosystem": "julia",
+                           "log_tail": (r.stderr or r.stdout)[-1200:]})
+            archive = tdp / "julia-layer.tar"
+            with tarfile.open(archive, "w") as tar:
+                for sub in ("packages", "artifacts", "compiled"):
+                    if (depot / sub).exists():
+                        tar.add(depot / sub, arcname=sub)
+            info = cas.register_file(archive)
+
+        digest = info.ref.split(":")[-1]
+        endpoint = adapter.transfer_endpoint()
+        method = transfers.get(endpoint["method"])
+        method.transfer([(digest, info.bytes)], cas, endpoint,
+                        verify={digest: info.plain_sha256 or digest})
+        site_tar = f"{endpoint['cas_root']}/{digest[:2]}/{digest}"
+        env_dir = adapter.path(env_rel)
+        adapter.write_file(f"{env_rel}/julia/Project.toml", proj.encode())
+        adapter.write_file(f"{env_rel}/julia/Manifest.toml", man.encode())
+        depot_site = adapter.path("cache/julia-depot")
+        r = adapter.run_activated(
+            f". {shlex.quote(env_dir)}/activate.sh && "
+            f"mkdir -p {shlex.quote(depot_site)} && "
+            f"tar -xf {shlex.quote(site_tar)} -C {shlex.quote(depot_site)} "
+            f"&& JULIA_DEPOT_PATH={shlex.quote(depot_site)} "
+            f"JULIA_OFFLINE=true "
+            f"julia --project={shlex.quote(env_dir + '/julia')} "
+            f"-e 'using Pkg; Pkg.instantiate()'",
+            timeout=3600)
+        if r.rc != 0:
+            raise WeftError(
+                "env.realize_failed",
+                "offline julia instantiate failed on site", stage="realize",
+                hints={"ecosystem": "julia",
+                       "log_tail": (r.err or r.out)[-1500:],
+                       "note": "the shipped depot covers packages/artifacts "
+                               "the controller resolved; a platform mismatch "
+                               "between controller and site can invalidate "
+                               "BinaryBuilder artifacts"})
+        return (f'export JULIA_PROJECT="{env_dir}/julia"\n'
+                f'export JULIA_DEPOT_PATH="{depot_site}"\n'
+                'export JULIA_OFFLINE=true')
+
     @staticmethod
     def inherit_pins(layer: dict) -> tuple[list[str], dict[str, str]]:
         """Exact pins for a child solve: registry packages pin to the
@@ -762,7 +842,15 @@ class JuliaSolver:
         proj, _, man = layer["native"].partition("\n###WEFT-MANIFEST###\n")
         adapter.write_file(f"{env_rel}/julia/Project.toml", proj.encode())
         adapter.write_file(f"{env_rel}/julia/Manifest.toml", man.encode())
+        # depot STACK: ours first (writes land here), then the parent
+        # root's (read-only base envs bring their packages along — Julia
+        # only ever writes to the first entry)
         depot = adapter.path("cache/julia-depot")
+        if "/envs/" in parent_rel:
+            parent_depot = (parent_rel.rsplit("/envs/", 1)[0]
+                            + "/cache/julia-depot")
+            if parent_depot != depot and adapter.file_exists(parent_depot):
+                depot = f"{depot}:{parent_depot}"
         r = adapter.run_activated(
             f". {shlex.quote(parent_dir)}/activate.sh && "
             f"JULIA_DEPOT_PATH={shlex.quote(depot)} "

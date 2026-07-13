@@ -110,7 +110,8 @@ def ensure_realization(
     # the delta (O(delta) instead of O(env)). Falls back on any doubt — to
     # whatever strategy capabilities selected, which is correct, just slower.
     base_strategy = strategy
-    overlay_parent = _overlay_parent(env_row, adapter, store, caps)
+    overlay_parent, overlay_parent_loc = (
+        _overlay_parent(env_row, adapter, store, caps) or (None, None))
     if overlay_parent:
         strategy = "overlay"
 
@@ -118,12 +119,15 @@ def ensure_realization(
     with _build_lock(env_id, adapter.name):
         existing = store.get_realization(env_id, adapter.name)
         if existing and existing["state"] == "ready":
-            if adapter.file_exists(f"{rel}/.weft-ready"):
+            # the recorded location, not the computed one: a read-only-root
+            # adoption lives OUTSIDE the writable site root
+            loc = existing["location"] or rel
+            if adapter.file_exists(f"{loc}/.weft-ready"):
                 store.touch_realization(env_id, adapter.name)  # LRU recency
                 # integrity fence: a tampered env (deleted tool, partial
                 # purge) must rebuild, not silently fall through to host
                 # binaries with the locked env's name on the manifest
-                marker = _marker(adapter, rel)
+                marker = _marker(adapter, loc)
                 if marker.get("parent"):
                     # a hot overlay keeps its parent hot: GC recency must
                     # never see a load-bearing parent as idle
@@ -131,22 +135,30 @@ def ensure_realization(
                 recorded = marker.get("bin_digest")
                 marked_strategy = marker.get("strategy", strategy)
                 ok = not recorded or recorded == _bin_digest(
-                    adapter, rel, marked_strategy)
+                    adapter, loc, marked_strategy)
                 # two-deep: an overlay is only as intact as its parent
                 if ok and marker.get("parent"):
-                    p_rel = env_dir_rel(marker["parent"])
-                    ok = (adapter.file_exists(f"{p_rel}/.weft-ready")
+                    p_loc = marker.get("parent_location") \
+                        or env_dir_rel(marker["parent"])
+                    ok = (adapter.file_exists(f"{p_loc}/.weft-ready")
                           and marker.get("parent_bin_digest")
-                          == _bin_digest(adapter, p_rel, "prefix"))
+                          == _bin_digest(adapter, p_loc, "prefix"))
                     if not ok:
                         store.emit("realize.parent_changed", env_id=env_id,
                                    site=adapter.name, parent=marker["parent"])
                 if ok:
                     return existing
-                store.emit("realize.integrity_failed", env_id=env_id,
-                           site=adapter.name,
-                           note="executable inventory changed (here or in the "
-                                "parent); rebuilding")
+                if existing.get("read_only"):
+                    # verify-and-REPORT: the caller cannot rebuild what it
+                    # does not own — name the env and fall through to a
+                    # build in the writable root (or fail, per policy)
+                    _ro_integrity_failed(env_id, existing, adapter, store,
+                                         site_config)
+                else:
+                    store.emit("realize.integrity_failed", env_id=env_id,
+                               site=adapter.name,
+                               note="executable inventory changed (here or "
+                                    "in the parent); rebuilding")
             # site-side deletion (e.g. scratch purge): demote and rebuild
             store.set_realization(env_id, adapter.name, strategy, rel, "missing")
         elif adapter.file_exists(f"{rel}/.weft-ready"):
@@ -161,6 +173,16 @@ def ensure_realization(
             store.emit("realize.adopted", env_id=env_id, site=adapter.name,
                        via="marker")
             return store.get_realization(env_id, adapter.name)
+        else:
+            # read-only roots (admin/service-owned base envs): adopt in
+            # place, never write or lease there. WRITABLE-FIRST precedence
+            # (we only reach here on a writable miss): local state must
+            # beat foreign state, or a user who rebuilt after a broken RO
+            # copy would be stuck re-adopting the broken one.
+            adopted = _adopt_from_ro_roots(env_id, env_row, adapter, store,
+                                           site_config)
+            if adopted:
+                return adopted
 
         # shared roots (multiple users, one filesystem): in-process locks
         # don't reach across users — take a site-side lease around the build
@@ -192,7 +214,8 @@ def ensure_realization(
             if strategy == "overlay":
                 try:
                     _build_overlay(env_id, env_row, adapter, rel,
-                                   overlay_parent, store, pack_tools or {})
+                                   overlay_parent, overlay_parent_loc,
+                                   store, pack_tools or {})
                 except WeftError as e:
                     # composition didn't verify (ABI, shadowing, a build that
                     # needed something the parent lacks): the user still gets a
@@ -225,7 +248,8 @@ def ensure_realization(
                                            pack_tools or {})
                 _run_post_install(env_row, adapter, rel)
             _spot_check_and_mark(env_id, env_row, adapter, rel, strategy,
-                                 parent=overlay_parent)
+                                 parent=overlay_parent,
+                                 parent_loc=overlay_parent_loc)
         except WeftError as e:
             store.set_realization(
                 env_id, adapter.name, strategy, rel, "failed", log=e.detail
@@ -238,6 +262,65 @@ def ensure_realization(
         store.touch_realization(env_id, adapter.name,
                                 nbytes=_prefix_bytes(adapter, rel))
         return store.get_realization(env_id, adapter.name)
+
+
+def _adopt_from_ro_roots(env_id: str, env_row: dict, adapter: SiteAdapter,
+                         store: Store, site_config: dict | None):
+    """Institutional shape: base envs live in admin-owned, READ-ONLY roots.
+    Adopt a ready realization in place — verify, record (absolute location
+    + read_only), never write or lease there."""
+    for ro in (site_config or {}).get("ro_roots") or []:
+        loc = f"{ro.rstrip('/')}/envs/{env_id.rsplit(':', 1)[-1]}"
+        if not adapter.file_exists(f"{loc}/.weft-ready"):
+            continue
+        marker = _marker(adapter, loc)
+        recorded = marker.get("bin_digest")
+        if recorded and recorded != _bin_digest(
+                adapter, loc, marker.get("strategy", "prefix")):
+            store.emit("realize.ro_integrity_failed", env_id=env_id,
+                       site=adapter.name, location=loc,
+                       owner_action=f"the owner of {ro} must re-materialize "
+                                    f"this env; skipping it")
+            continue
+        spot = adapter.run_activated(
+            f". {shlex.quote(adapter.path(loc))}/activate.sh", timeout=120)
+        if spot.rc != 0:
+            store.emit("realize.ro_integrity_failed", env_id=env_id,
+                       site=adapter.name, location=loc,
+                       owner_action=f"activation broken; the owner of {ro} "
+                                    "must repair it; skipping")
+            continue
+        store.set_realization(env_id, adapter.name,
+                              marker.get("strategy") or "prefix",
+                              loc, "ready", read_only=True)
+        store.emit("realize.adopted", env_id=env_id, site=adapter.name,
+                   via="ro-root", location=loc)
+        return store.get_realization(env_id, adapter.name)
+    return None
+
+
+def _ro_integrity_failed(env_id: str, existing: dict, adapter: SiteAdapter,
+                         store: Store, site_config: dict | None) -> None:
+    """A read-only adoption failed its fence: the caller cannot rebuild
+    what it does not own. Report with the owner's action; by default fall
+    through to a writable build (policy ro_integrity: "fail" stops here)."""
+    from .policy import site_policy
+    root = existing["location"].rsplit("/envs/", 1)[0]
+    store.emit("realize.ro_integrity_failed", env_id=env_id,
+               site=adapter.name, location=existing["location"],
+               owner_action=f"the owner of {root} must re-materialize this "
+                            "env; building a private copy meanwhile")
+    policy = site_policy(store.get_site(adapter.name) or {})
+    if policy.get("ro_integrity") == "fail":
+        raise WeftError(
+            "env.realize_failed",
+            f"read-only realization of {env_id} failed integrity and site "
+            "policy forbids a private rebuild",
+            stage="realize",
+            hints={"location": existing["location"],
+                   "owner_action": f"ask the owner of {root} to "
+                                   "re-materialize the env",
+                   "policy": "ro_integrity: fail"})
 
 
 def _marker(adapter: SiteAdapter, rel: str) -> dict:
@@ -513,22 +596,28 @@ def _overlay_parent(env_row: dict, adapter: SiteAdapter, store: Store,
         if (pe.get(key) or []) != (ce.get(key) or []):
             return None  # an extras delta is not materialized by layer
                          # composition — a full prefix realizes it correctly
-    if not adapter.file_exists(f"{env_dir_rel(parent)}/.weft-ready"):
+    # the RECORDED location: a read-only-root parent (admin-owned base)
+    # composes exactly like a local one — overlay only ever READS it
+    p_loc = p_real["location"] or env_dir_rel(parent)
+    if not adapter.file_exists(f"{p_loc}/.weft-ready"):
         return None
-    return parent
+    return (parent, p_loc)
 
 
 def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
-                   parent_env_id: str, store: Store, pack_tools: dict) -> None:
+                   parent_env_id: str, parent_loc: str | None,
+                   store: Store, pack_tools: dict) -> None:
     """Reuse the parent's prefix; materialize ONLY the delta into this env's
-    own layer dirs; compose at runtime via each ecosystem's search path."""
+    own layer dirs; compose at runtime via each ecosystem's search path.
+    The parent may live in a READ-ONLY root (admin-owned base): every
+    parent access below is a read — never write into parent_rel."""
     import json as _json
     import time as _t
     from .overlay import classify_delta
     from .toolchain import build_env_prelude, ensure_toolchain
 
     parent_row = store.get_env(parent_env_id)
-    parent_rel = env_dir_rel(parent_env_id)
+    parent_rel = parent_loc or env_dir_rel(parent_env_id)
     parent_dir = adapter.path(parent_rel)
     delta = classify_delta(parent_row["canonical"], env_row["canonical"])
     if not delta["layerable"]:
@@ -713,7 +802,7 @@ def _bin_digest(adapter: SiteAdapter, rel: str, strategy: str) -> str:
 
 def _spot_check_and_mark(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str, strategy: str,
-    parent: str | None = None,
+    parent: str | None = None, parent_loc: str | None = None,
 ) -> None:
     """Activation succeeds; interpreter runs if present; then fence-mark
     (with the bin inventory fingerprint for later integrity checks)."""
@@ -732,9 +821,12 @@ def _spot_check_and_mark(
     marker = {"strategy": strategy}
     if parent:
         # the integrity fence goes two deep: if the PARENT is repaired,
-        # evicted, or tampered with, this child must rebuild too
-        parent_rel = env_dir_rel(parent)
+        # evicted, or tampered with, this child must rebuild too. Record
+        # WHERE the parent lives — it may be a read-only root, and the
+        # fence must re-digest the same tree it fingerprinted
+        parent_rel = parent_loc or env_dir_rel(parent)
         marker["parent"] = parent
+        marker["parent_location"] = parent_rel
         marker["parent_bin_digest"] = _bin_digest(adapter, parent_rel, "prefix")
         marker["bin_digest"] = _bin_digest(adapter, rel, "overlay")
     else:

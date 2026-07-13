@@ -88,6 +88,7 @@ def plan(weft, site: str | None = None) -> dict:
                  (now - max(r["updated_at"], r["last_used"] or 0)) / 86400, 1)}
             for r in weft.store.realizations_for_site(name)
             if r["state"] == "ready"
+            and not r.get("read_only")     # not ours to reclaim
             # recency = actual use, not last state change: an env realized
             # long ago but used hourly is HOT, not idle
             and max(r["updated_at"], r["last_used"] or 0) < cutoff

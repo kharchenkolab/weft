@@ -98,7 +98,9 @@ class SiteAdapter(ABC):
     # -- shared helpers ----------------------------------------------------
 
     def path(self, rel: str) -> str:
-        return f"{self.root}/{rel}"
+        # absolute passes through: read-only realization roots live outside
+        # the site root, and every read helper funnels through here
+        return rel if rel.startswith("/") else f"{self.root}/{rel}"
 
     @property
     def pixi_bin(self) -> str:

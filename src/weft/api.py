@@ -485,6 +485,23 @@ class Weft:
         on the site rebuilds it from the lockfile."""
         adapter = self._adapter(site)
         from .realize import env_dir_rel
+        real = self.store.get_realization(env_id, site)
+        if real and real.get("read_only"):
+            root = real["location"].rsplit("/envs/", 1)[0]
+            # forget the adoption (ours to forget) — never touch the files
+            # (not ours to fix)
+            self.store.set_realization(env_id, site, real["strategy"],
+                                       env_dir_rel(env_id), "missing",
+                                       log="read-only adoption dropped")
+            self.store.emit("env.repair", env_id=env_id, site=site,
+                            read_only=True)
+            return {"env_id": env_id, "site": site, "state": "cleared",
+                    "note": "adoption from the read-only root dropped — the "
+                            f"files under {root} belong to its owner and "
+                            "were not touched. Next use re-verifies: a "
+                            "healthy read-only copy is re-adopted; a broken "
+                            "one is reported and a private copy builds in "
+                            "your root."}
         rel = env_dir_rel(env_id)
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))}")
         real = self.store.get_realization(env_id, site)
@@ -776,20 +793,64 @@ class Weft:
                               and e["kind"].startswith("job."))]
         return {"events": events, "cursor": cursor}
 
+    _ARRAY_INLINE_CAP = 200
+
     def array_status(self, group: str) -> dict:
+        """Counts + FAILURE BUCKETS (elements clustered by log signature —
+        a 2000-element sweep with three failure modes reads as three lines,
+        each with sample indices to drill into). The per-element list is
+        inlined only for small groups; use array_elements to page."""
         counts = self.store.group_counts(group)
         if counts["total"] == 0:
             raise WeftError("task.invalid", f"unknown array group: {group}",
                             stage="infra")
-        return {"group": group, **counts,
-                "failed_previews": self.store.failed_in_group(group),
+        out = {"group": group, **counts,
+               "failed_previews": self.store.failed_in_group(group),
+               "failure_buckets": self._failure_buckets(group)}
+        if counts["total"] <= self._ARRAY_INLINE_CAP:
+            out["elements"] = [
+                {"index": j["array_index"], "job_id": j["job_id"],
+                 "state": j["state"],
+                 # a memoized element's manifest names its original job
+                 **({"memoized": True} if j["manifest"] and
+                    j["manifest"].get("job_id") != j["job_id"] else {})}
+                for j in self.store.jobs_in_group(group)]
+        else:
+            out["note"] = (f"{counts['total']} elements — page them with "
+                           "array_elements(group, state=..., offset=, "
+                           "limit=); failure_buckets summarize the failed "
+                           "ones")
+        return out
+
+    def _failure_buckets(self, group: str) -> list[dict]:
+        buckets: dict[str, dict] = {}
+        for j in self.store.jobs_in_group(group, state="FAILED"):
+            err = j.get("error") or {}
+            sig = (((err.get("hints") or {}).get("log_signature") or {})
+                   .get("signature")) or err.get("error") or "unknown"
+            b = buckets.setdefault(sig, {"signature": sig, "count": 0,
+                                         "sample_indices": [],
+                                         "sample_job_id": j["job_id"]})
+            b["count"] += 1
+            if len(b["sample_indices"]) < 5:
+                b["sample_indices"].append(j["array_index"])
+        return sorted(buckets.values(), key=lambda b: -b["count"])
+
+    def array_elements(self, group: str, state: str | None = None,
+                       offset: int = 0, limit: int = 100) -> dict:
+        """Paged element listing for large sweeps (drill-down companion to
+        array_status's buckets)."""
+        counts = self.store.group_counts(group)
+        if counts["total"] == 0:
+            raise WeftError("task.invalid", f"unknown array group: {group}",
+                            stage="infra")
+        rows = self.store.jobs_in_group(group, state=state,
+                                        offset=offset, limit=limit)
+        return {"group": group, "offset": offset, "limit": limit,
+                "state_filter": state, "total": counts["total"],
                 "elements": [
                     {"index": j["array_index"], "job_id": j["job_id"],
-                     "state": j["state"],
-                     # a memoized element's manifest names its original job
-                     **({"memoized": True} if j["manifest"] and
-                        j["manifest"].get("job_id") != j["job_id"] else {})}
-                    for j in self.store.jobs_in_group(group)]}
+                     "state": j["state"]} for j in rows]}
 
     def array_retry(self, group: str, indices: list[int] | None = None,
                     command_override: str | None = None) -> dict:
@@ -1117,7 +1178,7 @@ PUBLIC_TOOLS = [
     "env_revise", "env_find_near",
     "data_register", "data_describe", "data_fetch",
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
-    "array_status", "array_result", "array_retry",
+    "array_status", "array_elements", "array_result", "array_retry",
     "events_poll", "doctor", "reconcile", "provenance",
     "bundle_export", "bundle_import",
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",

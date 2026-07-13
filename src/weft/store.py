@@ -97,6 +97,9 @@ class Store:
         if "bytes" not in rcols:
             self._conn.execute("ALTER TABLE realizations ADD COLUMN bytes INTEGER")
             self._conn.execute("ALTER TABLE realizations ADD COLUMN last_used REAL")
+        if "read_only" not in rcols:
+            self._conn.execute(
+                "ALTER TABLE realizations ADD COLUMN read_only INTEGER DEFAULT 0")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS spec_aliases("
             "spec_hash TEXT PRIMARY KEY, env_id TEXT, created_at REAL)"
@@ -288,16 +291,18 @@ class Store:
 
     def set_realization(
         self, env_id: str, site: str, strategy: str, location: str,
-        state: str, log: str = "",
+        state: str, log: str = "", read_only: bool = False,
     ) -> None:
         now = time.time()
         self._write(
             "INSERT INTO realizations(env_id, site, strategy, location, state,"
-            " log, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?) "
+            " log, created_at, updated_at, read_only)"
+            " VALUES(?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(env_id, site) DO UPDATE SET strategy=?, location=?,"
-            " state=?, log=?, updated_at=?",
+            " state=?, log=?, updated_at=?, read_only=?",
             (env_id, site, strategy, location, state, log, now, now,
-             strategy, location, state, log, now),
+             int(read_only),
+             strategy, location, state, log, now, int(read_only)),
         )
 
     def touch_realization(self, env_id: str, site: str,
@@ -507,10 +512,17 @@ class Store:
 
     # -- array groups ---------------------------------------------------------
 
-    def jobs_in_group(self, group: str) -> list[dict]:
-        return [self._job_row(r) for r in self._rows(
-            "SELECT * FROM jobs WHERE array_group=? ORDER BY array_index", (group,)
-        )]
+    def jobs_in_group(self, group: str, state: str | None = None,
+                      offset: int = 0, limit: int | None = None) -> list[dict]:
+        q, vals = "SELECT * FROM jobs WHERE array_group=?", [group]
+        if state:
+            q += " AND state=?"
+            vals.append(state)
+        q += " ORDER BY array_index"
+        if limit is not None:
+            q += " LIMIT ? OFFSET ?"
+            vals += [limit, offset]
+        return [self._job_row(r) for r in self._rows(q, tuple(vals))]
 
     def group_counts(self, group: str) -> dict:
         rows = self._rows(
