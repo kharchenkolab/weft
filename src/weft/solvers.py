@@ -455,7 +455,9 @@ class CranSolver:
         r = adapter.run_activated(
             f". {shlex.quote(env_dir)}/activate.sh && "
             f"Rscript -e {shlex.quote(rcode)}",
-            timeout=3600,
+            # on old-glibc hosts every PPM binary fails to load and the
+            # WHOLE layer rebuilds from source (rstan alone ~20 min)
+            timeout=10800,
         )
         if r.rc != 0:
             raise WeftError(
