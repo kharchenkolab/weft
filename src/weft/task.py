@@ -27,12 +27,19 @@ class Resources:
     gpus: int = 0
     walltime: str = ""       # "HH:MM:SS", empty = unspecified
     partition: str = ""      # scheduler partition; empty = site default
+    # raw scheduler directives for THIS task (e.g. "--constraint=ib") —
+    # the per-task escape hatch for site quirks weft cannot know about.
+    # Validated at submit (weft-managed and dangerous flags refused);
+    # hash-neutral like all resources: they say WHERE/HOW, not WHAT.
+    scheduler_directives: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         out = {"cpus": self.cpus, "mem_gb": self.mem_gb, "gpus": self.gpus,
                "walltime": self.walltime}
         if self.partition:
             out["partition"] = self.partition
+        if self.scheduler_directives:
+            out["scheduler_directives"] = self.scheduler_directives
         return out
 
 
@@ -93,6 +100,8 @@ class Task:
                 gpus=int(res.get("gpus", 0)),
                 walltime=str(res.get("walltime", "")),
                 partition=str(res.get("partition", "")),
+                scheduler_directives=[str(x) for x in
+                                      res.get("scheduler_directives", [])],
             ),
             site=d.get("site", "auto"),
             array=int(d["array"]) if d.get("array") else None,
@@ -104,6 +113,12 @@ class Task:
         return t
 
     def validate(self) -> None:
+        if self.resources.scheduler_directives:
+            # fail FAST at submit, not in the drive thread. Slurm is the
+            # only scheduler today; dispatch per-adapter when that changes.
+            from .adapters.slurm import validate_directives
+            validate_directives(self.resources.scheduler_directives,
+                                "resources.scheduler_directives")
         if len(self.label) > 200:
             raise WeftError(
                 "task.invalid",

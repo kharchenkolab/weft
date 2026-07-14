@@ -94,7 +94,9 @@ class KernelManager:
         jobdir_rel = f"kernels/{kernel_id}"
         driver_src = (_DRIVER_DIR / driver_file).read_bytes()
         adapter.write_file(f"{jobdir_rel}/{driver_file}", driver_src)
-        adapter.write_file(f"{jobdir_rel}/activate.sh", (activate + "\n").encode())
+        adapter.write_file(
+            f"{jobdir_rel}/activate.sh",
+            (self.runner.site_prelude(site) + activate + "\n").encode())
         adapter.write_file(
             f"{jobdir_rel}/cmd.sh",
             f"mkdir -p blocks\nexec {interp} {driver_file}\n".encode())

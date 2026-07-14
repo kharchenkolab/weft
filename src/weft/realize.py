@@ -414,7 +414,8 @@ def _build_prefix(
     build = adapter.run_cmd(
         f"{shlex.quote(adapter.pixi_bin)} install --frozen "
         f"--manifest-path {shlex.quote(manifest_path)} 2>&1",
-        timeout=1800,
+        timeout=5400,   # published/institutional envs are 10-15 GB with
+                        # CUDA stacks; login nodes are often small VMs
     )
     if build.rc != 0:
         raise WeftError(

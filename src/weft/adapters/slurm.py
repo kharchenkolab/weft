@@ -17,6 +17,59 @@ from .ssh import SSHAdapter
 
 _SUBMITTED_RE = re.compile(r"Submitted batch job (\d+)")
 
+# raw-directive escape hatch (site `scheduler.extra_directives`, task
+# `resources.scheduler_directives`): the lever for site quirks weft cannot
+# know about (submit filters, constraints, licenses). Two refusal classes:
+# directives weft itself MANAGES — a raw duplicate would silently conflict
+# with the structured lever — and identity/environment flags nobody should
+# smuggle through a job script.
+_MANAGED_DIRECTIVES = {
+    "--partition": "resources.partition", "-p": "resources.partition",
+    "--time": "resources.walltime", "-t": "resources.walltime",
+    "--mem": "resources.mem_gb",
+    "--cpus-per-task": "resources.cpus", "-c": "resources.cpus",
+    "--gres": "resources.gpus", "--gpus": "resources.gpus",
+    "--account": "site config scheduler.account", "-A": "scheduler.account",
+    "--ntasks": "weft (jobs are single-task by doctrine)", "-n": "weft",
+    "--array": "task.array",
+    "--job-name": "weft", "-J": "weft",
+    "--output": "weft's log capture", "-o": "weft's log capture",
+    "--error": "weft's log capture", "-e": "weft's log capture",
+    "--chdir": "weft's sandbox layout", "-D": "weft's sandbox layout",
+}
+_DIRECTIVE_RE = re.compile(r"--?[A-Za-z][A-Za-z0-9-]*(?:[= ]\S.*)?")
+
+
+def validate_directives(directives: list[str], source: str) -> list[str]:
+    """Refuse managed/dangerous raw directives with the structured lever
+    named; returns the cleaned list."""
+    out = []
+    for d in directives or []:
+        d = str(d).strip()
+        if not d:
+            continue
+        if not _DIRECTIVE_RE.fullmatch(d):
+            raise WeftError(
+                "task.invalid",
+                f"{source}: {d!r} does not look like a scheduler directive",
+                stage="submit",
+                hints={"expected": "'--flag', '--flag=value' or "
+                                   "'--flag value'"})
+        key = re.split(r"[= ]", d, 1)[0]
+        if key in ("--uid", "--gid", "--export"):
+            raise WeftError(
+                "task.invalid",
+                f"{source}: directive {key} is not allowed", stage="submit",
+                hints={"why": "identity/environment control stays with weft"})
+        if key in _MANAGED_DIRECTIVES:
+            raise WeftError(
+                "task.invalid",
+                f"{source}: {key} is managed by weft — a raw duplicate "
+                "would silently conflict", stage="submit",
+                hints={"use_instead": _MANAGED_DIRECTIVES[key]})
+        out.append(d)
+    return out
+
 _QUEUED = {"PENDING", "CONFIGURING", "REQUEUED", "SUSPENDED", "REQUEUE_HOLD"}
 _RUNNING = {"RUNNING", "COMPLETING", "STAGE_OUT"}
 
@@ -79,10 +132,15 @@ class SlurmAdapter(SSHAdapter):
     def __init__(self, *args, account: str | None = None,
                  partition: str | None = None,
                  partitions_allowed: list[str] | None = None,
-                 modules_init: str = "", **kw):
+                 modules_init: str = "",
+                 extra_directives: list[str] | None = None, **kw):
         super().__init__(*args, **kw)
         self.account = account
         self.modules_init = modules_init
+        # validated at REGISTRATION: a bad site-level directive should
+        # fail loudly once, not on every submit
+        self.extra_directives = validate_directives(
+            extra_directives or [], "site config scheduler.extra_directives")
         from ..policy import allowed_partition
         self.partition = allowed_partition(
             {"partitions_allowed": partitions_allowed} if partitions_allowed else {},
@@ -403,6 +461,12 @@ class SlurmAdapter(SSHAdapter):
                 f"#SBATCH --partition={res.get('partition') or self.partition}")
         if self.account:
             lines.append(f"#SBATCH --account={self.account}")
+        # raw-directive escape hatch: site-level quirk fixes first, then
+        # this task's own (validated: managed/dangerous flags refused)
+        for d in [*self.extra_directives,
+                  *validate_directives(res.get("scheduler_directives"),
+                                       "resources.scheduler_directives")]:
+            lines.append(f"#SBATCH {d}")
         # same epilogue contract as the shim's detached runner: files are
         # the source of truth, whatever the scheduler forgets
         lines += [
@@ -475,6 +539,12 @@ class SlurmAdapter(SSHAdapter):
             lines.append(f"#SBATCH --partition={self.partition}")
         if self.account:
             lines.append(f"#SBATCH --account={self.account}")
+        # raw-directive escape hatch: site-level quirk fixes first, then
+        # this task's own (validated: managed/dangerous flags refused)
+        for d in [*self.extra_directives,
+                  *validate_directives(res.get("scheduler_directives"),
+                                       "resources.scheduler_directives")]:
+            lines.append(f"#SBATCH {d}")
         lines += [
             "",
             f'if [ -f {gdir}/ns ] && [ -z "$WEFT_NS" ] '

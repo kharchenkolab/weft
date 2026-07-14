@@ -38,6 +38,13 @@ A replaced element's old row leaves the group's counts but stays
 queryable (`jobs_where`) with `superseded_by` naming its successor —
 fold those under the group's history, they are not duplicates.
 
+One-off scheduler needs ride `resources.scheduler_directives`
+(e.g. `["--constraint=a100"]`) — raw #SBATCH lines, validated (managed
+flags like --partition/--time are refused naming the structured lever;
+identity flags always refused). Site-wide quirk fixes belong in site
+config `scheduler.extra_directives` / `site_prelude` instead: set once,
+every job inherits.
+
 Give tasks a `label` ("calibrate run 3", ≤200 chars) — it shows in
 `task_status`/`jobs_where`/`array_status` and on the PENDING event, and
 is NOT part of task identity: relabeling never forks memoization, and a

@@ -139,6 +139,7 @@ class Weft:
                 partition=sched.get("partition"),
                 partitions_allowed=policy.get("partitions_allowed"),
                 modules_init=config.get("modules_init", ""),
+                extra_directives=sched.get("extra_directives"),
                 shared=bool(config.get("shared")),
             )
         elif kind == "cloud":

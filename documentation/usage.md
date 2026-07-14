@@ -176,6 +176,13 @@ w.register_site("beamlab", "ssh", {
 # probe → tools → routes). probe_only=True bootstraps + probes and
 # registers NOTHING (check-before-commit; the shim — ~100KB — is still
 # written under the root: a real probe needs it).
+#
+# quirk levers (agents fix sites without weft code changes):
+#   scheduler.extra_directives: ["--constraint=ib"]  raw #SBATCH lines,
+#     validated (weft-managed + identity flags refused, structured
+#     lever named); per-task: resources.scheduler_directives
+#   site_prelude: "module purge"   shell before EVERY job's activation
+#   capabilities_override / modules_init / prefer / policy: as before
 # site_unregister(name) forgets a registration without touching the
 # site (refuses while work is live there; re-registering re-adopts
 # realized envs and staged data). site_teardown remains the cloud

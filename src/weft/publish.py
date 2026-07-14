@@ -127,9 +127,16 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
                 "image_bytes": already.get("image_bytes")}
     else:
         t0 = time.time()
-        meta = _build_squashfs(env_id, env_row, adapter, rel, modules,
-                               modules_init, caps, pack_tools,
-                               weft.store.emit)
+        try:
+            meta = _build_squashfs(env_id, env_row, adapter, rel, modules,
+                                   modules_init, caps, pack_tools,
+                                   weft.store.emit)
+        except WeftError as e:
+            # publishes have no realization row — leave a durable trace
+            weft.store.emit("env.publish.failed", env_id=env_id, site=site,
+                            tree=tree, name=name, version=version,
+                            error=e.code, detail=e.detail[:300])
+            raise
         # a publisher-owned live mount at the published path would make
         # the mountpoint EACCES for every other user (FUSE without
         # allow_other hides mounts even from root — found by the chown

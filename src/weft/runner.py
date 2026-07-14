@@ -214,8 +214,9 @@ class JobRunner:
         plan_tsv = self.dataman.materialize_plan(task)
         if plan_tsv:
             adapter.write_file(f"{group_rel}/inputs.tsv", plan_tsv.encode())
-        adapter.write_file(f"{group_rel}/activate.sh",
-                           (activate_line + "\n").encode())
+        adapter.write_file(
+            f"{group_rel}/activate.sh",
+            (self.site_prelude(site) + activate_line + "\n").encode())
         if self.ns_wrap_needed(task.env, site):
             adapter.write_file(f"{group_rel}/ns", b"1\n")
         lines = self._cmd_lines(task, spec_env_vars, site,
@@ -626,6 +627,15 @@ class JobRunner:
         caps = (self.store.get_site(site) or {}).get("capabilities") or {}
         return squashfs_mode(caps) == "userns"
 
+    def site_prelude(self, site: str) -> str:
+        """Site config `site_prelude`: shell lines every job runs BEFORE
+        activation — the generic form of modules_init. The lever for
+        'this site needs one line first' quirks (module purges, compat-
+        layer resets, env fixes) without a weft code change."""
+        cfg = (self.store.get_site(site) or {}).get("config") or {}
+        p = (cfg.get("site_prelude") or "").strip()
+        return (p + "\n") if p else ""
+
     def _prepare_sandbox(
         self, adapter: SiteAdapter, jobdir_rel: str, task: Task,
         job_id: str, activate_line: str, spec_env_vars: dict[str, str] | None = None,
@@ -634,7 +644,9 @@ class JobRunner:
         plan_tsv = self.dataman.materialize_plan(task)
         if self.ns_wrap_needed(task.env, adapter.name):
             adapter.write_file(f"{jobdir_rel}/ns", b"1\n")
-        adapter.write_file(f"{jobdir_rel}/activate.sh", (activate_line + "\n").encode())
+        adapter.write_file(
+            f"{jobdir_rel}/activate.sh",
+            (self.site_prelude(adapter.name) + activate_line + "\n").encode())
         lines = self._cmd_lines(task, spec_env_vars or {}, adapter.name,
                                 job_id_expr=shlex.quote(job_id))
         adapter.write_file(f"{jobdir_rel}/cmd.sh", ("\n".join(lines) + "\n").encode())

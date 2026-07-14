@@ -43,7 +43,16 @@ w.register_site("inner", "ssh", {
 w.register_site("hpc", "slurm", {
     "host": "login.hpc.example.edu", "root": "/scratch/me/.weft",
     "pixi_source": "...",
-    "scheduler": {"account": "phys-lab", "partition": None},
+    "scheduler": {"account": "phys-lab", "partition": None,
+                  # raw #SBATCH lines for site quirks weft cannot know
+                  # (submit filters, constraints); weft-managed and
+                  # identity flags are refused with the structured
+                  # lever named
+                  "extra_directives": ["--constraint=ib"]},
+    "site_prelude": "module purge",     # shell run before EVERY job's
+                                        # activation — the generic
+                                        # modules_init (compat-layer
+                                        # resets, env fixes)
     "modules_init": "export MODULEPATH=/opt/site-modules",  # site quirk knob
     "capabilities_override": {"compute": {"internet": False}},  # if probe can't see it
     "policy": {   # user rules: structured ones ENFORCED, notes SURFACED
