@@ -1162,27 +1162,50 @@ def _build_squashfs(
     adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(inner))} && "
                     f"mkdir -p {shlex.quote(adapter.path(inner))}")
 
-    envdir = adapter.path(rel)
-    activate = ""
-    if modules:
-        activate += module_prelude(modules, modules_init) + "\n"
-    activate += (
-        f'__weft_sq="{envdir}"\n'
-        f"if [ ! -f \"$__weft_sq/mnt/activate.sh\" ]; then\n"
-        f"    {shlex.quote(fuse_mount)} \"$__weft_sq/image.sqfs\" "
-        f"\"$__weft_sq/mnt\" 2>/dev/null || true\n"
-        f"fi\n"
-        f"if [ ! -f \"$__weft_sq/mnt/activate.sh\" ]; then\n"
-        f"    echo 'weft: squashfs env not mounted (no fuse here? run "
-        f"inside a job, or unshare -rm)' >&2\n"
-        f"    return 1 2>/dev/null || exit 1\n"
-        f"fi\n"
-        f". \"$__weft_sq/mnt/activate.sh\"\n")
-    adapter.write_file(f"{rel}/activate.sh", activate.encode())
+    _write_squashfs_activation(adapter, rel, modules, modules_init)
     emit("realize.squashfs.done", env_id=env_id, site=adapter.name,
          image_bytes=image_bytes,
          elapsed_s=round(__import__("time").time() - t0, 1))
     return {"image_sha256": image_sha256, "image_bytes": image_bytes}
+
+
+def _write_squashfs_activation(adapter: SiteAdapter, rel: str,
+                               modules: list[str],
+                               modules_init: str = "") -> None:
+    """(Re)generate the OUTER activation sidecar. Idempotent and separate
+    from the image build so a republish can heal sidecars — needed the
+    first time a shared tree met a second cluster."""
+    envdir = adapter.path(rel)
+    activate = ""
+    if modules:
+        activate += module_prelude(modules, modules_init) + "\n"
+    # the mounter is DISCOVERED at activation time, never baked: published
+    # trees are shared across heterogeneous clusters (measured: two VBC
+    # clusters mount the same /groups at the same paths but keep
+    # squashfuse_ll in different places)
+    activate += (
+        f'__weft_sq="{envdir}"\n'
+        "__weft_mount() {\n"
+        "    for __c in squashfuse_ll squashfuse; do\n"
+        "        for __p in \"$(command -v \"$__c\" 2>/dev/null)\" \\\n"
+        "                   \"/usr/libexec/apptainer/bin/$__c\" \\\n"
+        "                   \"/usr/bin/$__c\" \"/usr/sbin/$__c\"; do\n"
+        "            [ -n \"$__p\" ] && [ -x \"$__p\" ] && \\\n"
+        "                \"$__p\" \"$1\" \"$2\" 2>/dev/null && return 0\n"
+        "        done\n"
+        "    done\n"
+        "    return 1\n"
+        "}\n"
+        "if [ ! -f \"$__weft_sq/mnt/activate.sh\" ]; then\n"
+        "    __weft_mount \"$__weft_sq/image.sqfs\" \"$__weft_sq/mnt\" || true\n"
+        "fi\n"
+        "if [ ! -f \"$__weft_sq/mnt/activate.sh\" ]; then\n"
+        "    echo 'weft: squashfs env not mounted (no fuse/squashfuse "
+        "here? run inside a job, or unshare -rm)' >&2\n"
+        "    return 1 2>/dev/null || exit 1\n"
+        "fi\n"
+        ". \"$__weft_sq/mnt/activate.sh\"\n")
+    adapter.write_file(f"{rel}/activate.sh", activate.encode())
 
 
 def _site_platform(caps: dict | None) -> str:

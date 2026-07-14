@@ -33,6 +33,16 @@ from .errors import WeftError
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
+def _glibc_floor(native_lock: str) -> str | None:
+    """Highest __glibc requirement in the lock — the oldest linux the
+    published env can RUN on."""
+    floors = re.findall(r"__glibc[^0-9]{0,8}>=\s*'?([0-9]+(?:\.[0-9]+)+)",
+                        native_lock or "")
+    if not floors:
+        return None
+    return max(floors, key=lambda v: tuple(int(x) for x in v.split(".")))
+
+
 def _catalog_path(tree: str) -> str:
     return f"{tree.rstrip('/')}/catalog.json"
 
@@ -121,6 +131,11 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
     already = _marker(adapter, rel)
     if already.get("strategy") == "squashfs" \
             and adapter.file_exists(f"{rel}/image.sqfs"):
+        # image is content-addressed and stays; the SIDECARS are cheap
+        # and regenerating them heals fixes (a shared tree's first second
+        # cluster taught us: never bake site-specific paths in them)
+        from .realize import _write_squashfs_activation
+        _write_squashfs_activation(adapter, rel, modules, modules_init)
         weft.store.emit("env.publish.reused", env_id=env_id, site=site,
                         tree=tree)
         meta = {"image_sha256": already.get("image_sha256"),
@@ -167,6 +182,10 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
         "env_id": env_id, "published_at": time.time(),
         "image_sha256": meta.get("image_sha256"),
         "image_bytes": meta.get("image_bytes"),
+        # portability floor: shared trees meet heterogeneous clusters;
+        # a consumer on an older-glibc machine deserves the warning at
+        # ADOPT time, not a loader crash mid-job
+        "glibc_floor": _glibc_floor(env_row["native_lock"]),
         "notes": notes,
     }
     entry["latest"] = version
@@ -216,10 +235,26 @@ def adopt(weft, site: str, tree: str, name: str,
            "note": "imported from the published lock — no solve; use this "
                    "env_id in task_submit/kernel_start; extends_env works "
                    "on top"}
+    floor = rec.get("glibc_floor")
+    site_glibc = ((weft.store.get_site(site) or {})
+                  .get("capabilities") or {}).get("glibc") or ""
+    try:
+        if floor and site_glibc and \
+                tuple(int(x) for x in site_glibc.split(".")) \
+                < tuple(int(x) for x in floor.split(".")):
+            out["warning"] = (
+                f"this env needs glibc >= {floor}; {site!r} has "
+                f"{site_glibc} — its binaries will NOT run here. "
+                f"Publish a version solved with system_requirements "
+                f"{{'libc': '{site_glibc}'}} for this site")
+    except ValueError:
+        pass
     ro = ((weft.store.get_site(site) or {}).get("config") or {}) \
         .get("ro_roots") or []
     if tree not in [r.rstrip("/") for r in ro]:
-        out["warning"] = (f"site {site!r} does not list {tree} in ro_roots "
+        out["warning"] = (out.get("warning", "") + " | " if "warning" in out
+                          else "") + \
+                         (f"site {site!r} does not list {tree} in ro_roots "
                           f"— adoption-in-place will not trigger; "
                           f"re-register the site with ro_roots=[...,{tree!r}]")
     weft.store.emit("env.adopted", env_id=env_id, site=site, tree=tree,
