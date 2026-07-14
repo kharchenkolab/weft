@@ -85,7 +85,9 @@ class SessionManager:
         # package cache — cheap, and the base realization stays immutable
         adapter.write_file(f"{rel}/pixi.toml", env_row["manifest"].encode())
         adapter.write_file(f"{rel}/pixi.lock", env_row["native_lock"].encode())
+        from .realize import _virtual_pkg_overrides
         r = adapter.run_cmd(
+            _virtual_pkg_overrides(env_row) +
             f"{shlex.quote(adapter.pixi_bin)} install "
             f"--manifest-path {shlex.quote(adapter.path(rel))}/pixi.toml",
             timeout=900,

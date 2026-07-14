@@ -403,6 +403,24 @@ def _prefix_bytes(adapter: SiteAdapter, rel: str) -> int | None:
         return None
 
 
+def _virtual_pkg_overrides(env_row: dict) -> str:
+    """GPU (and similar) envs solve with virtual packages the INSTALL
+    point may lack: a CUDA env realizes on a driverless login node while
+    its jobs run on GPU nodes. The spec's system_requirements — already
+    honored at solve time — must be honored at realize time too, via
+    conda's documented override variables."""
+    try:
+        import tomllib
+        sysreq = tomllib.loads(env_row["manifest"]) \
+            .get("system-requirements") or {}
+    except Exception:
+        return ""
+    out = ""
+    if sysreq.get("cuda"):
+        out += f"CONDA_OVERRIDE_CUDA={shlex.quote(str(sysreq['cuda']))} "
+    return out
+
+
 def _build_prefix(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str = "",
@@ -411,7 +429,9 @@ def _build_prefix(
     adapter.write_file(f"{rel}/pixi.toml", env_row["manifest"].encode())
     adapter.write_file(f"{rel}/pixi.lock", env_row["native_lock"].encode())
     manifest_path = adapter.path(f"{rel}/pixi.toml")
+    overrides = _virtual_pkg_overrides(env_row)
     build = adapter.run_cmd(
+        overrides +
         f"{shlex.quote(adapter.pixi_bin)} install --frozen "
         f"--manifest-path {shlex.quote(manifest_path)} 2>&1",
         timeout=5400,   # published/institutional envs are 10-15 GB with
@@ -434,6 +454,7 @@ def _build_prefix(
             },
         )
     hook = adapter.run_cmd(
+        overrides +
         f"{shlex.quote(adapter.pixi_bin)} shell-hook "
         f"--manifest-path {shlex.quote(manifest_path)}",
         timeout=120,

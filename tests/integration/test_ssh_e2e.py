@@ -119,3 +119,23 @@ def test_remote_prefix_realization(weft_ssh, linux_platforms):
     st = weft_ssh.env_status(ensured["env_id"])
     assert any(re["site"] == "beamlab" and re["state"] == "ready"
                for re in st["realizations"])
+
+
+@pytest.mark.solver
+def test_gpu_solved_env_realizes_on_driverless_node(weft_ssh,
+                                                    linux_platforms):
+    """system_requirements.cuda must be honored at REALIZE time, not just
+    solve time: a CUDA-solved env installs on driverless nodes (login
+    VMs, CI containers) via conda's override variable — without it pixi
+    refuses with 'missing virtual packages: __cuda' (found live on a
+    real cluster's login node)."""
+    env = weft_ssh.env_ensure({"name": "cuda-tiny",
+                               "platforms": linux_platforms,
+                               "deps": {"conda": ["xz >=5"]},
+                               "system_requirements": {"cuda": "12.0"}})
+    assert "env_id" in env, env
+    r = weft_ssh.task_submit({"command": "xz --version > results/v.txt",
+                              "env": env["env_id"], "outputs": ["results/"],
+                              "site": "beamlab"})
+    job = weft_ssh.runner.wait(r["job_id"], 900)
+    assert job["state"] == "DONE", job["error"]
