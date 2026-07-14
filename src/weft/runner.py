@@ -773,6 +773,12 @@ class JobRunner:
         env_row = self.store.get_env(task.env) if task.env else None
         from .grade import grade_env, grade_manifest
         g = grade_manifest(grade_env(env_row["canonical"]) if env_row else None)
+        node_name = None
+        try:   # written by the runner script on the EXECUTING node
+            node_name = adapter.read_file(
+                f"{jobdir_rel}/node", 200).decode().strip() or None
+        except WeftError:
+            pass
         manifest = {
             "schema": "manifest:v1",
             # graded confidence (weft grades and reports; the agent decides)
@@ -783,6 +789,7 @@ class JobRunner:
             "task_hash": job["task_hash"],
             "env_id": task.env,
             "site": adapter.name,
+            "node": node_name,
             "exit_code": exit_code,
             "wall_s": wall_s,
             "max_rss_gb": max_rss_gb,

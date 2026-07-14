@@ -66,6 +66,28 @@ def test_batch_job_full_lifecycle(weft_slurm, tmp_path):
     assert "QUEUED" in states and "RUNNING" in states
 
 
+def test_provenance_placement_through_scheduler(weft_slurm):
+    """Placement resolves through the queue: the node file is written by
+    the batch script on the EXECUTING node, the allocation is the slurm
+    job id, and node_truth is labeled with the partition probe source."""
+    weft_slurm.runner.poll_interval = 0.3
+    r = weft_slurm.task_submit({
+        "command": "true",
+        "resources": {"cpus": 1, "walltime": "00:01:00",
+                      "partition": "short"},
+        "site": "hpc"})
+    job = weft_slurm.runner.wait(r["job_id"], 180)
+    assert job["state"] == "DONE", job["error"]
+    pl = weft_slurm.provenance(r["job_id"])["placement"]
+    assert pl["site"] == "hpc"
+    assert pl["node"] == "weftslurm"           # the container's hostname
+    assert pl["allocation_id"].startswith("slurm:")
+    assert pl["partition"] == "short"
+    if pl["node_truth"] is not None:
+        assert "short" in pl["node_truth"]["source"] \
+            or pl["node_truth"]["source"] == "site probe"
+
+
 def test_array_scan_fanout(weft_slurm):
     import threading
     adapter = weft_slurm.adapters["hpc"]

@@ -14,6 +14,7 @@ bump it, with a note here.
 | `reproducibility_meaning` | one sentence explaining the grade |
 | `reproducibility_components` | per-component breakdown `[{component, grade, why}]` — which step is the soft one |
 | `job_id`, `task_hash`, `env_id`, `site` | identities; `task_hash` doubles as the memoization key |
+| `node` | hostname captured ON the executing node (best-effort; `null` if the runner predates it). Circumstance, not identity — it never enters `task_hash` |
 | `exit_code`, `wall_s`, `max_rss_gb` | run facts |
 | `outputs` | `[{path, ref (dref:…), bytes, preview}]` (+ one tree entry per declared output dir) |
 | `output_bytes` | total |
@@ -24,9 +25,21 @@ bump it, with a note here.
 
 Job node: `schema`, `reproducibility` (from its manifest), `job_id`,
 `state`, `site`, `task_hash`, `command`, `env_vars`,
-`outputs [{path, ref}]`, `environment` (below), `inputs` — each input is
+`outputs [{path, ref}]`, `placement` (below), `environment` (below),
+`inputs` — each input is
 `{mount_as, ref, bytes, origin, produced_by?}` where `produced_by`
 recurses into the producing job (depth-limited).
+
+`placement` — WHERE the job ran, as first-class facts, deliberately
+distinct from the node-agnostic reproducibility closure (placement is
+circumstance, never identity: a rerun elsewhere memoizes the same):
+`site`, `node` (from the manifest), `allocation_id` (the scheduler
+handle, e.g. `slurm:12345`; for kernel-promoted records, the kernel's
+allocation — that IS where the blocks ran), `partition`,
+`ran_at {wall_s, collected_at}`, and `node_truth` — the probe-derived
+facts that mattered (`glibc`, `gpus`, `cuda_driver`) labeled with their
+`source` (deep probe of the job's partition when available, else the
+site probe). `node_truth` is a probe record, not a per-job measurement.
 
 `environment`: `env_id`, `spec` (the exact stored spec body),
 `weakly_reproducible`, `notes` / `step_notes` (the agent's rationale for

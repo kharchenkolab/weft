@@ -379,10 +379,14 @@ class Weft:
                 (shlex.quote(adapter.path("bin/weft-shim"))
                  + " probe > probe.json\n").encode())
             try:
-                handle = adapter.submit(jd, {
-                    "command": "probe", "resources": {
-                        "cpus": 1, "walltime": "00:05:00",
-                        "partition": part}})
+                res = {"cpus": 1, "walltime": "00:05:00", "partition": part}
+                if any(g.get("type") == "gpu"
+                       for g in (known.get(part) or {}).get("gres") or []):
+                    # cgroup device isolation hides GPUs from jobs that
+                    # did not ask — a GPU partition's probe must ask
+                    res["gpus"] = 1
+                handle = adapter.submit(jd, {"command": "probe",
+                                             "resources": res})
                 submitted.append((part, jd, handle))
             except WeftError as e:
                 results[part] = {"ok": False, "error": e.detail[:200]}
@@ -658,7 +662,8 @@ class Weft:
     # -- published envs (institutional read-only trees) ---------------------
 
     def env_publish(self, env_id: str, site: str, tree: str, name: str,
-                    version: str, notes: str = "") -> dict:
+                    version: str, notes: str = "",
+                    latest: bool = True) -> dict:
         """Build env_id as a squashfs image at {tree}/envs/<hash> and
         point catalog[name][version] at it — the admin half of ro_roots.
         The tree must live OUTSIDE the weft root; the catalog stores the
@@ -667,7 +672,7 @@ class Weft:
         the site package cache makes it cheap after a test build."""
         from . import publish as _p
         return _p.publish(self, env_id, site, tree, name, version,
-                          notes=notes)
+                          notes=notes, latest=latest)
 
     def env_adopt(self, site: str, tree: str, name: str,
                   version: str = "latest") -> dict:
@@ -1305,8 +1310,10 @@ class Weft:
         """The full "how was this produced" chain for a job or a DataRef:
         command + exact env identity (spec, locked layers, snapshot dates,
         pinned SHAs, attested modules) + input refs, recursing into the
-        jobs that produced those inputs. Everything needed for a methods
-        appendix, machine-readable."""
+        jobs that produced those inputs — plus `placement`, WHERE it ran
+        (site, node, allocation, partition, probe-derived node_truth),
+        kept distinct from that node-agnostic closure. Everything needed
+        for a methods appendix, machine-readable."""
         if target.startswith("dref:"):
             row = self.store.get_dataref(target)
             if not row:
@@ -1338,6 +1345,40 @@ class Weft:
             "env_vars": task.get("env_vars") or {},
             "outputs": [{"path": o["path"], "ref": o["ref"]}
                         for o in (job["manifest"] or {}).get("outputs", [])],
+        }
+        # WHERE it ran — first-class facts, deliberately distinct from the
+        # node-agnostic reproducibility closure above: placement is
+        # circumstance, never identity (a rerun elsewhere memoizes the
+        # same). node_truth is labeled with its source: probe-derived
+        # partition facts, not per-job measurements.
+        res = task.get("resources") or {}
+        caps = (self.store.get_site(job["site"]) or {}) \
+            .get("capabilities") or {}
+        partition = res.get("partition") or None
+        truth, truth_src = None, None
+        for p in (caps.get("scheduler") or {}).get("partitions") or []:
+            if partition and p.get("name") == partition and p.get("compute"):
+                truth = p["compute"]
+                truth_src = f"deep probe of partition {partition!r}"
+                break
+        if truth is None:
+            from .capability import compute_view
+            cv = compute_view(caps)
+            if cv:
+                truth, truth_src = cv, "site probe"
+        node["placement"] = {
+            "site": job["site"],
+            "node": m.get("node"),
+            "allocation_id": job.get("sched_handle"),
+            "partition": partition,
+            "ran_at": {"wall_s": m.get("wall_s"),
+                       "collected_at": job.get("updated_at")},
+            "node_truth": {
+                "glibc": truth.get("glibc"),
+                "gpus": truth.get("gpus"),
+                "cuda_driver": truth.get("cuda_driver"),
+                "source": truth_src,
+            } if truth else None,
         }
         env_id = task.get("env")
         if env_id:

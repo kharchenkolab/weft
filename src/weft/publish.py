@@ -98,7 +98,7 @@ def _validate(weft, site: str, tree: str, name: str, version: str) -> tuple:
 
 
 def publish(weft, env_id: str, site: str, tree: str, name: str,
-            version: str, notes: str = "") -> dict:
+            version: str, notes: str = "", latest: bool = True) -> dict:
     """Build `env_id` as a squashfs realization AT {tree}/envs/<hash> and
     point catalog[name][version] at it. Idempotent per (env, dest)."""
     from .capability import squashfs_mode
@@ -188,7 +188,10 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
         "glibc_floor": _glibc_floor(env_row["native_lock"]),
         "notes": notes,
     }
-    entry["latest"] = version
+    if latest or not entry.get("latest"):
+        # variant publishes (e.g. an old-glibc build of the same release)
+        # pass latest=False so they don't hijack the default pointer
+        entry["latest"] = version
     _write_catalog(adapter, tree, catalog)
 
     weft.store.audit_log("user", "env.publish", site=site,

@@ -39,6 +39,15 @@ def test_kernel_promote_makes_a_transcript_manifest(w):
     p = w.provenance(m["job_id"])
     assert p["reproducibility"] == "state-dependent"
     assert w.task_result(m["job_id"])["job_id"] == m["job_id"]
+    # promoted results carry placement: the node hosting the kernel and
+    # the kernel's own allocation (that IS where the blocks ran)
+    import subprocess
+    host = subprocess.run(["hostname"], capture_output=True,
+                          text=True).stdout.strip()
+    assert m["node"] == host
+    pl = p["placement"]
+    assert pl["node"] == host and pl["site"] == "local"
+    assert pl["allocation_id"] == w.store.get_kernel(k)["handle"]
 
     # failed blocks may not be promoted
     bad = w.kernel_exec(k, "raise ValueError('nope')")

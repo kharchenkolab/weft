@@ -316,6 +316,12 @@ class KernelManager:
         g = grade_manifest(
             grade_env(env_row["canonical"]) if env_row else None,
             transcript=True)
+        node_name = None
+        try:   # written by the runner on the node hosting the kernel
+            node_name = adapter.read_file(
+                f"{k['jobdir']}/node", 200).decode().strip() or None
+        except WeftError:
+            pass
         manifest = {
             "schema": "manifest:v1",
             "reproducibility": g["grade"],
@@ -325,6 +331,7 @@ class KernelManager:
             "task_hash": task_id({"kernel_transcript": chain,
                                   "env": k["env_id"]}),
             "env_id": k["env_id"], "site": k["site"],
+            "node": node_name,
             "exit_code": 0, "wall_s": None, "max_rss_gb": None,
             "transcript": chain,
             "outputs": entries, "output_bytes": total,
@@ -332,7 +339,9 @@ class KernelManager:
         }
         self.store.put_job(job_id, manifest["task_hash"], pseudo.to_dict(),
                            k["site"], "DONE")
-        self.store.update_job(job_id, manifest=manifest)
+        # the kernel's allocation IS where the promoted blocks ran
+        self.store.update_job(job_id, manifest=manifest,
+                              sched_handle=k["handle"])
         self.store.emit("kernel.promoted", kernel=kernel_id, job_id=job_id,
                         blocks=blocks)
         self.store.audit_log(None, "kernel.promote", site=k["site"],

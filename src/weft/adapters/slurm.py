@@ -481,6 +481,7 @@ class SlurmAdapter(SSHAdapter):
             '    WEFT_BASH=1 exec bash "$0" "$@"; fi',
             f"cd {shlex.quote(jobdir)}",
             "echo $$ > pid.real",
+            "hostname > node",
             "[ -f activate.sh ] && . ./activate.sh",
             'if /usr/bin/time -v true 2>/dev/null; then TIMER="/usr/bin/time -v -o rusage"; else TIMER=""; fi',
             "start=$(date +%s)",
@@ -556,6 +557,7 @@ class SlurmAdapter(SSHAdapter):
             'E="el$SLURM_ARRAY_TASK_ID"',
             f'mkdir -p "$E" && cd "$E"',
             "echo $$ > pid.real",
+            "hostname > node",
             f"[ -f {gdir}/inputs.tsv ] && "
             f"{shlex.quote(self.path('bin/weft-shim'))} materialize "
             f"--cas {shlex.quote(self.transfer_endpoint()['cas_root'])} "

@@ -49,6 +49,34 @@ def test_chain_walks_back_to_user_data(w, tmp_path):
     assert "produced_by" not in leaf          # user data: chain terminates
 
 
+def test_placement_is_first_class_but_not_identity(w):
+    """WHERE a job ran (user model ask): resolved placement as facts —
+    site, node, allocation — distinct from the node-agnostic
+    reproducibility closure. Circumstance, never identity."""
+    import subprocess
+    r = w.task_submit({"command": "echo 42 > results/x.txt",
+                       "outputs": ["results/"], "site": "local"})
+    job = w.runner.wait(r["job_id"], 120)
+    assert job["state"] == "DONE"
+
+    p = w.provenance(r["job_id"])
+    pl = p["placement"]
+    assert pl["site"] == "local"
+    # the node file is written by the runner ON the executing node
+    host = subprocess.run(["hostname"], capture_output=True,
+                          text=True).stdout.strip()
+    assert pl["node"] == host and host
+    assert pl["allocation_id"] == job["sched_handle"]
+    assert pl["ran_at"]["wall_s"] >= 0
+    if pl["node_truth"] is not None:      # probe-derived, source-labeled
+        assert pl["node_truth"]["source"]
+
+    # placement is in the manifest too, but NOT in task identity: the
+    # manifest records node, the task hash does not depend on it
+    assert job["manifest"]["node"] == host
+    assert "node" not in (job["task"].get("resources") or {})
+
+
 @pytest.mark.solver
 def test_env_identity_in_chain(w):
     env = w.env_ensure({"name": "prov-env", "deps": {"conda": ["xz >=5"]},
