@@ -370,9 +370,13 @@ class Weft:
         for part in targets:
             jd = f"jobs/probe-{part}-{_uuid.uuid4().hex[:8]}"
             adapter.run_cmd(f"mkdir -p {shlex.quote(adapter.path(jd))}")
+            # absolute path baked in: batch environments do NOT reliably
+            # inherit the submission env (found on a real 26.05 cluster —
+            # $WEFT_ROOT was empty inside the job)
             adapter.write_file(
                 f"{jd}/cmd.sh",
-                b'"$WEFT_ROOT/bin/weft-shim" probe > probe.json\n')
+                (shlex.quote(adapter.path("bin/weft-shim"))
+                 + " probe > probe.json\n").encode())
             try:
                 handle = adapter.submit(jd, {
                     "command": "probe", "resources": {
@@ -384,9 +388,10 @@ class Weft:
         deadline = time.time() + wait_s
         for part, jd, handle in submitted:
             jid = handle.split(":", 1)[-1]
-            probe = None
+            probe, finished = None, False
             while time.time() < deadline:
                 if adapter.file_exists(f"{jd}/exit_code"):
+                    finished = True
                     try:
                         import json as _json
                         probe = _json.loads(
@@ -396,6 +401,18 @@ class Weft:
                     break
                 time.sleep(2)
             if probe is None:
+                if finished:   # ran, but the probe itself broke — say so
+                    log = ""
+                    try:
+                        log = adapter.read_file(f"{jd}/log", 2000).decode()
+                    except WeftError:
+                        pass
+                    results[part] = {
+                        "ok": False,
+                        "error": "probe job ran but produced no usable "
+                                 "probe output",
+                        "log_tail": log[-500:]}
+                    continue
                 adapter.run_cmd(f"scancel {shlex.quote(jid)} 2>/dev/null; true")
                 results[part] = {
                     "ok": False,
@@ -636,6 +653,43 @@ class Weft:
         from .gpu import suggest_gpu_spec
         row = self.sites_describe(site)
         return suggest_gpu_spec(row.get("capabilities") or {}, site)
+
+    # -- published envs (institutional read-only trees) ---------------------
+
+    def env_publish(self, env_id: str, site: str, tree: str, name: str,
+                    version: str, notes: str = "") -> dict:
+        """Build env_id as a squashfs image at {tree}/envs/<hash> and
+        point catalog[name][version] at it — the admin half of ro_roots.
+        The tree must live OUTSIDE the weft root; the catalog stores the
+        spec+lock so consumers adopt by NAME with no solving. Publish is
+        a rebuild at the destination (conda envs bake absolute paths);
+        the site package cache makes it cheap after a test build."""
+        from . import publish as _p
+        return _p.publish(self, env_id, site, tree, name, version,
+                          notes=notes)
+
+    def env_adopt(self, site: str, tree: str, name: str,
+                  version: str = "latest") -> dict:
+        """Resolve a published name→EnvID from {tree}/catalog.json and
+        import its lock (no solve, no network). Use the returned env_id
+        in task_submit/kernel_start; extends_env overlays stack on top.
+        The site's ro_roots must include the tree for adoption-in-place."""
+        from . import publish as _p
+        return _p.adopt(self, site, tree, name, version=version)
+
+    def env_unpublish(self, site: str, tree: str, name: str, version: str,
+                      purge: bool = False) -> dict:
+        """Retire a published version: the catalog pointer goes (no new
+        adoptions), the directory STAYS for a grace period; purge=True
+        deletes it. Consumers' integrity fences fail loudly afterwards —
+        never silently."""
+        from . import publish as _p
+        return _p.unpublish(self, site, tree, name, version, purge=purge)
+
+    def env_published(self, site: str, tree: str) -> dict:
+        """List a tree's catalog: names, versions, latest pointers."""
+        from . import publish as _p
+        return _p.published(self, site, tree)
 
     # -- data -----------------------------------------------------------------
 
@@ -1381,6 +1435,7 @@ PUBLIC_TOOLS = [
     "job_node_exec", "site_teardown", "site_unregister",
     "env_ensure", "env_status", "env_why", "env_repair", "env_gpu_hint",
     "env_revise", "env_find_near",
+    "env_publish", "env_adopt", "env_unpublish", "env_published",
     "data_register", "data_describe", "data_fetch",
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_elements", "array_result", "array_retry",

@@ -385,6 +385,11 @@ class SlurmAdapter(SSHAdapter):
             f"#SBATCH --chdir={jobdir}",
             "#SBATCH --output=slurm-out.log",
             "#SBATCH --error=slurm-out.log",
+            "#SBATCH --ntasks=1",   # weft jobs are single-task by doctrine;
+            # explicit spec also defeats site submit-filters that
+            # inject per-task options (seen on a 26.05 cluster: a
+            # filter added --gpus-per-task, sbatch then demanded
+            # --tasks)
             f"#SBATCH --cpus-per-task={res.get('cpus', 1)}",
         ]
         if res.get("mem_gb"):
@@ -453,6 +458,11 @@ class SlurmAdapter(SSHAdapter):
             f"#SBATCH --chdir={gdir}",
             f"#SBATCH --output={gdir}/slurm-%a.log",
             f"#SBATCH --error={gdir}/slurm-%a.log",
+            "#SBATCH --ntasks=1",   # weft jobs are single-task by doctrine;
+            # explicit spec also defeats site submit-filters that
+            # inject per-task options (seen on a 26.05 cluster: a
+            # filter added --gpus-per-task, sbatch then demanded
+            # --tasks)
             f"#SBATCH --cpus-per-task={res.get('cpus', 1)}",
         ]
         if res.get("mem_gb"):

@@ -203,7 +203,7 @@ def ensure_realization(
             # beat foreign state, or a user who rebuilt after a broken RO
             # copy would be stuck re-adopting the broken one.
             adopted = _adopt_from_ro_roots(env_id, env_row, adapter, store,
-                                           site_config)
+                                           site_config, caps=caps)
             if adopted:
                 return adopted
 
@@ -234,11 +234,13 @@ def ensure_realization(
             store.set_realization(env_id, adapter.name, strategy, rel,
                                   "building")
         try:
+            from .capability import squashfs_mode
+            ns_ok = squashfs_mode(caps or {}) == "userns"
             if strategy == "overlay":
                 try:
                     _build_overlay(env_id, env_row, adapter, rel,
                                    overlay_parent, overlay_parent_loc,
-                                   store, pack_tools or {})
+                                   store, pack_tools or {}, ns_wrap=ns_ok)
                 except WeftError as e:
                     # composition didn't verify (ABI, shadowing, a build that
                     # needed something the parent lacks): the user still gets a
@@ -277,14 +279,16 @@ def ensure_realization(
                     _stage_post_install_inputs(env_row, adapter, rel,
                                                pack_tools or {})
                     _run_post_install(env_row, adapter, rel)
-            # userns-only squashfs sites (parallel-FS root): the spot-check
-            # mounts in a throwaway namespace — nothing persists
+            # squashfs anywhere in the chain + userns available: the
+            # spot-check mounts in a throwaway namespace (also the only
+            # way when the mountpoint is admin-owned or on a parallel FS)
             wrap = ""
-            if strategy.endswith("squashfs"):
-                from .capability import squashfs_direct_ok, squashfs_mode
-                if squashfs_mode(caps or {}) == "userns" \
-                        and not squashfs_direct_ok(caps or {}):
-                    wrap = "unshare -rm"
+            if ns_ok and (strategy.endswith("squashfs") or (
+                    strategy == "overlay" and overlay_parent and "squashfs"
+                    in (_marker(adapter, overlay_parent_loc
+                                or env_dir_rel(overlay_parent))
+                        .get("strategy") or ""))):
+                wrap = "unshare -rm"
             _spot_check_and_mark(env_id, env_row, adapter, rel, strategy,
                                  parent=overlay_parent,
                                  parent_loc=overlay_parent_loc,
@@ -304,7 +308,8 @@ def ensure_realization(
 
 
 def _adopt_from_ro_roots(env_id: str, env_row: dict, adapter: SiteAdapter,
-                         store: Store, site_config: dict | None):
+                         store: Store, site_config: dict | None,
+                         caps: dict | None = None):
     """Institutional shape: base envs live in admin-owned, READ-ONLY roots.
     Adopt a ready realization in place — verify, record (absolute location
     + read_only), never write or lease there."""
@@ -321,8 +326,15 @@ def _adopt_from_ro_roots(env_id: str, env_row: dict, adapter: SiteAdapter,
                        owner_action=f"the owner of {ro} must re-materialize "
                                     f"this env; skipping it")
             continue
-        spot = adapter.run_activated(
-            f". {shlex.quote(adapter.path(loc))}/activate.sh", timeout=120)
+        check = f". {shlex.quote(adapter.path(loc))}/activate.sh"
+        if "squashfs" in (marker.get("strategy") or ""):
+            from .capability import squashfs_mode
+            if squashfs_mode(caps or {}) == "userns":
+                # an admin-owned mountpoint refuses DIRECT fusermount
+                # (write-permission rule) — the whole consumer story on
+                # shared trees rides namespaces (cross-user test finding)
+                check = _ns_wrap_cmd(check)
+        spot = adapter.run_activated(check, timeout=120)
         if spot.rc != 0:
             store.emit("realize.ro_integrity_failed", env_id=env_id,
                        site=adapter.name, location=loc,
@@ -360,6 +372,13 @@ def _ro_integrity_failed(env_id: str, existing: dict, adapter: SiteAdapter,
                    "owner_action": f"ask the owner of {root} to "
                                    "re-materialize the env",
                    "policy": "ro_integrity: fail"})
+
+
+def _ns_wrap_cmd(script: str) -> str:
+    """Run `script` inside a throwaway user+mount namespace: FUSE mounts
+    made by activation land there (regardless of who owns the mountpoint)
+    and vanish when the script exits."""
+    return f"unshare -rm sh -c {shlex.quote(script)}"
 
 
 def _marker(adapter: SiteAdapter, rel: str) -> dict:
@@ -633,12 +652,10 @@ def _overlay_parent(env_row: dict, adapter: SiteAdapter, store: Store,
                          # (a MOUNTED squashfs parent presents exactly the
                          # pixi layout, one level down at mnt/)
     if p_real["strategy"].endswith("squashfs"):
-        from .capability import squashfs_direct_ok
-        if not squashfs_direct_ok(caps or {}):
-            return None  # the overlay BUILD runs many commands that must
-                         # all see the mounted parent — needs a persistent
-                         # (non-namespace) mount; userns-only sites fall
-                         # back to a full build
+        from .capability import squashfs_mode
+        if squashfs_mode(caps or {}) is None:
+            return None  # can neither ns-wrap the build commands nor
+                         # direct-mount the parent — full build instead
     parent_row = store.get_env(parent)
     pe = ((parent_row or {}).get("canonical") or {}).get("extras", {})
     ce = (env_row.get("canonical") or {}).get("extras", {})
@@ -656,7 +673,8 @@ def _overlay_parent(env_row: dict, adapter: SiteAdapter, store: Store,
 
 def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
                    parent_env_id: str, parent_loc: str | None,
-                   store: Store, pack_tools: dict) -> None:
+                   store: Store, pack_tools: dict,
+                   ns_wrap: bool = False) -> None:
     """Reuse the parent's prefix; materialize ONLY the delta into this env's
     own layer dirs; compose at runtime via each ecosystem's search path.
     The parent may live in a READ-ONLY root (admin-owned base): every
@@ -684,10 +702,15 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     parent_layout_rel = f"{parent_rel}/mnt" if parent_is_squashfs \
         else parent_rel
     parent_layout_dir = adapter.path(parent_layout_rel)
+    # ns_wrap: every parent-touching build command runs in its own
+    # user+mount namespace — activation's lazy mount lands there. This is
+    # REQUIRED for admin-owned published parents (direct fusermount
+    # refuses foreign-owned mountpoints) and self-cleaning everywhere.
+    wrap = _ns_wrap_cmd if (ns_wrap and parent_is_squashfs) else (lambda s: s)
     if parent_is_squashfs:
-        m = adapter.run_activated(
+        m = adapter.run_activated(wrap(
             f". {shlex.quote(parent_dir)}/activate.sh >/dev/null 2>&1; "
-            f"test -f {shlex.quote(parent_layout_dir)}/activate.sh",
+            f"test -f {shlex.quote(parent_layout_dir)}/activate.sh"),
             timeout=120)
         if m.rc != 0:
             raise WeftError(
@@ -721,7 +744,8 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
                               toolchain_fingerprint(adapter),
                           "parent_prefix": parent_layout_dir}
     if parent_is_squashfs:
-        pack_tools = {**pack_tools, "parent_layout_dir": parent_layout_dir}
+        pack_tools = {**pack_tools, "parent_layout_dir": parent_layout_dir,
+                      "wrap_cmd": wrap}
 
     activation = [f". {shlex.quote(parent_dir)}/activate.sh"]
     solvers = pack_tools.get("solvers") or {}
@@ -742,7 +766,8 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
         try:
             activation.append(_overlay_pypi(env_id, env_row, parent_row,
                                             adapter, rel, parent_dir,
-                                            delta["pypi_added"], prelude))
+                                            delta["pypi_added"], prelude,
+                                            wrap=wrap))
         except WeftError:
             if prelude:
                 raise           # a compiler was already on PATH: real failure
@@ -752,11 +777,12 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
             activation.append(_overlay_pypi(
                 env_id, env_row, parent_row, adapter, rel, parent_dir,
                 delta["pypi_added"],
-                build_env_prelude(adapter, tc, parent_dir)))
+                build_env_prelude(adapter, tc, parent_layout_dir),
+                wrap=wrap))
 
     adapter.write_file(f"{rel}/activate.sh",
                        ("\n".join(activation) + "\n").encode())
-    _verify_overlay(env_row, parent_row, adapter, rel, delta)
+    _verify_overlay(env_row, parent_row, adapter, rel, delta, wrap=wrap)
     adapter.write_file(f"{rel}/.weft-overlay",
                        _json.dumps({"parent": parent_env_id,
                                     "delta": delta}).encode())
@@ -765,7 +791,7 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
 
 
 def _verify_overlay(env_row: dict, parent_row: dict, adapter: SiteAdapter,
-                    rel: str, delta: dict) -> None:
+                    rel: str, delta: dict, wrap=None) -> None:
     """Composition check — the backstop that makes the overlay safe: load
     every delta package AND a sample of the parent's, in the composed env.
     Any failure aborts the overlay and we fall back to a full prefix."""
@@ -791,7 +817,8 @@ def _verify_overlay(env_row: dict, parent_row: dict, adapter: SiteAdapter,
         return
     script = (f". {shlex.quote(adapter.path(rel))}/activate.sh && "
               + " && ".join(checks))
-    r = adapter.run_activated(script, timeout=600)
+    wrap = wrap or (lambda s: s)
+    r = adapter.run_activated(wrap(script), timeout=600)
     if r.rc != 0:
         raise WeftError(
             "env.realize_failed",
@@ -803,7 +830,7 @@ def _verify_overlay(env_row: dict, parent_row: dict, adapter: SiteAdapter,
 
 def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
                   adapter: SiteAdapter, rel: str, parent_dir: str,
-                  added: list[str], prelude: str) -> str:
+                  added: list[str], prelude: str, wrap=None) -> str:
     """Install ONLY the delta wheels into the child's own site dir, at the
     exact versions the lock pinned, with no dependency resolution (the lock
     already did it) — then compose via PYTHONPATH/PATH."""
@@ -822,13 +849,15 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
     req = f"{adapter.path(rel)}/pylib-requirements.txt"
     pylib = f"{adapter.path(rel)}/pylib"
 
+    _w = wrap or (lambda s: s)
+
     def install(flags: str):
-        return adapter.run_activated(
+        return adapter.run_activated(_w(
             prelude +
             f". {shlex.quote(parent_dir)}/activate.sh && "
             f"mkdir -p {shlex.quote(pylib)} && "
             f"python -m pip install --no-deps --no-input {flags} "
-            f"--target {shlex.quote(pylib)} -r {shlex.quote(req)} 2>&1",
+            f"--target {shlex.quote(pylib)} -r {shlex.quote(req)} 2>&1"),
             timeout=1800)
 
     r = install("--require-hashes" if all_hashed else "")

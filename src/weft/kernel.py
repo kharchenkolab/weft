@@ -76,7 +76,10 @@ class KernelManager:
 
         activate = "true"
         if env_id:
-            rel = env_dir_rel(env_id)
+            # the RECORDED location: an adopted read-only realization
+            # (institutional tree) lives OUTSIDE the writable root
+            real = self.store.get_realization(env_id, site)
+            rel = (real or {}).get("location") or env_dir_rel(env_id)
             if not adapter.file_exists(f"{rel}/.weft-ready"):
                 raise WeftError(
                     "env.not_realized",

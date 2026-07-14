@@ -553,10 +553,11 @@ class CranSolver:
                  pkgs=", ".join(_json.dumps(x) for x in cran_names) or 'character(0)',
                  tarballs=", ".join(_json.dumps(x) for x in tarballs) or 'character(0)',
                  need=", ".join(_json.dumps(x) for x in added) or 'character(0)')
-        r = adapter.run_activated(
+        _w = pack_tools.get("wrap_cmd") or (lambda s: s)
+        r = adapter.run_activated(_w(
             prelude +
             f". {shlex.quote(parent_dir)}/activate.sh && "
-            f"Rscript -e {shlex.quote(rcode)} 2>&1", timeout=3600)
+            f"Rscript -e {shlex.quote(rcode)} 2>&1"), timeout=3600)
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed",
@@ -954,11 +955,12 @@ class JuliaSolver:
                             + "/cache/julia-depot")
             if parent_depot != depot and adapter.file_exists(parent_depot):
                 depot = f"{depot}:{parent_depot}"
-        r = adapter.run_activated(
+        _w = pack_tools.get("wrap_cmd") or (lambda s: s)
+        r = adapter.run_activated(_w(
             f". {shlex.quote(parent_dir)}/activate.sh && "
             f"JULIA_DEPOT_PATH={shlex.quote(depot)} "
             f"julia --project={shlex.quote(env_dir + '/julia')} "
-            f"-e 'using Pkg; Pkg.instantiate()'",
+            f"-e 'using Pkg; Pkg.instantiate()'"),
             timeout=3600)
         if r.rc != 0:
             raise WeftError(

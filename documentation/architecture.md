@@ -236,9 +236,23 @@ epilogues, no stale mounts, and it works even where fusermount3 refuses
 to mount over the root fs (BeeGFS; measured on cbe.next). The integrity
 fence is the image itself (size-checked per use, sha256 in the marker
 for repair). Overlays may stack on squashfs parents (the mount presents
-the exact pixi layout one level down); overlay BUILDS need a persistent
-mount, so userns-only sites fall back to a full build. Eviction
-lazy-unmounts and deletes the image.
+the exact pixi layout one level down); on userns sites every
+parent-touching build command runs in its own namespace — required for
+admin-owned parents, where direct fusermount refuses foreign-owned
+mountpoints. Eviction lazy-unmounts and deletes the image.
+
+**Publishing** (`env_publish`/`env_adopt`/`env_unpublish`,
+`publish.py`): the institutional layer over squashfs + ro_roots. A
+publish is a REBUILD at the destination tree (conda envs bake absolute
+paths), producing the image + sidecars at `{tree}/envs/<hash>` and a
+`catalog.json` mapping human names/versions to EnvIDs — with each env's
+spec and lock stored beside it, so consumers adopt by name with no
+solve and no index access. Names are pointers over immutable
+content-addressed dirs: upgrades publish alongside and move `latest`;
+`unpublish` drops the pointer and leaves the dir for a grace period
+(purge deletes; even then, nodes with live mounts keep serving running
+jobs — squashfuse holds the fd). Consumers' integrity fences fail
+loudly after a purge, never silently.
 
 **Overlay realization** (O(delta) stacking): a child solved with
 `extends_env` — the parent's entire resolution pinned exactly, including

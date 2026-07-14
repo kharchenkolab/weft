@@ -62,7 +62,10 @@ cmd_probe() {
     else
         glibc=$($LDD --version 2>/dev/null | head -1 | grep -o '[0-9][0-9.]*$' || echo "")
     fi
-    gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort | uniq -c \
+    # a broken driver prints its failure to STDOUT — filter to lines that
+    # look like model names, or a garbage "model" lands in capabilities
+    gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null \
+        | grep -v -i 'failed\|driver\|error' | grep . | sort | uniq -c \
         | awk '{n=$1; $1=""; sub(/^ /,""); printf "%s{\"model\":\"%s\",\"count\":%d}", sep, $0, n; sep=","}' || true)
     cuda_driver=$(nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9.]*' | awk '{print $3}' | head -1 || true)
     # squashfs realization inputs: mounter (squashfuse_ll usually lives in

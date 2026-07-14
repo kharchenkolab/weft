@@ -1,0 +1,273 @@
+"""Institutional publishing: squashfs envs in shared read-only trees.
+
+The truth stays content-addressed and immutable — published realizations
+live at `{tree}/envs/<hash>` and are never edited in place (users may be
+running against the mounted image right now; their overlays pin the
+exact parent EnvID). The HUMAN layer is a thin catalog: name → versions
+→ EnvID, like tags pointing at commits. The catalog also stores each
+env's spec + lock so consumers adopt by NAME without re-solving —
+re-solving decays (the index moves, the EnvID diverges, adoption
+silently misses and a multi-GB env rebuilds privately).
+
+Publish is a REBUILD at the destination, not a copy: conda envs bake
+absolute paths, so the content must be built at the very path every
+consumer will mount. The site package cache makes this cheap after a
+test build (downloads dedupe; it is a link + squash pass).
+
+Retirement is graceful by construction: `unpublish` removes the catalog
+pointer and LEAVES the directory (a deleted image would not even kill
+running jobs — squashfuse holds the fd — but overlays and new mounts
+need the grace period); `purge=True` deletes after.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shlex
+import time
+import uuid
+
+from .errors import WeftError
+
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def _catalog_path(tree: str) -> str:
+    return f"{tree.rstrip('/')}/catalog.json"
+
+
+def _read_catalog(adapter, tree: str) -> dict:
+    try:
+        return json.loads(adapter.read_file(_catalog_path(tree)).decode())
+    except WeftError:
+        return {"catalog_version": 1, "envs": {}}
+    except ValueError:
+        raise WeftError(
+            "state.conflict",
+            f"catalog at {_catalog_path(tree)} is not valid JSON",
+            stage="infra",
+            hints={"suggestion": "inspect/restore the catalog file; weft "
+                                 "never repairs a shared tree unasked"})
+
+
+def _write_catalog(adapter, tree: str, catalog: dict) -> None:
+    # atomic replace: consumers may read at any moment
+    path = _catalog_path(tree)
+    tmp = f"{path}.tmp.{uuid.uuid4().hex[:8]}"
+    adapter.write_file(tmp, (json.dumps(catalog, indent=1, sort_keys=True)
+                             + "\n").encode())
+    adapter.run_cmd(f"mv {shlex.quote(tmp)} {shlex.quote(path)}")
+
+
+def _validate(weft, site: str, tree: str, name: str, version: str) -> tuple:
+    if not _NAME_RE.match(name or ""):
+        raise WeftError("task.invalid",
+                        f"bad publish name {name!r} (letters, digits, ._-)",
+                        stage="infra")
+    if not _NAME_RE.match(version or ""):
+        raise WeftError("task.invalid", f"bad version {version!r}",
+                        stage="infra")
+    if not tree.startswith("/"):
+        raise WeftError("task.invalid", "tree must be an absolute path",
+                        stage="infra")
+    adapter = weft.adapters.get(site)
+    if adapter is None:
+        raise WeftError("task.invalid", f"unknown site: {site}", stage="infra",
+                        hints={"registered": sorted(weft.adapters)})
+    root = adapter.root.rstrip("/")
+    t = tree.rstrip("/")
+    if t == root or t.startswith(root + "/") or root.startswith(t + "/"):
+        raise WeftError(
+            "task.invalid",
+            "the publish tree must live OUTSIDE the site's weft root "
+            "(it is a shared, admin-curated space; the root is private "
+            "and GC-managed)", stage="infra",
+            hints={"tree": tree, "weft_root": adapter.root})
+    return adapter, t
+
+
+def publish(weft, env_id: str, site: str, tree: str, name: str,
+            version: str, notes: str = "") -> dict:
+    """Build `env_id` as a squashfs realization AT {tree}/envs/<hash> and
+    point catalog[name][version] at it. Idempotent per (env, dest)."""
+    from .capability import squashfs_mode
+    from .realize import (_build_squashfs, _marker, _site_platform,
+                          _spot_check_and_mark)
+
+    adapter, tree = _validate(weft, site, tree, name, version)
+    env_row = weft.store.get_env(env_id)
+    if not env_row:
+        raise WeftError("task.invalid", f"unknown EnvID: {env_id}",
+                        stage="infra",
+                        hints={"suggestion": "env_ensure the spec first"})
+    site_row = weft.store.get_site(site) or {}
+    caps = site_row.get("capabilities") or {}
+    if squashfs_mode(caps) is None:
+        raise WeftError(
+            "env.unsatisfiable_on_site",
+            f"{site} cannot build+mount squashfs images", stage="realize",
+            hints={"squashfs": caps.get("squashfs") or {}})
+
+    rel = f"{tree}/envs/{env_id.rsplit(':', 1)[-1]}"
+    modules = (env_row["canonical"].get("extras") or {}).get("modules") or []
+    modules_init = (site_row.get("config") or {}).get("modules_init", "")
+    pack_tools = {"pixi_pack": weft.pixi_pack, "cas": weft.cas,
+                  "transfers": weft.transfers,
+                  "solvers": weft.envman.solvers, "store": weft.store,
+                  "dataman": weft.dataman,
+                  "site_platform": _site_platform(caps)}
+
+    already = _marker(adapter, rel)
+    if already.get("strategy") == "squashfs" \
+            and adapter.file_exists(f"{rel}/image.sqfs"):
+        weft.store.emit("env.publish.reused", env_id=env_id, site=site,
+                        tree=tree)
+        meta = {"image_sha256": already.get("image_sha256"),
+                "image_bytes": already.get("image_bytes")}
+    else:
+        t0 = time.time()
+        meta = _build_squashfs(env_id, env_row, adapter, rel, modules,
+                               modules_init, caps, pack_tools,
+                               weft.store.emit)
+        # a publisher-owned live mount at the published path would make
+        # the mountpoint EACCES for every other user (FUSE without
+        # allow_other hides mounts even from root — found by the chown
+        # in the cross-user test): spot-check in a throwaway namespace
+        # where possible, and never leave a mount behind either way
+        wrap = "unshare -rm" if squashfs_mode(caps) == "userns" else ""
+        _spot_check_and_mark(env_id, env_row, adapter, rel, "squashfs",
+                             extra=meta, wrap=wrap)
+        if not wrap:
+            mnt = shlex.quote(f"{adapter.path(rel)}/mnt")
+            adapter.run_cmd(f"fusermount -u {mnt} 2>/dev/null || "
+                            f"fusermount3 -u {mnt} 2>/dev/null; true")
+        meta["build_s"] = round(time.time() - t0, 1)
+
+    # lock sidecar: everything a consumer needs to adopt WITHOUT solving
+    lock_rel = f"{tree}/locks/{env_id.rsplit(':', 1)[-1]}.json"
+    adapter.write_file(lock_rel, json.dumps({
+        "env_id": env_id, "spec_hash": env_row["spec_hash"],
+        "canonical": env_row["canonical"],
+        "native_lock": env_row["native_lock"],
+        "manifest": env_row["manifest"],
+        "platforms": env_row["platforms"],
+    }).encode())
+
+    catalog = _read_catalog(adapter, tree)
+    entry = catalog["envs"].setdefault(name, {"versions": {}, "latest": None})
+    entry["versions"][version] = {
+        "env_id": env_id, "published_at": time.time(),
+        "image_sha256": meta.get("image_sha256"),
+        "image_bytes": meta.get("image_bytes"),
+        "notes": notes,
+    }
+    entry["latest"] = version
+    _write_catalog(adapter, tree, catalog)
+
+    weft.store.audit_log("user", "env.publish", site=site,
+                         command=f"{name}@{version} -> {env_id}",
+                         result=tree)
+    weft.store.emit("env.published", env_id=env_id, site=site, tree=tree,
+                    name=name, version=version,
+                    image_bytes=meta.get("image_bytes"))
+    return {"env_id": env_id, "site": site, "tree": tree, "name": name,
+            "version": version, **meta,
+            "consumers": "register sites with ro_roots including this "
+                         "tree, then env_adopt(site, tree, name)"}
+
+
+def adopt(weft, site: str, tree: str, name: str,
+          version: str = "latest") -> dict:
+    """Resolve name→EnvID from the tree's catalog and import the env row
+    from the stored lock — NO solving, no index access. The realization
+    itself is adopted read-only in place on first use (ro_roots)."""
+    adapter, tree = _validate(weft, site, tree, name, version)
+    catalog = _read_catalog(adapter, tree)
+    entry = (catalog.get("envs") or {}).get(name)
+    if not entry or not entry.get("versions"):
+        raise WeftError(
+            "data.missing", f"nothing published as {name!r} in {tree}",
+            stage="infra",
+            hints={"published": sorted((catalog.get("envs") or {}))})
+    v = entry.get("latest") if version == "latest" else version
+    rec = entry["versions"].get(v)
+    if not rec:
+        raise WeftError(
+            "data.missing", f"{name!r} has no version {version!r}",
+            stage="infra",
+            hints={"versions": sorted(entry["versions"]),
+                   "latest": entry.get("latest")})
+    env_id = rec["env_id"]
+    if not weft.store.get_env(env_id):
+        lock_rel = f"{tree}/locks/{env_id.rsplit(':', 1)[-1]}.json"
+        side = json.loads(adapter.read_file(lock_rel).decode())
+        weft.store.put_env(env_id, side["spec_hash"], side["canonical"],
+                           side["native_lock"], side["manifest"],
+                           side["platforms"])
+    out = {"env_id": env_id, "name": name, "version": v, "tree": tree,
+           "note": "imported from the published lock — no solve; use this "
+                   "env_id in task_submit/kernel_start; extends_env works "
+                   "on top"}
+    ro = ((weft.store.get_site(site) or {}).get("config") or {}) \
+        .get("ro_roots") or []
+    if tree not in [r.rstrip("/") for r in ro]:
+        out["warning"] = (f"site {site!r} does not list {tree} in ro_roots "
+                          f"— adoption-in-place will not trigger; "
+                          f"re-register the site with ro_roots=[...,{tree!r}]")
+    weft.store.emit("env.adopted", env_id=env_id, site=site, tree=tree,
+                    name=name, version=v)
+    return out
+
+
+def unpublish(weft, site: str, tree: str, name: str, version: str,
+              purge: bool = False) -> dict:
+    """Remove the catalog pointer (new adoptions stop); the directory
+    STAYS for the grace period unless purge=True. Running jobs survive a
+    purge on nodes where the image is mounted (open fd), but consumers'
+    integrity fences will fail loudly on next use — that is the design."""
+    adapter, tree = _validate(weft, site, tree, name, version)
+    catalog = _read_catalog(adapter, tree)
+    entry = (catalog.get("envs") or {}).get(name)
+    if not entry or version not in (entry.get("versions") or {}):
+        raise WeftError("data.missing",
+                        f"{name!r}@{version!r} is not in the catalog",
+                        stage="infra")
+    rec = entry["versions"].pop(version)
+    if entry.get("latest") == version:
+        entry["latest"] = max(entry["versions"],
+                              key=lambda k: entry["versions"][k]
+                              ["published_at"]) if entry["versions"] else None
+    if not entry["versions"]:
+        del catalog["envs"][name]
+    _write_catalog(adapter, tree, catalog)
+    out = {"name": name, "version": version, "env_id": rec["env_id"],
+           "state": "unpublished",
+           "note": "directory retained for the grace period; purge=True "
+                   "deletes it"}
+    if purge:
+        rel = f"{tree}/envs/{rec['env_id'].rsplit(':', 1)[-1]}"
+        mnt = shlex.quote(f"{rel}/mnt")
+        adapter.run_cmd(f"fusermount -uz {mnt} 2>/dev/null; "
+                        f"fusermount3 -uz {mnt} 2>/dev/null; "
+                        f"rm -rf {shlex.quote(rel)} "
+                        f"{shlex.quote(tree)}/locks/"
+                        f"{rec['env_id'].rsplit(':', 1)[-1]}.json; true")
+        out["state"] = "purged"
+    weft.store.audit_log("user", "env.unpublish", site=site,
+                         command=f"{name}@{version}",
+                         result=out["state"])
+    weft.store.emit("env.unpublished", env_id=rec["env_id"], site=site,
+                    tree=tree, name=name, version=version,
+                    purged=bool(purge))
+    return out
+
+
+def published(weft, site: str, tree: str) -> dict:
+    """The tree's catalog, as consumers see it."""
+    adapter = weft.adapters.get(site)
+    if adapter is None:
+        raise WeftError("task.invalid", f"unknown site: {site}",
+                        stage="infra",
+                        hints={"registered": sorted(weft.adapters)})
+    return {"tree": tree, **_read_catalog(adapter, tree)}

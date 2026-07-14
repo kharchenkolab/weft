@@ -30,6 +30,35 @@ w.env_ensure({
 })   # → {"env_id": "env:v1:…", "status": "solved"|"cached", "summary": …}
 ```
 
+## Published envs (institutional read-only bases)
+
+Admins publish; lab members adopt BY NAME and extend — nobody re-solves:
+
+```python
+# admin (audited as user; tree must live OUTSIDE any weft root):
+w.env_publish(env_id, "hpc", "/groups/lab/weft-base",
+              name="lab-py", version="2026.07")
+# consumer (site registered with ro_roots=["/groups/lab/weft-base"]):
+env = w.env_adopt("hpc", "/groups/lab/weft-base", "lab-py")["env_id"]
+w.task_submit({..., "env": env})                  # adopted in place, RO
+mine = w.env_ensure({"name": "mine", "extends_env": env,
+                     "platforms": ["linux-64"],   # match the published env!
+                     "deps": {"pypi": ["emcee"]}})  # overlay on the RO base
+w.env_published("hpc", "/groups/lab/weft-base")   # the catalog
+w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
+                                                  # period; purge=True deletes
+```
+
+- Adoption reads the catalog's stored lock — NO solving (re-solving
+  decays as the index moves and would silently rebuild privately).
+- Versions are catalog pointers over immutable content-addressed dirs;
+  upgrades publish alongside and flip `latest` — never in place (jobs
+  may be running against the mount; overlays pin exact parent EnvIDs).
+- The base is filesystem-enforced read-only (EROFS on write); consumer
+  jobs mount it in private per-job namespaces where userns exists.
+- extends_env children must declare the published env's platforms when
+  your controller's platform differs (e.g. mac laptop → linux cluster).
+
 - **Layering, two flavors — never install into an existing env:**
   - `{"extends": <parent SPEC hash>, "deps": {...}}` — whole-spec
     re-solve. The base may move. New EnvID, cheap build (shared cache).

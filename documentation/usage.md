@@ -127,6 +127,29 @@ Read the code, use the hints:
 
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 
+### Published environments (institutional read-only bases)
+
+```python
+# admin: build a squashfs image AT the shared tree + catalog it by name
+w.env_publish(env_id, "hpc", "/groups/lab/weft-base",
+              name="lab-py", version="2026.07")
+# consumer: adopt by NAME from the catalog's stored lock — no solving
+env = w.env_adopt("hpc", "/groups/lab/weft-base", "lab-py")["env_id"]
+mine = w.env_ensure({"extends_env": env, "platforms": ["linux-64"],
+                     "deps": {"pypi": ["emcee"]}, "name": "mine"})
+w.env_published("hpc", "/groups/lab/weft-base")     # what is offered
+w.env_unpublish("hpc", tree, "lab-py", "2026.07")   # pointer only;
+                                                    # purge=True deletes
+```
+
+The tree must live OUTSIDE any weft root; publish is a rebuild at the
+destination (baked absolute paths) and is audited as "user". Versions
+are catalog pointers over immutable content-addressed dirs — upgrades
+publish alongside and flip `latest`, never edit in place. The base is
+filesystem-read-only for consumers (EROFS), adopted in place via
+ro_roots, mounted per-job in private namespaces where userns exists —
+and `extends_env` overlays stack on top exactly as on private parents.
+
 ### Data between sites
 
 Routes are probed at registration (`site_route_probe(src, dst)` re-probes):
