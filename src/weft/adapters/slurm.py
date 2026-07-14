@@ -109,6 +109,44 @@ def parse_tres(s: str) -> dict:
     return out
 
 
+def parse_partition_rows(text: str) -> list[dict]:
+    """sinfo '%R|%l|%c|%m|%a|%G|%f|%D' rows → partition node-class records.
+
+    slurm suffixes cpus/mem with '+' when a row spans heterogeneous nodes
+    ('30+' = at least 30) — record the floor, flagged, never drop the row
+    (clip's 11-of-12 A100 nodes vanished behind int('30+') once)."""
+    from ..capability import slurm_time_to_s
+    partitions = []
+    for line in text.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 8:
+            continue
+        name, timelimit, cpus, mem_mb, avail, gres, feats, nodes = parts
+        het = cpus.endswith("+") or mem_mb.endswith("+")
+        try:
+            row = {
+                "name": name,
+                "max_walltime": timelimit,
+                # slurm's display is ambiguous ("1:00" = one MINUTE):
+                # give agents an unambiguous number too
+                "max_walltime_s": slurm_time_to_s(timelimit),
+                "cpus_per_node": int(cpus.rstrip("+")),
+                "mem_gb_per_node": max(1, int(mem_mb.rstrip("+")) // 1024),
+                "nodes": int(nodes),
+                "available": avail.lower().startswith("up"),
+                "gres": parse_gres(gres),
+                "features": [] if feats in ("", "(null)")
+                else sorted(set(feats.split(","))),
+            }
+        except ValueError:
+            continue
+        if het:
+            # honest floor: the smallest node in this row has this much
+            row["heterogeneous"] = True
+        partitions.append(row)
+    return partitions
+
+
 def _expand_array_ids(token: str) -> list[str]:
     """'123_[0-2,5%4]' -> ['123_0','123_1','123_2','123_5']; plain ids pass
     through. Pending array elements only exist in this compact form."""
@@ -162,30 +200,7 @@ class SlurmAdapter(SSHAdapter):
         r = self.run_cmd(
             "sinfo -h -o '%R|%l|%c|%m|%a|%G|%f|%D' 2>/dev/null | sort -u",
             timeout=30)
-        partitions = []
-        for line in r.out.splitlines():
-            parts = line.strip().split("|")
-            if len(parts) != 8:
-                continue
-            name, timelimit, cpus, mem_mb, avail, gres, feats, nodes = parts
-            try:
-                from ..capability import slurm_time_to_s
-                partitions.append({
-                    "name": name,
-                    "max_walltime": timelimit,
-                    # slurm's display is ambiguous ("1:00" = one MINUTE):
-                    # give agents an unambiguous number too
-                    "max_walltime_s": slurm_time_to_s(timelimit),
-                    "cpus_per_node": int(cpus),
-                    "mem_gb_per_node": max(1, int(mem_mb) // 1024),
-                    "nodes": int(nodes),
-                    "available": avail.lower().startswith("up"),
-                    "gres": parse_gres(gres),
-                    "features": [] if feats in ("", "(null)")
-                    else sorted(set(feats.split(","))),
-                })
-            except ValueError:
-                continue
+        partitions = parse_partition_rows(r.out)
         # scontrol has the partition facts sinfo cannot show: who may use
         # which QOS, defaults, priority — the "am I allowed" half
         detail = self._partition_detail()

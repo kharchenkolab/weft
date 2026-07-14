@@ -2,8 +2,31 @@
 output shapes (the fixture validates the live paths; these pin the corner
 cases a small fixture can't produce)."""
 
-from weft.adapters.slurm import parse_gres, parse_tres
+from weft.adapters.slurm import (parse_gres, parse_partition_rows,
+                                 parse_tres)
 from weft.capability import normalize_probe, satisfies_resources
+
+
+def test_partition_rows_heterogeneous_plus_suffix():
+    """Captured from clip 2026-07-14: slurm suffixes cpus/mem with '+'
+    on rows spanning heterogeneous nodes. int('30+') used to drop the
+    row silently — 11 of 12 A100 nodes vanished from the record."""
+    text = ("g|infinite|14|174079|up|gpu:P100:8(S:0-1)|g1|7\n"
+            "g|infinite|30+|355419+|up|gpu:A100:4(S:0-1)|g4|11\n"
+            "g|infinite|32|506265|up|gpu:A100:4|g4|1\n")
+    rows = parse_partition_rows(text)
+    assert len(rows) == 3                       # nothing dropped
+    a100_11 = next(r for r in rows if r["nodes"] == 11)
+    assert a100_11["cpus_per_node"] == 30       # the honest floor
+    assert a100_11["mem_gb_per_node"] == 347
+    assert a100_11["heterogeneous"] is True
+    assert a100_11["gres"][0]["model"] == "A100"
+    assert sum(r["nodes"] for r in rows
+               if r["gres"] and r["gres"][0]["model"] == "A100") == 12
+    homogeneous = next(r for r in rows if r["nodes"] == 7)
+    assert "heterogeneous" not in homogeneous
+    # garbage rows still skip without poisoning the rest
+    assert parse_partition_rows("bad|row\n") == []
 
 
 def test_parse_gres_shapes():
