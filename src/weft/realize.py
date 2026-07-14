@@ -1136,17 +1136,35 @@ def _build_squashfs(
     # (post_install re-runs on resume — same doctrine as bundle import.)
     import hashlib as _hl
     want = _hl.sha256(env_row["native_lock"].encode()).hexdigest()
-    r0 = adapter.run_cmd(
-        f"sha256sum {shlex.quote(adapter.path(inner))}/pixi.lock "
-        f"2>/dev/null || shasum -a 256 "
-        f"{shlex.quote(adapter.path(inner))}/pixi.lock 2>/dev/null")
-    have = (r0.out or "").split()[0] if r0.rc == 0 and r0.out else ""
+    have = ""
+    if adapter.file_exists(f"{inner}/pixi.lock"):
+        r0 = adapter.run_cmd(
+            f"sha256sum {shlex.quote(adapter.path(inner))}/pixi.lock "
+            f"2>/dev/null || shasum -a 256 "
+            f"{shlex.quote(adapter.path(inner))}/pixi.lock 2>/dev/null",
+            timeout=300)
+        if r0.rc != 0 or not (r0.out or "").strip():
+            # unknown ≠ mismatch: a probe that CANNOT verify must never
+            # translate into deleting an hour of build progress
+            raise WeftError(
+                "env.realize_failed",
+                "existing build content found but its lock cannot be "
+                "verified for resume", stage="realize", retryable=True,
+                hints={"location": rel,
+                       "suggestion": "retry (transient fs/transport "
+                                     "error), or remove the directory "
+                                     "manually for a clean slate"})
+        have = r0.out.split()[0]
     if have == want:
         emit("realize.resumed", env_id=env_id, site=adapter.name,
              location=rel)
     else:
+        # big trees on parallel filesystems take minutes to unlink — a
+        # timeout mid-rm would leave a half-dead tree AND keep deleting
+        # behind our back
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
-                        f"mkdir -p {shlex.quote(adapter.path(rel))}")
+                        f"mkdir -p {shlex.quote(adapter.path(rel))}",
+                        timeout=1800)
     # content: modules stay OUT of the image (module preludes are host
     # state, run before activation — the outer script carries them)
     if internet:
