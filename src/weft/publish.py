@@ -178,6 +178,11 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
 
     catalog = _read_catalog(adapter, tree)
     entry = catalog["envs"].setdefault(name, {"versions": {}, "latest": None})
+    # grade + spec_summary are facts of the ARTIFACT, recorded at publish
+    # time — computing them at read would mean fetching lock sidecars per
+    # row. Republishing a version rewrites its entry, healing older rows.
+    from .grade import grade_env
+    spec = weft.store.get_spec(env_row["spec_hash"]) or {}
     entry["versions"][version] = {
         "env_id": env_id, "published_at": time.time(),
         "image_sha256": meta.get("image_sha256"),
@@ -186,6 +191,15 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
         # a consumer on an older-glibc machine deserves the warning at
         # ADOPT time, not a loader crash mid-job
         "glibc_floor": _glibc_floor(env_row["native_lock"]),
+        "grade": grade_env(env_row["canonical"])["grade"],
+        "spec_summary": {
+            "spec_name": spec.get("name"),
+            "platforms": env_row["platforms"],
+            "packages_per_platform": {
+                p: len(pkgs) for p, pkgs
+                in env_row["canonical"]["platforms"].items()},
+            "deps": spec.get("deps") or {},
+        },
         "notes": notes,
     }
     if latest or not entry.get("latest"):
@@ -309,10 +323,44 @@ def unpublish(weft, site: str, tree: str, name: str, version: str,
 
 
 def published(weft, site: str, tree: str) -> dict:
-    """The tree's catalog, as consumers see it."""
+    """The tree's catalog as consumers see it, enriched per version with
+    the read-time facts a host UI needs to render rows directly:
+    `is_latest`, `runnable_here` (site glibc vs the recorded floor; None
+    when the site's glibc is unknown — unknown ≠ runnable), `state_here`
+    ({adopted-ro, ready, building, failed, missing} from this workspace's
+    realization rows), and `last_used`. Write-time facts (grade,
+    spec_summary, glibc_floor, image bytes) ride in the catalog itself."""
     adapter = weft.adapters.get(site)
     if adapter is None:
         raise WeftError("task.invalid", f"unknown site: {site}",
                         stage="infra",
                         hints={"registered": sorted(weft.adapters)})
-    return {"tree": tree, **_read_catalog(adapter, tree)}
+    catalog = _read_catalog(adapter, tree)
+    site_glibc = ((weft.store.get_site(site) or {})
+                  .get("capabilities") or {}).get("glibc")
+    for entry in (catalog.get("envs") or {}).values():
+        for ver, rec in (entry.get("versions") or {}).items():
+            rec["is_latest"] = entry.get("latest") == ver
+            floor = rec.get("glibc_floor")
+            runnable = None
+            try:
+                if not floor:
+                    # no glibc requirement in the lock = no constraint
+                    runnable = True if site_glibc else None
+                elif site_glibc:
+                    runnable = tuple(int(x) for x in site_glibc.split(".")) \
+                        >= tuple(int(x) for x in floor.split("."))
+            except ValueError:
+                pass
+            rec["runnable_here"] = runnable
+            r = weft.store.get_realization(rec["env_id"], site)
+            if r is None or r["state"] == "missing":
+                rec["state_here"] = "missing"
+            elif r["state"] == "ready":
+                rec["state_here"] = "adopted-ro" if r["read_only"] \
+                    else "ready"
+            else:
+                rec["state_here"] = r["state"]   # building / failed
+            if r:
+                rec["last_used"] = r["last_used"]
+    return {"schema": "published:v1", "tree": tree, "site": site, **catalog}

@@ -693,7 +693,10 @@ class Weft:
         return _p.unpublish(self, site, tree, name, version, purge=purge)
 
     def env_published(self, site: str, tree: str) -> dict:
-        """List a tree's catalog: names, versions, latest pointers."""
+        """List a tree's catalog as render-ready rows (published:v1):
+        write-time facts (grade, spec_summary, glibc_floor, image bytes)
+        plus read-time truth per version — is_latest, runnable_here,
+        state_here (adopted-ro/ready/building/failed/missing), last_used."""
         from . import publish as _p
         return _p.published(self, site, tree)
 
@@ -1291,18 +1294,23 @@ class Weft:
 
     # -- provenance -------------------------------------------------------------
 
-    def bundle_export(self, job_id: str, out_path: str) -> dict:
+    def bundle_export(self, job_id: str, out_path: str,
+                      metadata=None) -> dict:
         """One file that re-derives a result anywhere: the finished job's
         provenance closure — task, env identities (specs + locks), every
         input blob (recursing through producing jobs), recorded outputs —
-        as a tarball. The honest limits ride in `reproducibility`."""
+        as a tarball. The honest limits ride in `reproducibility`.
+        `metadata`: an opaque caller-owned envelope (bytes or JSON) the
+        bundle carries and bundle_import returns verbatim — never parsed,
+        never part of identity or the re-derivation proof."""
         from .bundle import export_bundle
-        return export_bundle(self, job_id, out_path)
+        return export_bundle(self, job_id, out_path, metadata=metadata)
 
     def bundle_import(self, path: str) -> dict:
         """Load a bundle into THIS workspace: envs, specs, input blobs.
         Returns the target task ready to task_submit (force=True) — equal
-        output refs prove the re-derivation."""
+        output refs prove the re-derivation. `metadata` carries the
+        exporter's sealed envelope verbatim (None if none was supplied)."""
         from .bundle import import_bundle
         return import_bundle(self, path)
 

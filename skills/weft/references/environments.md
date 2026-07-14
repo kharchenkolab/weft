@@ -44,10 +44,19 @@ w.task_submit({..., "env": env})                  # adopted in place, RO
 mine = w.env_ensure({"name": "mine", "extends_env": env,
                      "platforms": ["linux-64"],   # match the published env!
                      "deps": {"pypi": ["emcee"]}})  # overlay on the RO base
-w.env_published("hpc", "/groups/lab/weft-base")   # the catalog
+w.env_published("hpc", "/groups/lab/weft-base")   # render-ready rows
 w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
                                                   # period; purge=True deletes
 ```
+
+- `env_published` rows are complete enough to render directly
+  (`published:v1`): per version the catalog's write-time facts (grade,
+  spec_summary, glibc_floor, image bytes) plus this workspace's
+  read-time truth — `is_latest`, `runnable_here` (None when the site's
+  glibc is unknown), `state_here`
+  (adopted-ro/ready/building/failed/missing), `last_used`.
+- Variant publishes (e.g. an old-glibc build of the same release) pass
+  `latest=False` so they don't hijack the default pointer.
 
 - Adoption reads the catalog's stored lock — NO solving (re-solving
   decays as the index moves and would silently rebuild privately).

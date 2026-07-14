@@ -38,7 +38,11 @@ log signatures ride in `hints.log_signature.all_signatures` when several
 patterns matched. From any finished result, `provenance(job_id | dref)`
 reconstructs the full chain (command, exact env layers/SHAs/snapshots,
 inputs, producing jobs) — use it before asserting anything about how an
-artifact was made.
+artifact was made. Its `placement` block answers WHERE it ran as facts —
+{site, node, allocation_id, partition, node_truth (probe-derived,
+source-labeled), ran_at} — kept separate from that reproducibility
+closure: placement is circumstance, never identity (a rerun elsewhere
+memoizes the same).
 
 ## Live-job triage (the node hop)
 

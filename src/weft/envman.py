@@ -433,6 +433,7 @@ class EnvManager:
         g = grade_env(row["canonical"])
         spec = self.store.get_spec(row["spec_hash"]) or {}
         out = {
+            "name": spec.get("name"),
             "packages_per_platform": counts,
             "platforms": row["platforms"],
             "modules": row["canonical"]["extras"]["modules"],
@@ -456,6 +457,9 @@ class EnvManager:
         import time as _t
         for r in self.store.realizations_for(env_id):
             entry = {k: r[k] for k in ("site", "strategy", "state", "location")}
+            # adopted-RO (institutional tree) vs privately built: a host
+            # renders these differently and only one is GC-managed
+            entry["read_only"] = bool(r["read_only"])
             # footprint + recency: the LRU/quota metadata a host policy needs
             entry["bytes"] = r["bytes"]
             entry["last_used"] = r["last_used"]

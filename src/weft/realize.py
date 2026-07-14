@@ -193,6 +193,9 @@ def ensure_realization(
             store.set_realization(env_id, adapter.name,
                                   _marker(adapter, rel).get("strategy")
                                   or strategy, rel, "ready")
+            # adoption IS a use: recency starts now, or LRU sees a
+            # load-bearing env as never-used until its second job
+            store.touch_realization(env_id, adapter.name)
             store.emit("realize.adopted", env_id=env_id, site=adapter.name,
                        via="marker")
             return store.get_realization(env_id, adapter.name)
@@ -217,6 +220,7 @@ def ensure_realization(
                 store.set_realization(env_id, adapter.name,
                                       _marker(adapter, rel).get("strategy")
                                       or strategy, rel, "ready")
+                store.touch_realization(env_id, adapter.name)
                 store.emit("realize.adopted", env_id=env_id,
                            site=adapter.name, via="shared-lease")
                 return store.get_realization(env_id, adapter.name)
@@ -344,6 +348,7 @@ def _adopt_from_ro_roots(env_id: str, env_row: dict, adapter: SiteAdapter,
         store.set_realization(env_id, adapter.name,
                               marker.get("strategy") or "prefix",
                               loc, "ready", read_only=True)
+        store.touch_realization(env_id, adapter.name)
         store.emit("realize.adopted", env_id=env_id, site=adapter.name,
                    via="ro-root", location=loc)
         return store.get_realization(env_id, adapter.name)

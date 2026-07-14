@@ -51,6 +51,13 @@ Honest limits ride in `reproducibility`: an `escape-hatch` env re-executes
 its captured installers; `attested` modules must exist at the destination;
 `state-dependent` results replay transcripts, not derivations.
 
+Hosts building their own record on top can ride a sealed envelope:
+`bundle_export(..., metadata=<bytes or JSON>)` stores it verbatim and
+`bundle_import` returns it under `metadata` — weft never parses it and
+it never enters the bundle's identity or the re-derivation proof.
+Context only (64 MB cap); data belongs in blobs. Re-exporting an
+imported bundle does not carry an old envelope forward.
+
 ## Site-to-site routing (the controller carries bytes only as a last resort)
 
 At registration weft probes byte routes between sites: a **shared

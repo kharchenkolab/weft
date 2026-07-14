@@ -72,6 +72,22 @@ priority_tier, oversubscribe), and — after `site_probe_deep` — a
 `capabilities_override` are listed in `overridden_fields`: declared, not
 measured. `storage.candidates` = probed [{path, writable, free_gb}].
 
+## `published:v1` — `env_published(site, tree)`
+
+Render-complete catalog rows: a host UI is a pure projection of these
+(no host-side probes or joins). Per version, write-time facts recorded
+by `env_publish` (`env_id`, `image_sha256`/`image_bytes`, `glibc_floor`,
+`grade`, `spec_summary {spec_name, platforms, packages_per_platform,
+deps}`, `notes`, `published_at`; republishing a version heals older
+rows) plus read-time truth from the querying workspace: `is_latest`,
+`runnable_here` (site glibc vs floor; `null` when the site's glibc is
+unknown — unknown ≠ runnable; no floor recorded = no constraint),
+`state_here` ∈ {`adopted-ro`, `ready`, `building`, `failed`, `missing`}
+from this workspace's realization rows (note: another user's adoption is
+invisible here — realization rows are per-workspace), and `last_used`.
+`env_status` realizations carry the matching `read_only` flag and the
+summary carries the spec `name`.
+
 ## `bundle:v1`
 
 One-file provenance closure of a finished job: `target_job`, `jobs`
@@ -84,3 +100,13 @@ re-run the returned task with force=True — output refs must equal
 `recorded_outputs` (the re-derivation proof). `reproducibility` carries
 the honest limits (escape-hatch re-executes captured installers; attested
 modules must exist at the destination).
+
+Host metadata envelope (additive): `bundle_export(..., metadata=…)`
+accepts bytes or any JSON value and stores it as a separate archive
+member (`bundle/host-metadata.{json,bin}`); `bundle_import` returns it
+verbatim under `metadata` (None if none was supplied). Sealed: weft
+never parses it, it does not enter the bundle's identity or the
+re-derivation proof, and re-exporting an imported bundle does NOT carry
+an old envelope forward — the envelope belongs to the caller of each
+export. Capped at 64 MB: it carries context, not data (data belongs in
+blobs, where it is content-addressed and verified).

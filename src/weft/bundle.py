@@ -23,6 +23,10 @@ from .errors import WeftError
 
 SCHEMA = "bundle:v1"
 
+# the host envelope is a sealed carrier, not a data transport — data
+# belongs in blobs, where it is content-addressed and verified
+_METADATA_CAP = 64 << 20
+
 
 def _closure(weft, job_id: str, depth: int = 10):
     """jobs, envs, refs reachable from the target through inputs."""
@@ -61,7 +65,34 @@ def _closure(weft, job_id: str, depth: int = 10):
     return jobs, envs, refs
 
 
-def export_bundle(weft, job_id: str, out_path: str) -> dict:
+def export_bundle(weft, job_id: str, out_path: str,
+                  metadata=None) -> dict:
+    """`metadata` is a caller-owned sealed envelope: bytes or any JSON
+    value, stored as a separate archive member and returned verbatim by
+    import. weft never parses it, and it does not enter the bundle's
+    identity or the re-derivation proof. It belongs to THIS export call —
+    re-exporting an imported bundle does not carry an old envelope
+    forward (no inheritance, so no merge semantics to invent)."""
+    meta_name = meta_bytes = None
+    if metadata is not None:
+        if isinstance(metadata, (bytes, bytearray)):
+            meta_name, meta_bytes = "host-metadata.bin", bytes(metadata)
+        else:
+            try:
+                meta_bytes = json.dumps(metadata).encode()
+            except (TypeError, ValueError) as e:
+                raise WeftError(
+                    "task.invalid",
+                    f"bundle metadata must be bytes or JSON-serializable: {e}",
+                    stage="staging")
+            meta_name = "host-metadata.json"
+        if len(meta_bytes) > _METADATA_CAP:
+            raise WeftError(
+                "task.invalid",
+                f"bundle metadata is {len(meta_bytes)} bytes (cap "
+                f"{_METADATA_CAP}) — the envelope carries context, not "
+                "data; register large content as a DataRef instead",
+                stage="staging")
     jobs, env_ids, refs = _closure(weft, job_id)
 
     envs = {}
@@ -155,6 +186,10 @@ def export_bundle(weft, job_id: str, out_path: str) -> dict:
         info.size = len(mj)
         import io
         tar.addfile(info, io.BytesIO(mj))
+        if meta_name:
+            info = tarfile.TarInfo(f"bundle/{meta_name}")
+            info.size = len(meta_bytes)
+            tar.addfile(info, io.BytesIO(meta_bytes))
         for digest, path in blobs.items():
             tar.add(str(path), arcname=f"bundle/blobs/{digest}")
         for digest, path in trees.items():
@@ -167,6 +202,7 @@ def export_bundle(weft, job_id: str, out_path: str) -> dict:
     return {"path": str(out), "bytes": out.stat().st_size,
             "target_job": job_id, "jobs": len(jobs), "envs": len(envs),
             "blobs": len(blobs),
+            **({"metadata_bytes": len(meta_bytes)} if meta_name else {}),
             "reproducibility": manifest["reproducibility"],
             "note": "bundle_import(path) into ANY workspace, then re-run "
                     "the target task (force=True) — identical output refs "
@@ -183,6 +219,15 @@ def import_bundle(weft, path: str) -> dict:
         if man.get("schema") != SCHEMA:
             raise WeftError("task.invalid",
                             f"not a {SCHEMA} bundle", stage="staging")
+        # the host's sealed envelope, verbatim: json in, json out;
+        # bytes in, bytes out. None = no envelope was supplied.
+        host_meta = None
+        names = set(tar.getnames())
+        if "bundle/host-metadata.json" in names:
+            host_meta = json.loads(
+                tar.extractfile("bundle/host-metadata.json").read())
+        elif "bundle/host-metadata.bin" in names:
+            host_meta = tar.extractfile("bundle/host-metadata.bin").read()
         with tempfile.TemporaryDirectory() as td:
             tar.extractall(td, filter="data")
             import hashlib
@@ -238,6 +283,7 @@ def import_bundle(weft, path: str) -> dict:
                          result=path)
     return {
         "target_job": man["target_job"],
+        "metadata": host_meta,
         "task": {k: v for k, v in target["task"].items()
                  if k not in ("site",)},
         "recorded_outputs": [

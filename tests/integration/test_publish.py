@@ -91,9 +91,21 @@ def test_publish_artifacts_and_refusals(lab):
     assert cat["envs"]["lab-py"]["latest"] == "2026.07"
     rec = cat["envs"]["lab-py"]["versions"]["2026.07"]
     assert rec["env_id"] == lab["py_env"] and rec["image_sha256"]
+    # write-time render facts recorded IN the catalog (weft-ui ask):
+    # grade + spec summary are artifact facts, not read-time computation
+    assert rec["grade"] in ("fully-pinned", "snapshot-pinned")
+    assert rec["spec_summary"]["spec_name"] == "lab-py"
+    assert rec["spec_summary"]["packages_per_platform"]
     h = lab["py_env"].rsplit(":", 1)[-1]
     assert a.file_exists(f"{TREE}/envs/{h}/image.sqfs")
     assert a.file_exists(f"{TREE}/locks/{h}.json")
+    # the publisher's own render view: latest yes, but publish leaves no
+    # realization row (build-at-tree, not a workspace realization) —
+    # state_here honestly says missing until the publisher USES it
+    row = pub.env_published("beam", tree=TREE)
+    vrec = row["envs"]["lab-py"]["versions"]["2026.07"]
+    assert vrec["is_latest"] is True
+    assert vrec["state_here"] == "missing"
 
     # refusals: tree inside the weft root; unknown env; bad name
     bad = pub.env_publish(lab["py_env"], "beam",
@@ -125,6 +137,12 @@ def test_analyst_adopts_by_name_and_runs(lab, pixi_bin):
     assert real["read_only"], real
     assert real["location"].startswith(TREE + "/"), real
     assert real["strategy"] == "squashfs"
+    # after first use, the analyst's render row says so: one call, no
+    # host-side joins (weft-ui ask)
+    vrec = w.env_published("beam", tree=TREE)["envs"]["lab-py"] \
+        ["versions"]["2026.07"]
+    assert vrec["state_here"] == "adopted-ro" and vrec["last_used"]
+    assert vrec["is_latest"] is True
 
 
 def test_analyst_extends_the_readonly_base(lab, pixi_bin, linux_platforms):
