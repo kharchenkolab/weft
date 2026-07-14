@@ -1127,8 +1127,26 @@ def _build_squashfs(
             hints={"squashfs": sq})
     inner = f"{rel}/mnt"
     internet = bool(compute_view(caps or {}).get("internet"))
-    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
-                    f"mkdir -p {shlex.quote(adapter.path(rel))}")
+    # resume, don't repay: a killed/failed build leaves content at mnt/;
+    # when its pixi.lock is byte-identical to THIS env's lock the content
+    # can only be a partial build of the same identity — every stage
+    # below is incremental (pixi revalidates, layer installers skip
+    # what's installed), so retries converge instead of re-compiling the
+    # world on flaky sites. Any mismatch → clean slate as before.
+    # (post_install re-runs on resume — same doctrine as bundle import.)
+    import hashlib as _hl
+    want = _hl.sha256(env_row["native_lock"].encode()).hexdigest()
+    r0 = adapter.run_cmd(
+        f"sha256sum {shlex.quote(adapter.path(inner))}/pixi.lock "
+        f"2>/dev/null || shasum -a 256 "
+        f"{shlex.quote(adapter.path(inner))}/pixi.lock 2>/dev/null")
+    have = (r0.out or "").split()[0] if r0.rc == 0 and r0.out else ""
+    if have == want:
+        emit("realize.resumed", env_id=env_id, site=adapter.name,
+             location=rel)
+    else:
+        adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
+                        f"mkdir -p {shlex.quote(adapter.path(rel))}")
     # content: modules stay OUT of the image (module preludes are host
     # state, run before activation — the outer script carries them)
     if internet:

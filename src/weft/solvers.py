@@ -465,7 +465,9 @@ class CranSolver:
                 "cran layer install failed on site",
                 stage="realize",
                 hints={"ecosystem": "cran",
-                       "log_tail": (r.err or r.out)[-1500:],
+                       # generous: a mass source rebuild buries the root
+                       # error pages above the warnings summary
+                       "log_tail": (r.err or r.out)[-6000:],
                        "note": "cran realization needs network from the "
                                "install point in v1; on air-gapped sites "
                                "prefer conda-forge r-<name> packages or "
