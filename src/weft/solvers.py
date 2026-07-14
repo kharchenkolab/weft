@@ -452,28 +452,42 @@ class CranSolver:
                  pkgs=", ".join(_json.dumps(x) for x in cran_names) or '""',
                  tarballs=", ".join(_json.dumps(x) for x in tarballs) or 'character(0)',
                  top=", ".join(_json.dumps(x) for x in top) or 'character(0)')
-        r = adapter.run_activated(
-            f". {shlex.quote(env_dir)}/activate.sh && "
-            f"Rscript -e {shlex.quote(rcode)}",
-            # on old-glibc hosts every PPM binary fails to load and the
-            # WHOLE layer rebuilds from source (rstan alone ~20 min)
-            timeout=10800,
-        )
-        if r.rc != 0:
-            raise WeftError(
-                "env.realize_failed",
-                "cran layer install failed on site",
-                stage="realize",
-                hints={"ecosystem": "cran",
-                       # generous: a mass source rebuild buries the root
-                       # error pages above the warnings summary
-                       "log_tail": (r.err or r.out)[-6000:],
-                       "note": "cran realization needs network from the "
-                               "install point in v1; on air-gapped sites "
-                               "prefer conda-forge r-<name> packages or "
-                               "build R packages as tasks"},
+        # converge, don't flinch: the R code is incremental (installed
+        # packages are skipped, broken binaries re-detected), so when a
+        # weird site kills the long install mid-flight (login-node walls
+        # that cut ~45-min commands exist — clip taught us), rerunning
+        # picks up the frontier. Retry while the library keeps CHANGING;
+        # a real failure repeats with the library frozen and raises.
+        last_state = None
+        for _ in range(8):
+            r = adapter.run_activated(
+                f". {shlex.quote(env_dir)}/activate.sh && "
+                f"Rscript -e {shlex.quote(rcode)}",
+                # on old-glibc hosts every PPM binary fails to load and
+                # the WHOLE layer rebuilds from source (rstan ~20 min)
+                timeout=10800,
             )
-        return f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"'
+            if r.rc == 0:
+                return f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"'
+            probe = adapter.run_cmd(
+                f"ls {shlex.quote(rlib)} 2>/dev/null | sort | cksum")
+            state = (probe.out or "").strip()
+            if state == last_state:
+                break                     # frozen library = real failure
+            last_state = state
+        raise WeftError(
+            "env.realize_failed",
+            "cran layer install failed on site",
+            stage="realize",
+            hints={"ecosystem": "cran",
+                   # generous: a mass source rebuild buries the root
+                   # error pages above the warnings summary
+                   "log_tail": (r.err or r.out)[-6000:],
+                   "note": "cran realization needs network from the "
+                           "install point in v1; on air-gapped sites "
+                           "prefer conda-forge r-<name> packages or "
+                           "build R packages as tasks"},
+        )
 
     def realize_overlay(self, layer: dict, parent_layer: dict | None,
                         added: list[str], adapter, env_rel: str,
