@@ -3,6 +3,7 @@
 FROM ubuntu:22.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     openssh-server rsync curl ca-certificates time \
+    squashfs-tools squashfuse fuse3 uidmap \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /run/sshd
 RUN useradd -m -s /bin/bash physicist

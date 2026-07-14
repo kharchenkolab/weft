@@ -18,6 +18,11 @@ w.register_site("beamlab", "ssh", {
 # runs on the site and otherwise fetches the pinned release for the
 # site's own platform (a mac laptop driving a linux cluster just works)
 #
+# site config `prefer: "squashfs"` forces image-based realization
+# (read-only institutional envs, NFS trees); parallel-FS roots
+# (BeeGFS/Lustre/GPFS) get it automatically when the site can
+# build+mount. capabilities.squashfs shows what the probe measured.
+#
 # registration narrates bootstrap.step events (bootstrap → probe →
 # tools → routes). Check a host BEFORE committing with
 # register_site(..., probe_only=True): full capabilities, nothing

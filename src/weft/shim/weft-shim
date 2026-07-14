@@ -5,7 +5,8 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=4   # v4: storage totals (total_gb) beside free_gb
+WEFT_SHIM_VERSION=5   # v5: squashfs realization inputs (fuse/squashfuse/
+                      # mksquashfs/userns/root fs); host-first glibc
 
 json_bool() { if [ "$1" = "0" ]; then echo true; else echo false; fi; }
 
@@ -53,14 +54,42 @@ cmd_probe() {
     [ -n "${LMOD_CMD:-}" ] && modules=0
     type module >/dev/null 2>&1 && modules=0
     rsync_ok=1; command -v rsync >/dev/null 2>&1 && rsync_ok=0
-    if ldd --version 2>&1 | grep -qi musl; then
+    # host truth first: compat layers (EESSI/Gentoo prefix on cvmfs) shadow
+    # ldd in PATH and would report THEIR libc, not the one env binaries use
+    LDD=ldd; [ -x /usr/bin/ldd ] && LDD=/usr/bin/ldd
+    if $LDD --version 2>&1 | grep -qi musl; then
         glibc="musl"
     else
-        glibc=$(ldd --version 2>/dev/null | head -1 | grep -o '[0-9][0-9.]*$' || echo "")
+        glibc=$($LDD --version 2>/dev/null | head -1 | grep -o '[0-9][0-9.]*$' || echo "")
     fi
     gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort | uniq -c \
         | awk '{n=$1; $1=""; sub(/^ /,""); printf "%s{\"model\":\"%s\",\"count\":%d}", sep, $0, n; sep=","}' || true)
     cuda_driver=$(nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9.]*' | awk '{print $3}' | head -1 || true)
+    # squashfs realization inputs: mounter (squashfuse_ll usually lives in
+    # apptainer's libexec, not on PATH), builder, the fuse device, userns
+    # usability (a REAL unshare smoke — sysctls lie), and the root's fs
+    # type (fusermount3 refuses to mount over parallel filesystems)
+    sq_fuse=1; [ -e /dev/fuse ] && sq_fuse=0
+    sq_mount=""
+    for c in squashfuse_ll squashfuse; do
+        p=$(command -v "$c" 2>/dev/null) && [ -n "$p" ] && { sq_mount=$p; break; }
+        [ -x "/usr/libexec/apptainer/bin/$c" ] && { sq_mount="/usr/libexec/apptainer/bin/$c"; break; }
+    done
+    sq_mk=$(command -v mksquashfs 2>/dev/null || true)
+    if [ -z "$sq_mk" ]; then
+        for p in /usr/sbin/mksquashfs /sbin/mksquashfs \
+                 /usr/libexec/apptainer/bin/mksquashfs; do
+            [ -x "$p" ] && { sq_mk=$p; break; }
+        done
+    fi
+    sq_userns=1
+    command -v unshare >/dev/null 2>&1 && unshare -rm true 2>/dev/null && sq_userns=0
+    root_fs=""
+    if [ "$os" = "linux" ]; then   # GNU stat only; BSD -f means "format"
+        root_fs=$(stat -f -c %T "$root" 2>/dev/null \
+                  || stat -f -c %T "$(dirname "$root")" 2>/dev/null || echo "")
+    fi
+
     if [ -z "$gpus" ] && [ "$os" = "darwin" ] && [ "$arch" = "arm64" ]; then
         # Apple silicon: the integrated GPU is real and MPS-usable; the
         # model string says which backend so nobody mistakes it for CUDA
@@ -92,6 +121,9 @@ cmd_probe() {
  "scheduler": {"type": "$sched"},
  "module_system": $(json_bool $modules),
  "gpus": [${gpus:-}], "cuda_driver": "${cuda_driver:-}",
+ "squashfs": {"dev_fuse": $(json_bool $sq_fuse), "squashfuse": "${sq_mount:-}",
+              "mksquashfs": "${sq_mk:-}", "userns": $(json_bool $sq_userns),
+              "root_fs": "${root_fs:-}"},
  "storage": {"weft_root": "$root", "free_gb": $free_gb, "total_gb": $total_gb,
              "candidates": [${cands:-}]}}
 EOF
@@ -129,6 +161,13 @@ cmd_run() {
     fi
     cat > "$jobdir/runner.sh" <<EOF
 #!/bin/sh
+# squashfs envs on userns sites: the whole job runs in its own
+# user+mount namespace — activation's lazy mount lands there and
+# vanishes with the job (no epilogues, no stale mounts)
+if [ -f "$jobdir/ns" ] && [ -z "\$WEFT_NS" ] \\
+   && command -v unshare >/dev/null 2>&1 && unshare -rm true 2>/dev/null; then
+    WEFT_NS=1 exec unshare -rm "\$0" "\$@"
+fi
 # conda activation hooks may contain bashisms — prefer bash when present
 if [ -z "\$WEFT_BASH" ] && command -v bash >/dev/null 2>&1; then
     WEFT_BASH=1 exec bash "\$0" "\$@"

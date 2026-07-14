@@ -216,6 +216,8 @@ class JobRunner:
             adapter.write_file(f"{group_rel}/inputs.tsv", plan_tsv.encode())
         adapter.write_file(f"{group_rel}/activate.sh",
                            (activate_line + "\n").encode())
+        if self.ns_wrap_needed(task.env, site):
+            adapter.write_file(f"{group_rel}/ns", b"1\n")
         lines = self._cmd_lines(task, spec_env_vars, site,
                                 job_id_expr=f"{group}.el$WEFT_ARRAY_INDEX")
         adapter.write_file(f"{group_rel}/cmd.sh",
@@ -275,6 +277,7 @@ class JobRunner:
                 task.env, env_row, adapter, self.store,
                 caps=site_row.get("capabilities"),
                 site_config=site_row.get("config"),
+                prefer=(site_row.get("config") or {}).get("prefer"),
                 pack_tools=pack_tools,
             )
         except WeftError as e:
@@ -314,6 +317,7 @@ class JobRunner:
                 new_id, env_row, adapter, self.store,
                 caps=site_row.get("capabilities"),
                 site_config=site_row.get("config"),
+                prefer=(site_row.get("config") or {}).get("prefer"),
                 pack_tools=pack_tools,
             )
         extras = env_row["canonical"]["extras"]
@@ -599,12 +603,37 @@ class JobRunner:
             array_group=group, last_state=first,
         ))
 
+    def ns_wrap_needed(self, env_id: str | None, site: str) -> bool:
+        """Squashfs envs (or overlays stacked on squashfs parents) on
+        userns-capable sites run each job in its own user+mount namespace:
+        activation's lazy mount lands in the namespace and dies with the
+        job. The shim/batch runners re-exec under `unshare -rm` when the
+        jobdir carries an `ns` flag file — this decides whether to write it."""
+        if not env_id:
+            return False
+        real = self.store.get_realization(env_id, site)
+        if not real or real["state"] != "ready":
+            return False
+        strategy = real["strategy"] or ""
+        if strategy == "overlay":
+            row = self.store.get_env(env_id) or {}
+            parent = row.get("parent_env_id")
+            p = self.store.get_realization(parent, site) if parent else None
+            strategy = (p or {}).get("strategy") or ""
+        if "squashfs" not in strategy:
+            return False
+        from .capability import squashfs_mode
+        caps = (self.store.get_site(site) or {}).get("capabilities") or {}
+        return squashfs_mode(caps) == "userns"
+
     def _prepare_sandbox(
         self, adapter: SiteAdapter, jobdir_rel: str, task: Task,
         job_id: str, activate_line: str, spec_env_vars: dict[str, str] | None = None,
     ) -> None:
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(jobdir_rel))}")
         plan_tsv = self.dataman.materialize_plan(task)
+        if self.ns_wrap_needed(task.env, adapter.name):
+            adapter.write_file(f"{jobdir_rel}/ns", b"1\n")
         adapter.write_file(f"{jobdir_rel}/activate.sh", (activate_line + "\n").encode())
         lines = self._cmd_lines(task, spec_env_vars or {}, adapter.name,
                                 job_id_expr=shlex.quote(job_id))

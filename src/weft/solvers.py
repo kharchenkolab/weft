@@ -488,8 +488,11 @@ class CranSolver:
 
         env_dir = adapter.path(env_rel)
         parent_dir = adapter.path(parent_rel)
+        # squashfs parents hold their tree (incl. rlib) inside the mount;
+        # activation still goes through the OUTER parent_dir script
+        layout_dir = pack_tools.get("parent_layout_dir") or parent_dir
         rlib = f"{env_dir}/rlib"
-        parent_rlib = f"{parent_dir}/rlib"
+        parent_rlib = f"{layout_dir}/rlib"
 
         by_name = {r["name"]: r for r in layer["records"]}
         recs = [by_name[n] for n in added if n in by_name]

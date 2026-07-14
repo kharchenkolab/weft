@@ -6,6 +6,7 @@ FROM ubuntu:22.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     slurm-wlm munge openssh-server rsync curl ca-certificates time \
     environment-modules \
+    squashfs-tools squashfuse fuse3 uidmap \
     && rm -rf /var/lib/apt/lists/* && mkdir /run/sshd
 RUN useradd -m -s /bin/bash physicist
 COPY authorized_keys /home/physicist/.ssh/authorized_keys

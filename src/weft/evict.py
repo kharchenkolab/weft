@@ -115,6 +115,14 @@ def evict(weft, env_id: str, site: str, archive: bool = False,
     # what the filesystem gets back (live-agent eval: 2.4x overstatement)
     before = _free_bytes(adapter)
     apparent = real["bytes"] or 0
+    if "squashfs" in (real["strategy"] or ""):
+        # a direct-mode mount may be live at mnt/ — rm -rf into a FUSE
+        # mount fails (and must never delete THROUGH it); lazy-unmount
+        # first. Namespace mounts died with their jobs; nothing to do.
+        mnt = shlex.quote(f"{adapter.path(rel)}/mnt")
+        adapter.run_cmd(f"fusermount -u {mnt} 2>/dev/null || "
+                        f"fusermount -uz {mnt} 2>/dev/null || "
+                        f"fusermount3 -uz {mnt} 2>/dev/null; true")
     rm = adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
                          f"echo WEFT_RM_OK")
     if "WEFT_RM_OK" not in (rm.out or ""):

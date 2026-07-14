@@ -161,9 +161,11 @@ def ensure_realization(
                 if ok and marker.get("parent"):
                     p_loc = marker.get("parent_location") \
                         or env_dir_rel(marker["parent"])
+                    p_strategy = _marker(adapter, p_loc).get("strategy") \
+                        or "prefix"
                     ok = (adapter.file_exists(f"{p_loc}/.weft-ready")
                           and marker.get("parent_bin_digest")
-                          == _bin_digest(adapter, p_loc, "prefix"))
+                          == _bin_digest(adapter, p_loc, p_strategy))
                     if not ok:
                         store.emit("realize.parent_changed", env_id=env_id,
                                    site=adapter.name, parent=marker["parent"])
@@ -250,27 +252,43 @@ def ensure_realization(
                     overlay_parent = None
                     store.set_realization(env_id, adapter.name, strategy, rel,
                                           "building")
+            marker_extra: dict | None = None
             if strategy != "overlay":
-                if strategy.endswith("packed"):
+                if strategy.endswith("squashfs"):
+                    # layers + post_install happen INSIDE the image build
+                    marker_extra = _build_squashfs(
+                        env_id, env_row, adapter, rel, modules,
+                        modules_init, caps, pack_tools or {}, store.emit)
+                elif strategy.endswith("packed"):
                     _build_packed(env_id, env_row, adapter, rel, modules,
                                   modules_init, caps, pack_tools or {})
                 else:
                     _build_prefix(env_id, env_row, adapter, rel, modules,
                                   modules_init)
-                _realize_layers(env_id, env_row, adapter, rel,
-                                (pack_tools or {}).get("solvers") or {},
-                                store.emit,
-                                offline=strategy.endswith("packed"),
-                                pack_tools=pack_tools)
-                # overlays skip post_install by construction: eligibility
-                # requires the child's steps to equal the parent's, whose
-                # prefix (sourced first) already carries their products
-                _stage_post_install_inputs(env_row, adapter, rel,
-                                           pack_tools or {})
-                _run_post_install(env_row, adapter, rel)
+                if not strategy.endswith("squashfs"):
+                    _realize_layers(env_id, env_row, adapter, rel,
+                                    (pack_tools or {}).get("solvers") or {},
+                                    store.emit,
+                                    offline=strategy.endswith("packed"),
+                                    pack_tools=pack_tools)
+                    # overlays skip post_install by construction: eligibility
+                    # requires the child's steps to equal the parent's, whose
+                    # prefix (sourced first) already carries their products
+                    _stage_post_install_inputs(env_row, adapter, rel,
+                                               pack_tools or {})
+                    _run_post_install(env_row, adapter, rel)
+            # userns-only squashfs sites (parallel-FS root): the spot-check
+            # mounts in a throwaway namespace — nothing persists
+            wrap = ""
+            if strategy.endswith("squashfs"):
+                from .capability import squashfs_direct_ok, squashfs_mode
+                if squashfs_mode(caps or {}) == "userns" \
+                        and not squashfs_direct_ok(caps or {}):
+                    wrap = "unshare -rm"
             _spot_check_and_mark(env_id, env_row, adapter, rel, strategy,
                                  parent=overlay_parent,
-                                 parent_loc=overlay_parent_loc)
+                                 parent_loc=overlay_parent_loc,
+                                 extra=marker_extra, wrap=wrap)
         except WeftError as e:
             store.set_realization(
                 env_id, adapter.name, strategy, rel, "failed", log=e.detail
@@ -607,10 +625,20 @@ def _overlay_parent(env_row: dict, adapter: SiteAdapter, store: Store,
     p_real = store.get_realization(parent, adapter.name)
     if not p_real or p_real["state"] != "ready":
         return None      # parent not realized here: nothing to stack on
-    if p_real["strategy"] not in ("prefix", "modules+prefix"):
+    if p_real["strategy"] not in ("prefix", "modules+prefix",
+                                  "squashfs", "modules+squashfs"):
         return None      # depth 1 only, and only on a pixi-prefix layout:
                          # packed parents lay out env/ differently and the
                          # toolchain prelude / parent fence assume .pixi
+                         # (a MOUNTED squashfs parent presents exactly the
+                         # pixi layout, one level down at mnt/)
+    if p_real["strategy"].endswith("squashfs"):
+        from .capability import squashfs_direct_ok
+        if not squashfs_direct_ok(caps or {}):
+            return None  # the overlay BUILD runs many commands that must
+                         # all see the mounted parent — needs a persistent
+                         # (non-namespace) mount; userns-only sites fall
+                         # back to a full build
     parent_row = store.get_env(parent)
     pe = ((parent_row or {}).get("canonical") or {}).get("extras", {})
     ce = (env_row.get("canonical") or {}).get("extras", {})
@@ -646,6 +674,29 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
         raise WeftError("env.realize_failed",
                         f"not layerable: {delta['why']}", stage="realize")
 
+    # a squashfs parent presents the pixi layout INSIDE its mount: outer
+    # activate.sh handles modules + the lazy mount (what we SOURCE); the
+    # filesystem paths the build needs (headers, rlib, rpath keys) live
+    # one level down at mnt/. Ensure the mount is live for the build —
+    # eligibility already required a persistent-mount-capable site.
+    parent_is_squashfs = "squashfs" in (_marker(adapter, parent_rel)
+                                        .get("strategy") or "")
+    parent_layout_rel = f"{parent_rel}/mnt" if parent_is_squashfs \
+        else parent_rel
+    parent_layout_dir = adapter.path(parent_layout_rel)
+    if parent_is_squashfs:
+        m = adapter.run_activated(
+            f". {shlex.quote(parent_dir)}/activate.sh >/dev/null 2>&1; "
+            f"test -f {shlex.quote(parent_layout_dir)}/activate.sh",
+            timeout=120)
+        if m.rc != 0:
+            raise WeftError(
+                "env.realize_failed",
+                "could not mount the squashfs parent for the overlay build",
+                stage="realize",
+                hints={"parent": parent_env_id,
+                       "log_tail": (m.err or m.out)[-500:]})
+
     t0 = _t.time()
     store.emit("realize.overlay", env_id=env_id, site=adapter.name,
                parent=parent_env_id, delta=delta)
@@ -661,14 +712,16 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
         from .toolchain import toolchain_fingerprint
         tc = ensure_toolchain(adapter, adapter.pixi_bin)
         if tc:
-            prelude = build_env_prelude(adapter, tc, parent_dir)
+            prelude = build_env_prelude(adapter, tc, parent_layout_dir)
             # the compile cache must key on what ACTUALLY builds and links:
             # the resolved toolchain (not its requested spec) and the parent
             # prefix path the artifacts carry in their rpath
             pack_tools = {**pack_tools,
                           "toolchain_fingerprint":
                               toolchain_fingerprint(adapter),
-                          "parent_prefix": parent_dir}
+                          "parent_prefix": parent_layout_dir}
+    if parent_is_squashfs:
+        pack_tools = {**pack_tools, "parent_layout_dir": parent_layout_dir}
 
     activation = [f". {shlex.quote(parent_dir)}/activate.sh"]
     solvers = pack_tools.get("solvers") or {}
@@ -803,6 +856,8 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
 def _bin_dir_rel(rel: str, strategy: str) -> str:
     if strategy == "overlay":
         return f"{rel}/bin"      # the child's own layer bin (may be empty)
+    if strategy.endswith("squashfs"):
+        return f"{rel}/mnt/.pixi/envs/default/bin"   # inside the mount
     return f"{rel}/env/bin" if strategy.endswith("packed") \
         else f"{rel}/.pixi/envs/default/bin"
 
@@ -811,7 +866,19 @@ def _bin_digest(adapter: SiteAdapter, rel: str, strategy: str) -> str:
     """Fingerprint of the env's executable inventory. Catches the silent-
     rot class of failure: a deleted tool would otherwise fall through to
     the host's PATH and produce a wrong-provenance result that *looks*
-    clean (live-agent eval finding)."""
+    clean (live-agent eval finding).
+
+    squashfs realizations fence on the IMAGE file instead (existence +
+    byte size — the content is immutable by construction and may not be
+    mounted when the fence runs; full sha256 lives in the marker for
+    env_repair-time verification)."""
+    if strategy.endswith("squashfs"):
+        img = adapter.path(f"{rel}/image.sqfs")
+        r = adapter.run_cmd(
+            f"wc -c < {shlex.quote(img)} 2>/dev/null | tr -d ' ' || echo none",
+            timeout=60)
+        n = r.out.strip()
+        return f"sqfs:{n}" if n and n != "none" else "none"
     d = adapter.path(_bin_dir_rel(rel, strategy))
     r = adapter.run_cmd(
         f"test -d {shlex.quote(d)} && cd {shlex.quote(d)} && "
@@ -825,12 +892,17 @@ def _bin_digest(adapter: SiteAdapter, rel: str, strategy: str) -> str:
 def _spot_check_and_mark(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str, strategy: str,
     parent: str | None = None, parent_loc: str | None = None,
+    extra: dict | None = None, wrap: str = "",
 ) -> None:
     """Activation succeeds; interpreter runs if present; then fence-mark
-    (with the bin inventory fingerprint for later integrity checks)."""
+    (with the bin inventory fingerprint for later integrity checks).
+    `wrap` prefixes the check command (userns-only squashfs sites run it
+    as `unshare -rm sh -c ...` so the mount lives in a throwaway ns)."""
     check = f". {shlex.quote(adapter.path(rel))}/activate.sh"
     if _has_package(env_row.get("canonical", {}), "python"):
         check += " && python -c 'import sys; sys.exit(0)'"
+    if wrap:
+        check = f"{wrap} sh -c {shlex.quote(check)}"
     spot = adapter.run_activated(check, timeout=120)
     if spot.rc != 0:
         raise WeftError(
@@ -840,16 +912,19 @@ def _spot_check_and_mark(
             hints={"log_tail": (spot.err or spot.out)[-1000:], "retryable": True},
         )
     import json as _json
-    marker = {"strategy": strategy}
+    marker = {"strategy": strategy, **(extra or {})}
     if parent:
         # the integrity fence goes two deep: if the PARENT is repaired,
         # evicted, or tampered with, this child must rebuild too. Record
         # WHERE the parent lives — it may be a read-only root, and the
-        # fence must re-digest the same tree it fingerprinted
+        # fence must re-digest the same tree it fingerprinted (with the
+        # parent's OWN strategy: a squashfs parent fences on its image)
         parent_rel = parent_loc or env_dir_rel(parent)
+        p_strategy = _marker(adapter, parent_rel).get("strategy") or "prefix"
         marker["parent"] = parent
         marker["parent_location"] = parent_rel
-        marker["parent_bin_digest"] = _bin_digest(adapter, parent_rel, "prefix")
+        marker["parent_bin_digest"] = _bin_digest(adapter, parent_rel,
+                                                  p_strategy)
         marker["bin_digest"] = _bin_digest(adapter, rel, "overlay")
     else:
         marker["bin_digest"] = _bin_digest(adapter, rel, strategy)
@@ -960,6 +1035,103 @@ def _build_packed(
         activate += module_prelude(modules, modules_init) + "\n"
     activate += f". {shlex.quote(dest)}/activate.inner.sh\n"
     adapter.write_file(f"{rel}/activate.sh", activate.encode())
+
+
+def _build_squashfs(
+    env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
+    modules: list[str], modules_init: str, caps: dict | None,
+    pack_tools: dict, emit,
+) -> dict:
+    """One mounted image instead of ~100k files on the shared FS.
+
+    Layout (the realization dir stays a plain directory, so every marker/
+    adoption/footprint path works unchanged):
+
+        envs/<hash>/
+          .weft-ready    marker (strategy, image_sha256, image_bytes, …)
+          activate.sh    module prelude + lazy idempotent mount + source
+          image.sqfs     the env, one zstd-compressed immutable object
+          mnt/           mountpoint; the env tree appears here when mounted
+
+    The CONTENT is built at mnt/ (a normal prefix build — or a packed
+    unpack on air-gapped sites — plus layers and post_install), squashed,
+    then the tree is deleted: the image is the realization. Mounting is
+    lazy at activation (direct mode) or namespace-scoped per job (userns
+    mode; the runner wraps the job — misc/sqaush.md, verified on
+    cbe.next 2026-07-14).
+    """
+    from .capability import compute_view
+    sq = compute_view(caps or {}).get("squashfs") or {}
+    mk, fuse_mount = sq.get("mksquashfs"), sq.get("squashfuse")
+    if not (mk and fuse_mount):
+        raise WeftError(
+            "env.unsatisfiable_on_site",
+            "squashfs strategy needs mksquashfs and squashfuse on site (v1 "
+            "builds images site-side)", stage="realize",
+            hints={"squashfs": sq})
+    inner = f"{rel}/mnt"
+    internet = bool(compute_view(caps or {}).get("internet"))
+    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
+                    f"mkdir -p {shlex.quote(adapter.path(rel))}")
+    # content: modules stay OUT of the image (module preludes are host
+    # state, run before activation — the outer script carries them)
+    if internet:
+        _build_prefix(env_id, env_row, adapter, inner, [], modules_init)
+    else:
+        _build_packed(env_id, env_row, adapter, inner, [], modules_init,
+                      caps, pack_tools)
+    _realize_layers(env_id, env_row, adapter, inner,
+                    pack_tools.get("solvers") or {}, emit,
+                    offline=not internet, pack_tools=pack_tools)
+    _stage_post_install_inputs(env_row, adapter, inner, pack_tools)
+    _run_post_install(env_row, adapter, inner)
+
+    img = adapter.path(f"{rel}/image.sqfs")
+    t0 = __import__("time").time()
+    emit("realize.squashfs", env_id=env_id, site=adapter.name)
+    r = adapter.run_cmd(
+        f"{shlex.quote(mk)} {shlex.quote(adapter.path(inner))} "
+        f"{shlex.quote(img)} -comp zstd -noappend -no-progress 2>&1 || "
+        f"{shlex.quote(mk)} {shlex.quote(adapter.path(inner))} "
+        f"{shlex.quote(img)} -noappend -no-progress 2>&1",
+        timeout=3600)
+    if r.rc != 0:
+        raise WeftError(
+            "env.realize_failed", "mksquashfs failed on site",
+            stage="realize", hints={"log_tail": (r.err or r.out)[-1500:]})
+    meta = adapter.run_cmd(
+        f"h=$(sha256sum {shlex.quote(img)} 2>/dev/null || "
+        f"shasum -a 256 {shlex.quote(img)}); "
+        f"printf '%s %s' \"${{h%% *}}\" \"$(wc -c < {shlex.quote(img)} | tr -d ' ')\"",
+        timeout=600)
+    parts = meta.out.strip().split()
+    image_sha256 = parts[0] if parts else ""
+    image_bytes = int(parts[1]) if len(parts) > 1 else 0
+    # the tree was scaffolding; the image is the realization
+    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(inner))} && "
+                    f"mkdir -p {shlex.quote(adapter.path(inner))}")
+
+    envdir = adapter.path(rel)
+    activate = ""
+    if modules:
+        activate += module_prelude(modules, modules_init) + "\n"
+    activate += (
+        f'__weft_sq="{envdir}"\n'
+        f"if [ ! -f \"$__weft_sq/mnt/activate.sh\" ]; then\n"
+        f"    {shlex.quote(fuse_mount)} \"$__weft_sq/image.sqfs\" "
+        f"\"$__weft_sq/mnt\" 2>/dev/null || true\n"
+        f"fi\n"
+        f"if [ ! -f \"$__weft_sq/mnt/activate.sh\" ]; then\n"
+        f"    echo 'weft: squashfs env not mounted (no fuse here? run "
+        f"inside a job, or unshare -rm)' >&2\n"
+        f"    return 1 2>/dev/null || exit 1\n"
+        f"fi\n"
+        f". \"$__weft_sq/mnt/activate.sh\"\n")
+    adapter.write_file(f"{rel}/activate.sh", activate.encode())
+    emit("realize.squashfs.done", env_id=env_id, site=adapter.name,
+         image_bytes=image_bytes,
+         elapsed_s=round(__import__("time").time() - t0, 1))
+    return {"image_sha256": image_sha256, "image_bytes": image_bytes}
 
 
 def _site_platform(caps: dict | None) -> str:

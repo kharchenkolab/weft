@@ -95,6 +95,10 @@ class KernelManager:
         adapter.write_file(
             f"{jobdir_rel}/cmd.sh",
             f"mkdir -p blocks\nexec {interp} {driver_file}\n".encode())
+        if env_id and self.runner.ns_wrap_needed(env_id, site):
+            # the kernel's whole life runs inside one mount namespace;
+            # its env mount dies with the driver
+            adapter.write_file(f"{jobdir_rel}/ns", b"1\n")
         res = {"cpus": 1, "walltime": walltime, **(resources or {})}
         # the same fence tasks get: an ask no partition can hold would sit
         # PENDING forever (PartitionTimeLimit) — an interactive session

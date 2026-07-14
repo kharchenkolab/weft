@@ -220,6 +220,26 @@ probing cannot see (and simulates air-gapped compute in tests). The
 `container` strategy currently falls back to `packed` with an emitted
 `realize.fallback` event — same no-network property, honest record.
 
+**Squashfs realization** (`squashfs` / `modules+squashfs`): the realized
+tree is built once at `envs/<hash>/mnt`, compressed into ONE image
+(`envs/<hash>/image.sqfs`, zstd), and the tree deleted — every
+interpreter start then reads a single page-cache-friendly object instead
+of stat-ing ~100k files on the shared FS. Auto-selected when the weft
+root sits on a parallel filesystem (BeeGFS/`fhgfs`, Lustre, GPFS) and
+the site can build+mount (mksquashfs, squashfuse — the probe also looks
+in apptainer's libexec — /dev/fuse); opt-in elsewhere via site config
+`prefer: "squashfs"` (NFS-hosted institutional read-only envs want it
+too). Mounting is lazy in `activate.sh`; on userns-capable sites each
+job re-execs under `unshare -rm` (a `ns` flag in the jobdir), so the
+mount lives in a private namespace and vanishes with the job — no
+epilogues, no stale mounts, and it works even where fusermount3 refuses
+to mount over the root fs (BeeGFS; measured on cbe.next). The integrity
+fence is the image itself (size-checked per use, sha256 in the marker
+for repair). Overlays may stack on squashfs parents (the mount presents
+the exact pixi layout one level down); overlay BUILDS need a persistent
+mount, so userns-only sites fall back to a full build. Eviction
+lazy-unmounts and deletes the image.
+
 **Overlay realization** (O(delta) stacking): a child solved with
 `extends_env` — the parent's entire resolution pinned exactly, including
 layer snapshot dates and github commit SHAs, so the child's lock is a

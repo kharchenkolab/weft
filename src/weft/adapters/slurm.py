@@ -402,6 +402,11 @@ class SlurmAdapter(SSHAdapter):
         # the source of truth, whatever the scheduler forgets
         lines += [
             "",
+            # squashfs envs on userns sites: private per-job mount namespace
+            f'if [ -f {shlex.quote(jobdir)}/ns ] && [ -z "$WEFT_NS" ] '
+            '&& command -v unshare >/dev/null 2>&1 '
+            '&& unshare -rm true 2>/dev/null; then',
+            '    WEFT_NS=1 exec unshare -rm "$0" "$@"; fi',
             # conda activation hooks may contain bashisms
             'if [ -z "$WEFT_BASH" ] && command -v bash >/dev/null 2>&1; then',
             '    WEFT_BASH=1 exec bash "$0" "$@"; fi',
@@ -462,6 +467,10 @@ class SlurmAdapter(SSHAdapter):
             lines.append(f"#SBATCH --account={self.account}")
         lines += [
             "",
+            f'if [ -f {gdir}/ns ] && [ -z "$WEFT_NS" ] '
+            '&& command -v unshare >/dev/null 2>&1 '
+            '&& unshare -rm true 2>/dev/null; then',
+            '    WEFT_NS=1 exec unshare -rm "$0" "$@"; fi',
             'if [ -z "$WEFT_BASH" ] && command -v bash >/dev/null 2>&1; then',
             '    WEFT_BASH=1 exec bash "$0" "$@"; fi',
             'E="el$SLURM_ARRAY_TASK_ID"',

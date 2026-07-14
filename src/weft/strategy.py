@@ -1,10 +1,18 @@
 """Realization strategy selection: a pure decision table over capabilities.
 
     compute internet + storage shared with install point  -> prefix
+    parallel-FS root (BeeGFS/Lustre/GPFS) + squashfs-able  -> squashfs
     no internet, apptainer present                         -> container
     no internet, no container runtime                      -> packed
     spec declares modules                                  -> modules+<base>
     spec declares container_base                           -> container required
+
+squashfs (one mounted image instead of ~100k files on the shared FS) is
+auto-selected only where the per-file metadata cost recurs — a parallel
+filesystem root; elsewhere it is opt-in via prefer ("squashfs" — e.g.
+NFS-hosted institutional read-only envs want it too). Requires
+squashfs_mode(caps) (fuse device + squashfuse + mksquashfs on site, and
+either userns or a mountable-over root fs).
 
 The table is a pure function so it is exhaustively unit-testable, and the
 agent may override with an explicit request when diagnosing site quirks
@@ -13,10 +21,11 @@ agent may override with an explicit request when diagnosing site quirks
 
 from __future__ import annotations
 
-from .capability import compute_view, has_apptainer
+from .capability import PARALLEL_FS, compute_view, has_apptainer, squashfs_mode
 from .errors import WeftError
 
-KNOWN = ("prefix", "packed", "container", "modules+prefix", "modules+packed")
+KNOWN = ("prefix", "packed", "container", "squashfs",
+         "modules+prefix", "modules+packed", "modules+squashfs")
 
 
 def select_strategy(
@@ -53,6 +62,18 @@ def select_strategy(
                 stage="realize",
                 hints={"alternatives": ["packed", "container"]},
             )
+        if base == "squashfs" and squashfs_mode(caps) is None:
+            raise WeftError(
+                "env.unsatisfiable_on_site",
+                "squashfs strategy requested but the site cannot mount or "
+                "build images",
+                stage="realize",
+                hints={"squashfs": view.get("squashfs") or {},
+                       "needs": "fuse device + squashfuse + mksquashfs, and "
+                                "userns or a root fs fusermount may mount "
+                                "over (not a parallel FS)",
+                       "alternatives": ["prefix", "packed"]},
+            )
         return prefer
 
     if container_base:
@@ -72,6 +93,14 @@ def select_strategy(
                 hints={"runtimes": view.get("runtimes", {})},
             )
         return "container"
+
+    # parallel-FS root: every interpreter start pays per-file metadata on
+    # the shared FS forever — one mounted image is the honest default
+    # where the site can build and mount it (needs internet OR a packed
+    # blob to build from; the builder handles both, so gate on tooling)
+    root_fs = (view.get("squashfs") or {}).get("root_fs") or ""
+    if root_fs in PARALLEL_FS and squashfs_mode(caps):
+        return "modules+squashfs" if modules else "squashfs"
 
     if internet:
         base = "prefix"

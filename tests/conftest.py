@@ -56,6 +56,8 @@ def sshd_site(docker_available, tmp_path_factory):
         pytest.skip(f"cannot build sshd fixture: {build.stderr[-300:]}")
     name = f"weft-sshd-{uuid.uuid4().hex[:8]}"
     run = _sh("docker", "run", "-d", "--rm", "--name", name,
+              # FUSE + userns for squashfs-realization paths
+              "--device", "/dev/fuse", "--cap-add", "SYS_ADMIN",
               "-p", "127.0.0.1::22", "weft-test-sshd")
     assert run.returncode == 0, run.stderr
     cid = run.stdout.strip()
@@ -154,6 +156,7 @@ def slurm_site(docker_available, tmp_path_factory):
         pytest.skip(f"cannot build slurm fixture: {build.stderr[-300:]}")
     name = f"weft-slurm-{uuid.uuid4().hex[:8]}"
     run = _sh("docker", "run", "-d", "--rm", "--name", name,
+              "--device", "/dev/fuse", "--cap-add", "SYS_ADMIN",
               "--hostname", "weftslurm", "-p", "127.0.0.1::22", "weft-test-slurm")
     assert run.returncode == 0, run.stderr
     port = _sh("docker", "port", name, "22").stdout.strip().rsplit(":", 1)[-1]

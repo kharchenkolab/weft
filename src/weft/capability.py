@@ -30,6 +30,7 @@ def normalize_probe(probe: dict, compute_probe: dict | None = None) -> dict:
         "gpus": probe.get("gpus", []),
         "cuda_driver": probe.get("cuda_driver", ""),
         "storage": probe.get("storage", {}),
+        "squashfs": probe.get("squashfs", {}),
         "shim_version": probe.get("shim_version"),
     }
     if compute_probe:
@@ -49,6 +50,43 @@ def scheduler_type(caps: dict) -> str:
 def has_apptainer(caps: dict) -> bool:
     v = compute_view(caps).get("runtimes", {}).get("apptainer", "")
     return bool(v)
+
+
+# filesystems where per-small-file metadata is the recurring cost squashfs
+# exists to remove — and where fusermount3 refuses to place mounts
+PARALLEL_FS = {"fhgfs", "beegfs", "lustre", "gpfs"}
+
+
+def squashfs_mode(caps: dict) -> str | None:
+    """How (whether) this site can realize squashfs envs.
+
+    "userns"  — mount inside a per-job user+mount namespace: works over
+                any filesystem (bypasses fusermount policy), unmounts
+                itself when the job's namespace exits.
+    "direct"  — plain squashfuse mount, left mounted (gc/evict unmounts);
+                only where fusermount may mount over the root's fs —
+                it refuses parallel filesystems (BeeGFS magic et al.).
+    None      — missing tooling (fuse device, squashfuse, mksquashfs —
+                v1 builds images on site) or unmountable root.
+    """
+    sq = compute_view(caps).get("squashfs") or {}
+    if not (sq.get("dev_fuse") and sq.get("squashfuse")
+            and sq.get("mksquashfs")):
+        return None
+    if sq.get("userns"):
+        return "userns"
+    if (sq.get("root_fs") or "") not in PARALLEL_FS:
+        return "direct"
+    return None
+
+
+def squashfs_direct_ok(caps: dict) -> bool:
+    """Can this site hold a PERSISTENT (non-namespace) squashfuse mount at
+    the canonical path? Overlay BUILDS on squashfs parents need one — the
+    build runs many commands that must all see the mounted parent."""
+    sq = compute_view(caps).get("squashfs") or {}
+    return bool(sq.get("dev_fuse") and sq.get("squashfuse")
+                and (sq.get("root_fs") or "") not in PARALLEL_FS)
 
 
 def gpu_count(caps: dict) -> int:

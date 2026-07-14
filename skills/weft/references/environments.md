@@ -5,8 +5,13 @@ An environment is a **spec**, solved once into a lockfile whose hash is the
 a site) is automatic and strategy-selected per site capability: `prefix`
 (pixi install; needs index access), `packed` (built on the controller,
 shipped as a CAS blob, unpacked offline — air-gapped compute),
-`modules+prefix` (site modules loaded first). musl sites refuse env tasks
-with `env.unsatisfiable_on_site` (bare tasks still run).
+`squashfs` (the env as ONE mounted image — auto on parallel-FS roots
+like BeeGFS/Lustre where per-file metadata is the recurring cost; force
+it with site config `prefer: "squashfs"` for read-only institutional
+envs on NFS; jobs mount it in a private per-job namespace where userns
+exists), `modules+prefix`/`modules+squashfs` (site modules loaded
+first). musl sites refuse env tasks with `env.unsatisfiable_on_site`
+(bare tasks still run).
 
 ```python
 w.env_ensure({
