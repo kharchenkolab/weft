@@ -16,7 +16,7 @@ bump it, with a note here.
 | `job_id`, `task_hash`, `env_id`, `site` | identities; `task_hash` doubles as the memoization key |
 | `node` | hostname captured ON the executing node (best-effort; `null` if the runner predates it). Circumstance, not identity — it never enters `task_hash` |
 | `exit_code`, `wall_s`, `max_rss_gb` | run facts |
-| `outputs` | `[{path, ref (dref:…), bytes, preview}]` (+ one tree entry per declared output dir) |
+| `outputs` | `[{path, ref (dref:…), bytes, preview}]` (+ one tree entry per declared output dir; a declared output that IS a file appears as a plain file entry — both shapes are legal declarations) |
 | `output_bytes` | total |
 | `logs` | `{tail, site_path}` |
 | `transcript` | transcript-manifests only: ordered `[{block, code, rc}]` through the promoted block |

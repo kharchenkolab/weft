@@ -417,11 +417,30 @@ class DataManager:
                 # a declared output that was never produced is a task failure
                 raise WeftError(
                     "job.nonzero_exit",
-                    f"declared output {out!r} missing from sandbox",
+                    f"declared output {out!r} was not produced (no file or "
+                    f"directory at that sandbox path)",
                     stage="collecting",
                     hints={"declared_outputs": task.outputs,
                            "detail": listing.err[:300]},
                 )
+            rows = listing.out.splitlines()
+            # single row at "." = the declared output IS a file (the most
+            # common step output); it becomes a plain file entry — no tree,
+            # no mkdir boilerplate in the task
+            if len(rows) == 1 and rows[0].split("\t")[1] == ".":
+                _kind, _p, is_exec, size, digest = rows[0].split("\t")
+                size = int(size)
+                file_ref = f"dref:{digest}"
+                self.store.put_dataref(
+                    file_ref, "file", size,
+                    meta={"origin": f"job:{jobdir_rel}",
+                          "exec": is_exec == "1"},
+                )
+                ingest_rows.append(f"{out}\t{digest}")
+                total += size
+                entries.append(
+                    self._entry(adapter, jobdir_rel, out, file_ref, size))
+                continue
             tree_entries = []
             for line in listing.out.splitlines():
                 kind, path, is_exec, size, digest = line.split("\t")

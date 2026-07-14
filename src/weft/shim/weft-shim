@@ -342,7 +342,16 @@ cmd_hash_tree() {
             *) echo "hash-tree: unknown arg $1" >&2; exit 2;;
         esac
     done
-    [ -d "$root" ] || { echo "hash-tree: no such dir: $root" >&2; exit 2; }
+    # a FILE root is a single-artifact output (one figure, one table):
+    # one row, path "." — a directory walk can never emit a bare "."
+    if [ -f "$root" ] && [ ! -d "$root" ]; then
+        x=0; [ -x "$root" ] && x=1
+        sz=$(wc -c < "$root" | tr -d ' ')
+        h=$(sha256_of "$root")
+        printf 'file\t.\t%s\t%s\t%s\n' "$x" "$sz" "$h"
+        return 0
+    fi
+    [ -d "$root" ] || { echo "hash-tree: no such file or directory: $root" >&2; exit 2; }
     root=$(cd "$root" && pwd)
     ( cd "$root" && find . \( -type f -o -type l \) | sed 's|^\./||' | LC_ALL=C sort ) | \
     while IFS= read -r p; do

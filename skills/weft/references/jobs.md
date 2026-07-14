@@ -8,6 +8,11 @@ plan + job_id; drain `events_poll(cursor)` on your turns.
 - `task_logs(job_id, tail=100)` — fetched on demand from the site.
 - `task_result(job_id)` — the manifest (outputs with refs+previews,
   exit_code, wall_s, max_rss_gb, log tail with classified signature).
+- Declared `outputs` may be files OR directories: `["plot.svg"]` works
+  (no mkdir boilerplate — the single figure/table is the common step
+  output); `results/` stays the convention for multi-artifact steps.
+  An output that is neither file nor directory at collection fails the
+  job with "was not produced".
 - `task_cancel(job_id)` — works queued or running; external `scancel`
   is detected and recorded as CANCELLED.
 - Monitoring is batched per site (one scheduler query per tick regardless

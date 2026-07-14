@@ -70,7 +70,7 @@ w.data_fetch(m["outputs"][0]["ref"], "results/scan.h5")
 | `env` | EnvID, inline spec dict, or `null` for the bare site environment |
 | `inputs` | `[{ref, mount_as}]` — sandbox-relative mounts, read-only by convention. On one filesystem staging is zero-copy hardlinks (the mount, the CAS blob, and possibly the registered original share an inode) — mutating an input in place falsifies the content-addressed record, not just one file; tools that must mutate should copy inside the sandbox first |
 | `code` | same shape; code is just data (hash-addressed like everything) |
-| `outputs` | declared result paths; a missing declared output fails the job |
+| `outputs` | declared result paths — plain files (`plot.svg`) or directories (`results/`); a declared output that was not produced fails the job |
 | `resources` | `cpus, mem_gb, gpus, walltime, partition` — validated against site capabilities AND user policy |
 | `site` | site name or `"auto"` |
 | `array` | N: fan out N element jobs with `WEFT_ARRAY_INDEX` = 0…N-1 |
