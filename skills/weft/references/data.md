@@ -24,6 +24,16 @@ table knows which sites hold what; staging is the set difference.
 - **Transfer methods** are chosen per site: `rsync-ssh` normally,
   `ssh-pipe` (tar over the control channel) on boxes without rsync,
   `local-link` on the same machine. You don't pick; the endpoint does.
+- **Inputs are read-only by contract — zero-copy makes it matter.** On
+  one filesystem, registration and local staging are hardlinks (instant,
+  no duplication, any file size): the sandbox input, the CAS blob, and
+  possibly the user's original file are the SAME inode. A task that
+  mutates an input in place doesn't just damage one file — it falsifies
+  the content-addressed record (the blob no longer hashes to its name;
+  memoization/provenance/staging then carry wrong bytes under a
+  true-looking name). Write results to declared outputs only; if a tool
+  insists on mutating its input, copy it inside the job sandbox first
+  (`cp data/in.h5 work.h5 && tool work.h5`).
 
 ## Ingesting remote sources
 
