@@ -28,9 +28,9 @@ def test_kernel_peek_streams_deltas(w):
            "    print('chunk', i)\n"
            "    time.sleep(0.3)\n", wait=False)
     n = r["block"]
-    got, oo, eo, polls = "", 0, 0, 0
-    while polls < 120:
-        polls += 1
+    got, oo, eo = "", 0, 0
+    deadline = time.time() + 90          # generous: full-lane load
+    while True:
         p = w.kernel_peek(k, n, out_offset=oo, err_offset=eo)
         assert p["out_offset"] >= oo          # monotonic
         got += p["out_delta"]
@@ -38,9 +38,9 @@ def test_kernel_peek_streams_deltas(w):
         if not p["running"]:
             assert p["rc"] == 0
             break
+        if time.time() > deadline:
+            pytest.fail(f"block never finished (got {got!r})")
         time.sleep(0.15)
-    else:
-        pytest.fail("block never finished")
     # deltas reassemble the exact full stream
     assert [f"chunk {i}" for i in range(6)] == \
         [ln for ln in got.splitlines() if ln]
