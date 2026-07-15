@@ -382,8 +382,17 @@ def _ro_integrity_failed(env_id: str, existing: dict, adapter: SiteAdapter,
 def _ns_wrap_cmd(script: str) -> str:
     """Run `script` inside a throwaway user+mount namespace: FUSE mounts
     made by activation land there (regardless of who owns the mountpoint)
-    and vanish when the script exits."""
-    return f"unshare -rm sh -c {shlex.quote(script)}"
+    and vanish when the script exits.
+
+    The INNER shell prefers bash, mirroring run_activated and the job
+    runner: conda activate.d hooks contain bashisms (glib's gio
+    completion uses process substitution), and el7's bash-4.2-as-sh
+    refuses them in posix mode — cbe's 5.2 tolerates what clip's 4.2
+    breaks on, so `sh` here is a cross-site trap."""
+    inner = (f"if command -v bash >/dev/null 2>&1; then "
+             f"exec bash -c {shlex.quote(script)}; "
+             f"else exec sh -c {shlex.quote(script)}; fi")
+    return f"unshare -rm sh -c {shlex.quote(inner)}"
 
 
 def _marker(adapter: SiteAdapter, rel: str) -> dict:
@@ -958,7 +967,8 @@ def _spot_check_and_mark(
     if _has_package(env_row.get("canonical", {}), "python"):
         check += " && python -c 'import sys; sys.exit(0)'"
     if wrap:
-        check = f"{wrap} sh -c {shlex.quote(check)}"
+        # bash-preferring inner shell — same reasons as _ns_wrap_cmd
+        check = _ns_wrap_cmd(check)
     # cold FUSE mount + interpreter start over a parallel FS can be slow
     spot = adapter.run_activated(check, timeout=300)
     if spot.rc != 0:
