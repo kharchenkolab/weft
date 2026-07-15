@@ -281,6 +281,37 @@ class KernelManager:
             out.append(entry)
         return out
 
+    def peek(self, kernel_id: str, block: int, out_offset: int = 0,
+             err_offset: int = 0, max_bytes: int = 65536) -> dict:
+        """Incremental block output: bytes past the given offsets plus
+        the advanced offsets — hosts streaming live output from REMOTE
+        kernels tail through this (locals may read the block files
+        directly; this gives both one code path). Rides the shim's
+        read-from; offsets are byte-accurate for utf-8-clean streams
+        (program output overwhelmingly is)."""
+        k = self._get(kernel_id)
+        adapter = self._adapter(k["site"])
+        base = f"{k['jobdir']}/blocks/{block:04d}"
+
+        def delta(suffix, off):
+            r = adapter.shim(
+                ["read-from", "--file", adapter.path(f"{base}.{suffix}"),
+                 "--offset", str(off), "--max", str(max_bytes)],
+                timeout=30)
+            data = r.out if r.rc == 0 else ""
+            return data, off + len(data.encode("utf-8", "surrogateescape"))
+
+        out, out_off = delta("out", out_offset)
+        err, err_off = delta("err", err_offset)
+        rc = None
+        try:
+            rc = int(adapter.read_file(f"{base}.rc", 64).decode().strip())
+        except (WeftError, ValueError):
+            pass
+        return {"out_delta": out, "err_delta": err,
+                "out_offset": out_off, "err_offset": err_off,
+                "running": rc is None, "rc": rc}
+
     def interrupt(self, kernel_id: str) -> dict:
         k = self._get(kernel_id)
         adapter = self._adapter(k["site"])

@@ -920,6 +920,15 @@ class Weft:
         """Check an async block: {"state": "running"} or the full result."""
         return self.kernels.poll(kernel_id, block, timeout=timeout)
 
+    def kernel_peek(self, kernel_id: str, block: int, out_offset: int = 0,
+                    err_offset: int = 0, max_bytes: int = 65536) -> dict:
+        """Incremental live output for a block: {out_delta, err_delta,
+        out_offset, err_offset, running, rc}. Feed the returned offsets
+        back in — works identically for local and remote kernels, so a
+        host's streaming pane needs one code path."""
+        return self.kernels.peek(kernel_id, block, out_offset, err_offset,
+                                 max_bytes)
+
     def kernel_status(self, kernel_id: str) -> dict:
         """State (running/died/stopped), current block + blocks_run, idle_s."""
         return self.kernels.status(kernel_id)

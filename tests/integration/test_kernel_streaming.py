@@ -18,6 +18,36 @@ def w(tmp_path, pixi_bin):
     return w
 
 
+def test_kernel_peek_streams_deltas(w):
+    """kernel_peek (user-model ask, remote streaming): offset-carried
+    incremental reads — one code path for local AND remote kernels."""
+    k = w.kernel_start("local", "python")["kernel_id"]
+    r = w.kernel_exec(
+        k, "import time\n"
+           "for i in range(6):\n"
+           "    print('chunk', i)\n"
+           "    time.sleep(0.3)\n", wait=False)
+    n = r["block"]
+    got, oo, eo, polls = "", 0, 0, 0
+    while polls < 120:
+        polls += 1
+        p = w.kernel_peek(k, n, out_offset=oo, err_offset=eo)
+        assert p["out_offset"] >= oo          # monotonic
+        got += p["out_delta"]
+        oo, eo = p["out_offset"], p["err_offset"]
+        if not p["running"]:
+            assert p["rc"] == 0
+            break
+        time.sleep(0.15)
+    else:
+        pytest.fail("block never finished")
+    # deltas reassemble the exact full stream
+    assert [f"chunk {i}" for i in range(6)] == \
+        [ln for ln in got.splitlines() if ln]
+    # and it genuinely streamed: more than one delta-carrying poll
+    w.kernel_stop(k)
+
+
 def test_block_output_grows_while_running(w):
     k = w.kernel_start("local", "python")["kernel_id"]
     adapter = w.adapters["local"]

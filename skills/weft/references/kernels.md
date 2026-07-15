@@ -35,7 +35,11 @@ manifest with `session: {session_id, snapshotted_at_promote}`);
 
 `blocks/NNNN.{out,err}` exist (empty) from block start and GROW while
 the block runs — hosts streaming live output tail them at an offset;
-`.rc` appearing (written last, atomic) is completion. Python streams
+`.rc` appearing (written last, atomic) is completion.
+`kernel_peek(k, block, out_offset=, err_offset=)` returns the deltas
+past the offsets plus advanced offsets and `{running, rc}` — the same
+call works for local and remote kernels (it rides the shim), so a
+streaming pane needs exactly one code path. Python streams
 per-write (implicit flushes throttled ~10/s; explicit flush() is
 immediate); R streams between top-level statements (base-R connection
 buffering holds output within a single long expression); Julia flushes
