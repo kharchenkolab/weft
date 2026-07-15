@@ -64,8 +64,14 @@ class SSHAdapter(SiteAdapter):
         pixi_unpack_source: str | None = None,
         connect_timeout: int = 10,
         shared: bool = False,
+        pixi_cache: str | None = None,
     ):
         self.shared = shared
+        # site-config lever: on netfs-only clusters rattler's cache
+        # locking breaks — point the cache at node-local storage. The
+        # DEFAULT stays the shared <root>/cache/pixi (cross-build dedupe
+        # is what makes rebuild-at-destination cheap).
+        self.pixi_cache = pixi_cache
         self.name = name
         self.host = host
         self.user = user
@@ -234,7 +240,8 @@ class SSHAdapter(SiteAdapter):
               if _controller_ca_bundle() is not None else "")
         return (("umask 002; " if self.shared else "") +
             f"WEFT_ROOT={shlex.quote(self.root)} "
-            f"PIXI_CACHE_DIR={shlex.quote(self.path('cache/pixi'))} "
+            f"PIXI_CACHE_DIR="
+            f"{shlex.quote(self.pixi_cache or self.path('cache/pixi'))} "
             f"PIXI_HOME={shlex.quote(self.path('pixi-home'))} "
             + ca +
             f"PATH={shlex.quote(self.path('bin'))}:$PATH "

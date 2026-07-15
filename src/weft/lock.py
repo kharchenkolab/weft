@@ -218,25 +218,60 @@ _CONFLICT_MARKERS = (
 )
 _NETWORK_MARKERS = ("connection", "timed out", "dns", "network", "fetch repodata")
 
+# deterministic local-cache breakage (netfs file locking), NOT a network
+# fault — checked BEFORE the network heuristic. Captured verbatim from
+# cbe.next (netfs-only: NFS home, BeeGFS /tmp): "failed to fetch
+# conda-pypi mapping … Cache error: File still doesn't exist"
+_CACHE_MARKERS = ("cache error", "file still doesn't exist",
+                  "conda-pypi mapping")
+
 
 def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi") -> LockResult:
-    """Solve a (fully merged) spec into a lockfile. Requires index access."""
+    """Solve a (fully merged) spec into a lockfile. Requires index access.
+
+    The subprocess gets a hermetic PIXI_CACHE_DIR when the default cache
+    sits on a network filesystem (rattler's cache locking breaks there —
+    controller-on-login-node deployments); ambient PIXI_CACHE_DIR is
+    always respected as the user's explicit choice."""
+    from .cachedir import local_cache_dir
+    import os as _os
     workdir.mkdir(parents=True, exist_ok=True)
     manifest = render_pixi_manifest(spec)
     (workdir / "pixi.toml").write_text(manifest)
     lockfile = workdir / "pixi.lock"
     if lockfile.exists():
         lockfile.unlink()
+    cache_dir, cache_why = local_cache_dir()
+    env = None
+    if cache_dir:
+        env = {**_os.environ, "PIXI_CACHE_DIR": cache_dir}
     proc = subprocess.run(
         [pixi_bin, "lock", "--manifest-path", str(workdir / "pixi.toml")],
         capture_output=True,
         text=True,
         timeout=SOLVE_TIMEOUT_S,
+        env=env,
     )
     if proc.returncode != 0 or not lockfile.exists():
         err = (proc.stderr or proc.stdout).strip()
         tail = "\n".join(err.splitlines()[-30:])
         low = err.lower()
+        if any(m in low for m in _CACHE_MARKERS):
+            raise WeftError(
+                "env.solve_failed",
+                "solver cache unusable — deterministic local failure, "
+                "not index reachability",
+                stage="solve",
+                hints={"stderr_tail": tail,
+                       "cache_dir": cache_dir or "pixi default",
+                       "cache_resolution": cache_why,
+                       "suggestion": "point PIXI_CACHE_DIR at node-local "
+                                     "storage ($XDG_RUNTIME_DIR, "
+                                     "/dev/shm/weft-<uid>); network "
+                                     "filesystems break rattler's cache "
+                                     "locking"},
+                retryable=False,
+            )
         if any(m in low for m in _NETWORK_MARKERS) and not any(
             m.lower() in low for m in _CONFLICT_MARKERS
         ):

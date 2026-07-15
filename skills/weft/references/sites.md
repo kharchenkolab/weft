@@ -192,8 +192,20 @@ site directory), `user`, `port`, `ssh_opts` (raw ssh flags, e.g.
 `peer_host`/`peer_port` (the address OTHER SITES use to reach this one,
 when NAT or port maps make it differ from the controller's view — feeds
 direct site-to-site pulls), `pixi_source`, `pixi_unpack_source`,
-`shared` (cross-user root), `capabilities_override`, `policy`. Slurm
+`shared` (cross-user root), `capabilities_override`, `policy`,
+`pixi_cache` (node-local path for pixi's cache — the lever for
+netfs-only clusters where rattler's cache locking breaks; the default
+stays the shared `<root>/cache/pixi` because cross-build package dedupe
+is what makes rebuild-at-destination cheap). Slurm
 adds `scheduler` ({account, partition}) and `modules_init`.
+
+Controller-side solves resolve their own cache: ambient
+`PIXI_CACHE_DIR` is respected; when the default cache sits on a network
+filesystem (controller on a login node), weft redirects the solve's
+cache to node-local storage ($XDG_RUNTIME_DIR, /dev/shm) automatically.
+A netfs-broken cache that still slips through fails as a
+NON-retryable `env.solve_failed` naming the lever — it is
+deterministic, never an index-reachability problem.
 
 ## Institutional / managed roots (read-only base envs)
 

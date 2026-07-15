@@ -21,11 +21,12 @@ class LocalAdapter(SiteAdapter):
     kind = "local"
 
     def __init__(self, name: str, root: Path, pixi_source: str | None = None,
-                 shared: bool = False):
+                 shared: bool = False, pixi_cache: str | None = None):
         self.name = name
         self._root = Path(root)
         self._pixi_source = pixi_source  # local pixi binary to link into root/bin
         self.shared = shared
+        self.pixi_cache = pixi_cache  # netfs-only sites: node-local lever
         # shared roots: subprocesses create group-usable files
         self._preexec = (lambda: os.umask(0o002)) if shared else None
 
@@ -36,7 +37,8 @@ class LocalAdapter(SiteAdapter):
     def _env(self) -> dict:
         env = dict(os.environ)
         env["WEFT_ROOT"] = self.root
-        env["PIXI_CACHE_DIR"] = self.path("cache/pixi")
+        env["PIXI_CACHE_DIR"] = getattr(self, "pixi_cache", None) \
+            or self.path("cache/pixi")
         env["PIXI_HOME"] = self.path("pixi-home")
         return env
 
