@@ -333,6 +333,44 @@ cmd_head() {
     [ -f "$file" ] && head -c "$bytes" "$file" || true
 }
 
+# list-tree --root R [--hash-under BYTES] [--max N] : TSV of
+# path, bytes, mtime[, sha256]. Stat-only by default (an inventory
+# receipt, not an integrity pass); hashes only files <= the threshold
+# when asked. Total count on stderr as '#total <n>' for truncation
+# honesty. Paths with newlines are skipped by construction (find|read).
+cmd_list_tree() {
+    root=""; hash_under=0; maxn=5000
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --root) root=$2; shift 2;;
+            --hash-under) hash_under=$2; shift 2;;
+            --max) maxn=$2; shift 2;;
+            *) echo "list-tree: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    [ -d "$root" ] || { echo "list-tree: no such dir: $root" >&2; exit 2; }
+    root=$(cd "$root" && pwd)
+    if stat -c %s "$root" >/dev/null 2>&1; then st=gnu; else st=bsd; fi
+    total=$(cd "$root" && find . -type f 2>/dev/null | wc -l | tr -d ' ')
+    printf '#total %s\n' "$total" >&2
+    ( cd "$root" && find . -type f 2>/dev/null | sed 's|^\./||' \
+        | LC_ALL=C sort | head -n "$maxn" ) | \
+    while IFS= read -r p; do
+        full="$root/$p"
+        if [ "$st" = gnu ]; then
+            set -- $(stat -c '%s %Y' "$full" 2>/dev/null || echo 0 0)
+        else
+            set -- $(stat -f '%z %m' "$full" 2>/dev/null || echo 0 0)
+        fi
+        sz=${1:-0}; mt=${2:-0}
+        h=""
+        if [ "$hash_under" -gt 0 ] && [ "$sz" -le "$hash_under" ]; then
+            h=$(sha256_of "$full")
+        fi
+        printf '%s\t%s\t%s\t%s\n' "$p" "$sz" "$mt" "$h"
+    done
+}
+
 # hash-tree --root R [--rel] : TSV of kind, path, exec, size, sha256/target
 cmd_hash_tree() {
     root=""
@@ -495,6 +533,7 @@ case "$sub" in
     head) cmd_head "$@";;
     read-from) cmd_read_from "$@";;
     hash-tree) cmd_hash_tree "$@";;
+    list-tree) cmd_list_tree "$@";;
     materialize) cmd_materialize "$@";;
     ingest) cmd_ingest "$@";;
     unpack-verify) cmd_unpack_verify "$@";;

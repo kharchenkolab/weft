@@ -1340,6 +1340,36 @@ class Weft:
         from .bundle import import_bundle
         return import_bundle(self, path)
 
+    def run_inventory(self, target: str, glob: str | None = None,
+                      min_bytes: int = 0,
+                      max_entries: int = 5000) -> dict:
+        """What a finished run LEFT BEHIND (recorded at terminal state,
+        stat-only, budgeted): {path, bytes, mtime} per file — the
+        triage facts for retention. Knowledge, not holdings: survives
+        sandbox sweeps, run_retain and run_forget. Filters apply at
+        read; `truncated` says the recording hit its budget."""
+        row = self.store.get_run_inventory(target)
+        if not row:
+            raise WeftError(
+                "data.missing", f"no inventory recorded for {target}",
+                stage="infra",
+                hints={"note": "inventories are recorded when a run "
+                               "reaches a terminal state; runs finished "
+                               "before this weft version have none"})
+        entries = row["entries"]
+        if glob:
+            import fnmatch
+            entries = [e for e in entries
+                       if fnmatch.fnmatch(e["path"], glob)]
+        if min_bytes:
+            entries = [e for e in entries if e["bytes"] >= min_bytes]
+        return {"target": target, "site": row["site"],
+                "recorded_at": row["recorded_at"],
+                "entries": entries[:max_entries],
+                "matched": len(entries),
+                "truncated": row["truncated"] or len(entries) > max_entries,
+                "total_files": row["total"]}
+
     def provenance(self, target: str, depth: int = 5) -> dict:
         """The full "how was this produced" chain for a job or a DataRef:
         command + exact env identity (spec, locked layers, snapshot dates,
@@ -1516,7 +1546,7 @@ PUBLIC_TOOLS = [
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_elements", "array_result", "array_retry",
     "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",
-    "events_poll", "doctor", "reconcile", "provenance",
+    "events_poll", "doctor", "reconcile", "provenance", "run_inventory",
     "bundle_export", "bundle_import",
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",
     "env_evict", "site_footprint",

@@ -40,6 +40,7 @@ from .task import Task
 TERMINAL = ("DONE", "FAILED", "CANCELLED")
 COLLECT_RETRIES = 4
 COLLECT_BACKOFF_S = 3.0
+INVENTORY_MAX_ENTRIES = 5000
 
 
 class JobRunner:
@@ -684,6 +685,44 @@ class JobRunner:
                            **self.group_payload(watch.array_group))
         self._collectors.submit(self._collect_guarded, watch, status)
 
+    def record_run_inventory(self, target: str, site: str,
+                             jobdir_rel: str) -> None:
+        """Terminal receipt of what a run left behind (retention.md R1):
+        {path, bytes, mtime} per file, stat-only, budgeted. KNOWLEDGE,
+        recorded once at terminal state — it outlives the sandbox, so
+        "what did that run produce?" stays answerable after sweeps.
+        Best-effort by contract: a receipt must never break the run
+        lifecycle (old shims without list-tree simply skip)."""
+        try:
+            adapter = self.adapters.get(site)
+            if adapter is None:
+                return
+            r = adapter.shim(
+                ["list-tree", "--root", adapter.path(jobdir_rel),
+                 "--max", str(INVENTORY_MAX_ENTRIES)], timeout=600)
+            if r.rc != 0:
+                return
+            entries = []
+            for line in r.out.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 3:
+                    e = {"path": parts[0], "bytes": int(parts[1]),
+                         "mtime": int(parts[2])}
+                    if len(parts) > 3 and parts[3]:
+                        e["sha256"] = parts[3]
+                    entries.append(e)
+            total = len(entries)
+            for tok in (r.err or "").splitlines():
+                if tok.startswith("#total "):
+                    total = int(tok.split()[1])
+            self.store.put_run_inventory(target, site, entries,
+                                         truncated=total > len(entries),
+                                         total=total)
+            self.store.emit("run.inventoried", target=target, site=site,
+                            files=len(entries), total=total)
+        except Exception:
+            pass
+
     def _collect_guarded(self, watch: Watch, status: dict) -> None:
         adapter = self.adapters[watch.task.site] if watch.task.site in self.adapters \
             else self.adapters[self.store.get_job(watch.job_id)["site"]]
@@ -734,6 +773,10 @@ class JobRunner:
         self, job_id: str, adapter: SiteAdapter, jobdir_rel: str,
         task: Task, status: dict, group: str | None = None,
     ) -> None:
+        # the receipt is recorded BEFORE any terminal state can appear:
+        # a host seeing DONE/FAILED may rely on run_inventory existing
+        # (idempotent under collect retries)
+        self.record_run_inventory(job_id, adapter.name, jobdir_rel)
         exit_code = int(status.get("exit_code", -1))
         tail = self.tail_log(adapter, jobdir_rel)
         max_rss_gb = round(int(status.get("max_rss_kb", 0) or 0) / 1048576, 3)

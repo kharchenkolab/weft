@@ -331,6 +331,7 @@ class KernelManager:
         adapter.cancel(k["handle"], k["jobdir"])
         self.store.update_kernel(kernel_id, state="stopped")
         self.store.emit("kernel.stopped", kernel=kernel_id)
+        self.runner.record_run_inventory(kernel_id, k["site"], k["jobdir"])
         return {"kernel_id": kernel_id, "state": "stopped"}
 
     def promote(self, kernel_id: str, blocks: list[int],

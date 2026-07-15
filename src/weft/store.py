@@ -111,6 +111,13 @@ class Store:
         if kcols and "session_id" not in kcols:
             self._conn.execute(
                 "ALTER TABLE kernels ADD COLUMN session_id TEXT")
+        # retention.md R1: the terminal receipt of what a run left behind.
+        # KNOWLEDGE, not holdings — outlives sweeps, retain and forget.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS run_inventories("
+            "target TEXT PRIMARY KEY, site TEXT, recorded_at REAL,"
+            "entries TEXT, truncated INTEGER, total INTEGER)"
+        )
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS spec_aliases("
             "spec_hash TEXT PRIMARY KEY, env_id TEXT, created_at REAL)"
@@ -648,6 +655,25 @@ class Store:
         return out
 
     # -- sessions -----------------------------------------------------------
+
+    def put_run_inventory(self, target: str, site: str, entries: list[dict],
+                          truncated: bool, total: int) -> None:
+        self._write(
+            "INSERT OR REPLACE INTO run_inventories(target, site,"
+            " recorded_at, entries, truncated, total) VALUES(?,?,?,?,?,?)",
+            (target, site, time.time(), json.dumps(entries),
+             int(truncated), total),
+        )
+
+    def get_run_inventory(self, target: str) -> dict | None:
+        r = self._row("SELECT * FROM run_inventories WHERE target=?",
+                      (target,))
+        if not r:
+            return None
+        out = dict(r)
+        out["entries"] = json.loads(out["entries"] or "[]")
+        out["truncated"] = bool(out["truncated"])
+        return out
 
     def put_session(self, session_id: str, base_env_id: str, site: str,
                     location: str) -> None:
