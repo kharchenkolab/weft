@@ -1401,6 +1401,21 @@ class Weft:
         return self.retains.retain(target, include, exclude, dest, max_gb,
                                    label, background)
 
+    def run_discard(self, target: str) -> dict:
+        """Active sandbox GC: delete a finished run's sandbox NOW.
+        Retained files and the terminal inventory survive. The passive
+        default is policy run_remains_days via gc_plan/gc_sweep."""
+        return self.retains.discard(target)
+
+    def run_forget(self, target: str | None = None,
+                   label: str | None = None) -> dict:
+        """Reclaim the RETAINED tier: delete retained bytes wherever
+        they live, drop the index on confirmed deletion (unreachable
+        sites park forget_pending; retry later). Idempotent; by-label
+        returns an itemized receipt. The terminal inventory always
+        survives — holdings die here, knowledge never does."""
+        return self.retains.forget(target, label)
+
     def retained_runs(self, label: str | None = None,
                       site: str | None = None) -> list[dict]:
         """Every retained run and where its bytes live — one query, no
@@ -1585,7 +1600,7 @@ PUBLIC_TOOLS = [
     "array_status", "array_elements", "array_result", "array_retry",
     "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",
     "events_poll", "doctor", "reconcile", "provenance", "run_inventory",
-    "run_retain", "retained_runs",
+    "run_retain", "retained_runs", "run_discard", "run_forget",
     "bundle_export", "bundle_import",
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",
     "env_evict", "site_footprint",

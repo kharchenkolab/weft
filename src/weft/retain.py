@@ -275,6 +275,89 @@ class RetainManager:
                             hints={"missing": missing[:5]})
         return "transfer"
 
+    # -- GC: the other half ---------------------------------------------------
+
+    def discard(self, target: str) -> dict:
+        """Delete a finished run's SANDBOX now. Retained files are
+        unaffected (they live elsewhere, or the surviving hardlink keeps
+        the inode); the terminal inventory — knowledge — survives."""
+        kind, row, jobdir_rel = self._target_row(target)
+        state = row["state"]
+        if (kind == "job" and state not in TERMINAL_JOB) or \
+                (kind == "kernel" and state not in TERMINAL_KERNEL):
+            raise WeftError("task.invalid",
+                            f"run is {state!r} — discard finished runs "
+                            "only", stage="infra")
+        adapter = self.adapters.get(row["site"])
+        if adapter is None:
+            raise WeftError("site.unreachable",
+                            f"site {row['site']!r} not registered",
+                            stage="infra", retryable=True)
+        adapter.run_cmd(
+            f"rm -rf {shlex.quote(adapter.path(jobdir_rel))}",
+            timeout=1800)
+        self.store.emit("run.discarded", target=target, site=row["site"])
+        return {"target": target, "state": "discarded",
+                "note": "sandbox deleted; retained files and the "
+                        "terminal inventory survive"}
+
+    def forget(self, target: str | None = None,
+               label: str | None = None) -> dict:
+        """Explicit reclamation of the RETAINED tier: delete the retained
+        tree + sidecar wherever the bytes live, drop the index row ON
+        CONFIRMED deletion (site unreachable -> row parked
+        forget_pending, call again later). Idempotent. The terminal
+        inventory — knowledge — always survives (see retention.md for
+        why there is deliberately no keep_inventory flag)."""
+        if bool(target) == bool(label):
+            raise WeftError("task.invalid",
+                            "exactly one of target= or label=",
+                            stage="infra")
+        rows = ([self.store.get_retained(target)] if target
+                else self.store.retained_where(label=label))
+        rows = [r for r in rows if r]
+        forgotten, pending = [], []
+        for row in rows:
+            try:
+                if row["in_place"]:
+                    adapter = self.adapters.get(row["site"])
+                    if adapter is None:
+                        raise WeftError("site.unreachable",
+                                        f"site {row['site']!r} not "
+                                        "registered", stage="infra",
+                                        retryable=True)
+                    r = adapter.run_cmd(
+                        f"rm -rf {shlex.quote(row['location'])}",
+                        timeout=1800)
+                    if r.rc != 0:
+                        raise WeftError("site.unreachable",
+                                        f"delete failed: {r.err[:200]}",
+                                        stage="infra", retryable=True)
+                else:
+                    shutil.rmtree(row["location"], ignore_errors=True)
+                self.store.delete_retained(row["target"])
+                self.store.emit("retain.forgotten", target=row["target"],
+                                bytes=row["bytes"])
+                forgotten.append({"target": row["target"],
+                                  "bytes": row["bytes"],
+                                  "location": row["location"]})
+            except WeftError as e:
+                self.store.update_retained(row["target"],
+                                           state="forget_pending",
+                                           error=json.dumps(e.to_dict()))
+                pending.append({"target": row["target"],
+                                "why": e.code, "retryable": e.retryable})
+        out = {"forgotten": forgotten,
+               "bytes_reclaimed": sum(f["bytes"] or 0 for f in forgotten)}
+        if pending:
+            out["forget_pending"] = pending
+            out["note"] = ("pending rows keep their index entries; call "
+                           "run_forget again when the site is reachable")
+        if not rows:
+            out["note"] = "nothing retained under that target/label " \
+                          "(already forgotten?)"
+        return out
+
     # -- the receipt beside the files ----------------------------------------
 
     def _sidecar(self, kind, row, target, site, label, selected,

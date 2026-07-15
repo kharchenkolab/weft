@@ -102,12 +102,35 @@ def plan(weft, site: str | None = None) -> dict:
                 stale_refs.append({"ref": ref,
                                    "bytes": d["bytes"] if d else 0,
                                    "pinned_locally": ref in pinned})
+        # retention.md R4: dead runs' SANDBOXES past their TTL. Retained
+        # files are unaffected (they live elsewhere, or the surviving
+        # hardlink keeps the inode); the terminal inventory (knowledge)
+        # is never a candidate for anything.
+        remains_days = float(site_policy(row).get("run_remains_days", 14))
+        remains_cutoff = now - remains_days * 86400
+        remains = []
+        for job in weft.store.jobs_where(site=name):
+            if job["state"] in ("DONE", "FAILED", "CANCELLED") \
+                    and job["updated_at"] < remains_cutoff:
+                remains.append({"target": job["job_id"],
+                                "jobdir": f"jobs/{job['job_id']}",
+                                "age_days": round(
+                                    (now - job["updated_at"]) / 86400, 1)})
+        for k in weft.store.list_kernels():
+            if k["site"] == name and k["state"] in ("stopped", "died") \
+                    and k["last_used"] < remains_cutoff:
+                remains.append({"target": k["kernel_id"],
+                                "jobdir": k["jobdir"],
+                                "age_days": round(
+                                    (now - k["last_used"]) / 86400, 1)})
         out["sites"][name] = {
             "idle_days_policy": idle_days,
             "evictable_realizations": realizations,
             # remote caches: pins are advisory (re-stageable); local CAS
             # blobs of pinned refs are never listed for the workspace
             "evictable_refs": stale_refs,
+            "run_remains_days_policy": remains_days,
+            "run_remains": remains,
             "reclaimable_bytes": sum(r["bytes"] for r in stale_refs),
         }
     return out
@@ -157,12 +180,21 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
             f"rm -f {shlex.quote(endpoint['cas_root'])}/{digest[:2]}/{digest}")
         weft.store.demote_location(r["ref"], site)
         evicted_bytes += r["bytes"]
+    swept_remains = 0
+    for r in p.get("run_remains") or []:
+        weft.store.emit("run.remains_swept", target=r["target"],
+                        site=site, age_days=r["age_days"])
+        adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(r['jobdir']))}",
+                        timeout=1800)
+        swept_remains += 1
     weft.store.audit_log(None, "gc.sweep", site=site,
-                         result=f"envs={evicted_envs} bytes={evicted_bytes}")
+                         result=f"envs={evicted_envs} bytes={evicted_bytes}"
+                                f" remains={swept_remains}")
     weft.store.emit("gc.swept", site=site, realizations=evicted_envs,
-                    bytes=evicted_bytes)
+                    bytes=evicted_bytes, run_remains=swept_remains)
     out = {"site": site, "evicted_realizations": evicted_envs,
            "evicted_bytes": evicted_bytes,
+           "swept_run_remains": swept_remains,
            "note": "evicted content re-stages/rebuilds automatically on "
                    "next use — correctness is unaffected"}
     if skipped:
