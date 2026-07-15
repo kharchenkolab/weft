@@ -70,6 +70,25 @@ def test_gpu_ask_validates_against_partition_gres():
     assert hints["gpus"]["max"] == 2
 
 
+def test_tiny_login_node_does_not_fence_scheduler_asks():
+    """Captured from cbe.next post-RHEL10 (2026-07-15): the login is a
+    2-cpu/7GB VM fronting 192-cpu nodes. On scheduler sites the ask is
+    fenced by PARTITION fit, never by the login node's own size."""
+    caps = {"cpus": 2, "mem_gb": 7, "gpus": []}
+    parts = [{"name": "c", "cpus_per_node": 192, "mem_gb_per_node": 2048,
+              "max_walltime": "14-00:00:00", "gres": []}]
+    ok, hints = satisfies_resources(
+        caps, {"cpus": 16, "mem_gb": 64, "walltime": "01:00:00"}, parts)
+    assert ok, hints
+    assert hints["fitting_partitions"] == ["c"]
+    # an ask no partition holds still refuses, with partition hints
+    ok, hints = satisfies_resources(caps, {"cpus": 500}, parts)
+    assert not ok and "partitions" in hints
+    # direct-exec sites (no partitions): the host record IS the fence
+    ok, hints = satisfies_resources(caps, {"cpus": 16}, None)
+    assert not ok and hints["cpus"]["max"] == 2
+
+
 def test_capabilities_v2_markers():
     caps = normalize_probe({"hostname": "login01", "cpus": 8})
     assert caps["schema"] == "capabilities:v2"

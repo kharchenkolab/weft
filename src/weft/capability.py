@@ -118,12 +118,19 @@ def satisfies_resources(caps: dict, resources: dict, partitions: list[dict] | No
     view = compute_view(caps)
     hints: dict = {}
     ok = True
-    if resources.get("cpus", 1) > view.get("cpus", 1):
-        ok = False
-        hints["cpus"] = {"asked": resources["cpus"], "max": view.get("cpus", 1)}
-    if resources.get("mem_gb", 0) > view.get("mem_gb", 0) > 0:
-        ok = False
-        hints["mem_gb"] = {"asked": resources["mem_gb"], "max": view.get("mem_gb")}
+    if not partitions:
+        # direct-exec sites only: the probed host IS where the job runs.
+        # On scheduler sites the login record is irrelevant to the ask —
+        # cbe's post-upgrade login is a 2-cpu VM fronting 192-cpu nodes;
+        # the partition fit below is the authoritative fence there.
+        if resources.get("cpus", 1) > view.get("cpus", 1):
+            ok = False
+            hints["cpus"] = {"asked": resources["cpus"],
+                             "max": view.get("cpus", 1)}
+        if resources.get("mem_gb", 0) > view.get("mem_gb", 0) > 0:
+            ok = False
+            hints["mem_gb"] = {"asked": resources["mem_gb"],
+                               "max": view.get("mem_gb")}
     max_gpus = gpu_count(caps)
     if partitions:
         # scheduler sites: GPUs live on compute nodes the login probe
