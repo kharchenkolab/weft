@@ -130,8 +130,14 @@ class Weft:
             from .adapters.slurm import SlurmAdapter
             sched = config.get("scheduler") or {}
             policy = config.get("policy") or {}
+            # no host = the controller IS the submit node (sbatch on
+            # PATH, GSSAPI-only ssh-to-self impossible on some sites) —
+            # every command runs as a direct subprocess
+            transport = config.get("transport") or \
+                ("local" if not config.get("host") else "ssh")
             adapter = SlurmAdapter(
-                name, config["host"], config["root"],
+                name, config.get("host") or "localhost", config["root"],
+                transport=transport,
                 user=config.get("user"), port=config.get("port"),
                 ssh_opts=config.get("ssh_opts"),
                 jump=config.get("jump"),

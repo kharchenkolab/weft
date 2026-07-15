@@ -65,7 +65,20 @@ class SSHAdapter(SiteAdapter):
         connect_timeout: int = 10,
         shared: bool = False,
         pixi_cache: str | None = None,
+        transport: str = "ssh",
     ):
+        # transport="local": the controller RUNS ON this site (a submit
+        # node with the scheduler on PATH) — every command is a direct
+        # subprocess, no ssh-to-self (which GSSAPI/2FA-only sites refuse
+        # outright). File staging degrades to local-link on the shared
+        # (here: same) filesystem. Everything above the primitive
+        # surface — scheduler logic, jobdirs, collection, placement —
+        # is transport-blind.
+        if transport not in ("ssh", "local"):
+            raise WeftError("task.invalid",
+                            f"unknown transport {transport!r}",
+                            stage="infra", hints={"known": ["ssh", "local"]})
+        self.transport = transport
         self.shared = shared
         # site-config lever: on netfs-only clusters rattler's cache
         # locking breaks — point the cache at node-local storage. The
@@ -164,6 +177,9 @@ class SSHAdapter(SiteAdapter):
         'bastion up, login refused' is actionable; 'unreachable' is not.
         Each hop is reached through the hops before it, like the real
         connection would."""
+        if self.transport == "local":
+            return [{"hop": "local", "ok": True,
+                     "note": "controller runs on this site; no ssh chain"}]
         chain = [*self.jump, self.destination()
                  + (f":{self.port}" if self.port else "")]
         results = []
@@ -198,6 +214,24 @@ class SSHAdapter(SiteAdapter):
         self, remote_cmd: str, *, input_bytes: bytes | None = None,
         timeout: float = 120.0,
     ) -> ShimResult:
+        if self.transport == "local":
+            # controller ON the site: same command string, direct shell —
+            # what ssh would have handed the remote shell, sh gets here
+            try:
+                proc = subprocess.run(
+                    ["sh", "-c", remote_cmd],
+                    input=input_bytes, capture_output=True, timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as e:
+                raise WeftError(
+                    "site.unreachable",
+                    f"local command on {self.name} timed out after {timeout}s",
+                    stage="infra", retryable=True,
+                    hints={"command": remote_cmd[:120]},
+                ) from e
+            return ShimResult(proc.returncode,
+                              proc.stdout.decode("utf-8", "replace"),
+                              proc.stderr.decode("utf-8", "replace"))
         try:
             proc = subprocess.run(
                 [*self._ssh_base(), remote_cmd],
@@ -337,6 +371,9 @@ class SSHAdapter(SiteAdapter):
         return r.out.encode("utf-8", "surrogateescape")
 
     def transfer_endpoint(self) -> dict:
+        if self.transport == "local":
+            # same machine: staging is hardlink/copy, never a wire
+            return {"method": "local-link", "cas_root": self.path("cas")}
         if not hasattr(self, "_remote_rsync"):
             local = subprocess.run(["sh", "-c", "command -v rsync"],
                                    capture_output=True).returncode == 0

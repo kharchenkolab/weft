@@ -207,6 +207,19 @@ A netfs-broken cache that still slips through fails as a
 NON-retryable `env.solve_failed` naming the lever — it is
 deterministic, never an index-reachability problem.
 
+## Controller on the submit node (no ssh-to-self)
+
+When weft runs ON a login/submit node (sbatch on PATH, shared FS),
+register the slurm site with NO `host` — or explicit
+`transport: "local"` — and every scheduler call and file op is a
+direct subprocess. No ssh-to-self, which GSSAPI/2FA-only sites refuse
+outright; staging degrades to local-link (same machine, no wire).
+Everything else (jobdirs, collection, placement) is transport-blind.
+
+```python
+w.register_site("here", "slurm", {"root": "/scratch/me/.weft"})  # no host
+```
+
 ## Institutional / managed roots (read-only base envs)
 
 When base environments are installed by an admin or service account and

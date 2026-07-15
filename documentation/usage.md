@@ -127,6 +127,14 @@ Read the code, use the hints:
 
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 
+### Controller on a submit node
+
+Registering a `slurm` site without `host` (or with `transport:
+"local"`) runs every scheduler call and file operation as a direct
+subprocess — for controllers that live on the cluster's login/submit
+node, where ssh-to-self is often impossible (GSSAPI/Kerberos-only).
+Staging becomes local-link on the shared filesystem.
+
 ### Published environments (institutional read-only bases)
 
 ```python
