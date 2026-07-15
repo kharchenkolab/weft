@@ -959,7 +959,8 @@ def _spot_check_and_mark(
         check += " && python -c 'import sys; sys.exit(0)'"
     if wrap:
         check = f"{wrap} sh -c {shlex.quote(check)}"
-    spot = adapter.run_activated(check, timeout=120)
+    # cold FUSE mount + interpreter start over a parallel FS can be slow
+    spot = adapter.run_activated(check, timeout=300)
     if spot.rc != 0:
         raise WeftError(
             "env.realize_failed",
@@ -1199,9 +1200,12 @@ def _build_squashfs(
     parts = meta.out.strip().split()
     image_sha256 = parts[0] if parts else ""
     image_bytes = int(parts[1]) if len(parts) > 1 else 0
-    # the tree was scaffolding; the image is the realization
+    # the tree was scaffolding; the image is the realization (unlinking
+    # ~10^5 files on a parallel FS takes minutes — same lesson as the
+    # resume-path rm: a 120s default timeout abandons a half-running rm)
     adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(inner))} && "
-                    f"mkdir -p {shlex.quote(adapter.path(inner))}")
+                    f"mkdir -p {shlex.quote(adapter.path(inner))}",
+                    timeout=1800)
 
     _write_squashfs_activation(adapter, rel, modules, modules_init)
     emit("realize.squashfs.done", env_id=env_id, site=adapter.name,
