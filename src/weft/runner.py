@@ -955,7 +955,15 @@ class JobRunner:
         return actions
 
     def wait(self, job_id: str, timeout: float = 300.0) -> dict:
-        """Testing/synchronous helper — the agent API never blocks like this."""
+        """Testing/synchronous helper — the agent API never blocks like this.
+
+        Reconciles first: a job recovered from the store (submitted by a
+        process that later died) has no poller watching it in THIS
+        process — without reconcile, wait() would spin on a state that
+        nothing can ever advance."""
+        job = self.store.get_job(job_id)
+        if job and job["state"] not in TERMINAL:
+            self.reconcile()
         deadline = time.time() + timeout
         while time.time() < deadline:
             job = self.store.get_job(job_id)
