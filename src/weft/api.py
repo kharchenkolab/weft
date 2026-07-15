@@ -94,6 +94,9 @@ class Weft:
         from .kernel import KernelManager
         self.kernels = KernelManager(self.store, self.adapters, self.runner,
                                      sessions=self.sessions)
+        from .retain import RetainManager
+        self.retains = RetainManager(self.store, self.adapters,
+                                     self.workspace)
         from .service import ServiceManager
         self.services = ServiceManager(self.store, self.adapters,
                                        self.runner, self.dataman)
@@ -1260,7 +1263,20 @@ class Weft:
         }
 
     def reconcile(self) -> list[dict]:
-        return self.runner.reconcile()
+        actions = self.runner.reconcile()
+        # retains enqueued by a process that died mid-transfer resume
+        # here (placement is idempotent — re-copy over partials)
+        import json as _json
+        for row in self.store.retained_where(state="queued") + \
+                self.store.retained_where(state="inflight"):
+            sel = _json.loads(row.get("selection") or "{}")
+            self.run_retain(row["target"], include=sel.get("include"),
+                            exclude=sel.get("exclude"),
+                            dest=sel.get("dest"),
+                            label=row["label"] or "", background=True)
+            actions.append({"retain": row["target"],
+                            "action": "resume-retain"})
+        return actions
 
     # -- garbage collection / retention ------------------------------------------
 
@@ -1369,6 +1385,28 @@ class Weft:
                 "matched": len(entries),
                 "truncated": row["truncated"] or len(entries) > max_entries,
                 "total_files": row["total"]}
+
+    def run_retain(self, target: str, include: list[str] | None = None,
+                   exclude: list[str] | None = None,
+                   dest: str | None = None, max_gb: float | None = None,
+                   label: str = "", background: bool = True) -> dict:
+        """Keep chosen files from a finished run as PLAIN FILES — in
+        <workspace>/runs/<target>/ (background transfer for remote
+        sites), or in place under the site's declared retain.dir.
+        Placement per file: reflink → hardlink → copy → transfer,
+        reported honestly. Live kernels may retain completed blocks'
+        artifact dirs only ($WEFT_BLOCK_DIR contract). One sidecar
+        (.weft-run.json) carries run-level provenance. `label` groups
+        several targets into one host-side unit."""
+        return self.retains.retain(target, include, exclude, dest, max_gb,
+                                   label, background)
+
+    def retained_runs(self, label: str | None = None,
+                      site: str | None = None) -> list[dict]:
+        """Every retained run and where its bytes live — one query, no
+        memory: {target, site, label, location, in_place, files, bytes,
+        method, state, retained_at}."""
+        return self.store.retained_where(label=label, site=site)
 
     def provenance(self, target: str, depth: int = 5) -> dict:
         """The full "how was this produced" chain for a job or a DataRef:
@@ -1547,6 +1585,7 @@ PUBLIC_TOOLS = [
     "array_status", "array_elements", "array_result", "array_retry",
     "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",
     "events_poll", "doctor", "reconcile", "provenance", "run_inventory",
+    "run_retain", "retained_runs",
     "bundle_export", "bundle_import",
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",
     "env_evict", "site_footprint",

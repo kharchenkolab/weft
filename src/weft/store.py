@@ -118,6 +118,16 @@ class Store:
             "target TEXT PRIMARY KEY, site TEXT, recorded_at REAL,"
             "entries TEXT, truncated INTEGER, total INTEGER)"
         )
+        # retention.md R2: HOLDINGS — where each retained run's files
+        # live (workspace runs dir or a site retain.dir). Dropped by
+        # run_forget on confirmed deletion; never by TTL.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS retained_runs("
+            "target TEXT PRIMARY KEY, site TEXT, label TEXT,"
+            "location TEXT, in_place INTEGER, files INTEGER, bytes INTEGER,"
+            "method TEXT, state TEXT, error TEXT, retained_at REAL,"
+            "selection TEXT)"
+        )
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS spec_aliases("
             "spec_hash TEXT PRIMARY KEY, env_id TEXT, created_at REAL)"
@@ -674,6 +684,53 @@ class Store:
         out["entries"] = json.loads(out["entries"] or "[]")
         out["truncated"] = bool(out["truncated"])
         return out
+
+    def put_retained(self, target: str, site: str, label: str | None,
+                     location: str, in_place: bool, files: int,
+                     nbytes: int, state: str,
+                     selection: dict | None = None) -> None:
+        self._write(
+            "INSERT OR REPLACE INTO retained_runs(target, site, label,"
+            " location, in_place, files, bytes, method, state, error,"
+            " retained_at, selection) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (target, site, label, location, int(in_place), files, nbytes,
+             None, state, None, time.time(),
+             json.dumps(selection) if selection else None),
+        )
+
+    def update_retained(self, target: str, *, state: str | None = None,
+                        method: str | None = None,
+                        error: str | None = None) -> None:
+        sets, vals = [], []
+        for col, v in (("state", state), ("method", method),
+                       ("error", error)):
+            if v is not None:
+                sets.append(f"{col}=?"); vals.append(v)
+        if sets:
+            vals.append(target)
+            self._write(f"UPDATE retained_runs SET {', '.join(sets)} "
+                        "WHERE target=?", tuple(vals))
+
+    def get_retained(self, target: str) -> dict | None:
+        r = self._row("SELECT * FROM retained_runs WHERE target=?",
+                      (target,))
+        return dict(r) if r else None
+
+    def retained_where(self, label: str | None = None,
+                       site: str | None = None,
+                       state: str | None = None) -> list[dict]:
+        q, vals = "SELECT * FROM retained_runs", []
+        conds = []
+        for col, v in (("label", label), ("site", site), ("state", state)):
+            if v is not None:
+                conds.append(f"{col}=?"); vals.append(v)
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        return [dict(r) for r in self._conn.execute(
+            q + " ORDER BY retained_at", vals)]
+
+    def delete_retained(self, target: str) -> None:
+        self._write("DELETE FROM retained_runs WHERE target=?", (target,))
 
     def put_session(self, session_id: str, base_env_id: str, site: str,
                     location: str) -> None:
