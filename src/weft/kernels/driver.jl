@@ -19,7 +19,13 @@ while true
     mkpath(art)
     ENV["WEFT_BLOCK_DIR"] = art
     rc = 0
-    out = IOBuffer(); err = IOBuffer()
+    # real files from block start, flushed on a timer: a controller
+    # tailing them streams output while the block runs
+    out = open("blocks/" * lpad(n, 4, '0') * ".out", "w")
+    err = open("blocks/" * lpad(n, 4, '0') * ".err", "w")
+    flusher = Timer(0.5; interval=0.5) do _
+        try flush(out); flush(err) catch end
+    end
     try
         redirect_stdio(stdout=out, stderr=err) do
             include_string(Main, read(code_f, String), "block-$n")
@@ -27,9 +33,10 @@ while true
     catch e
         rc = e isa InterruptException ? 130 : 1
         print(err, sprint(showerror, e))
+    finally
+        close(flusher)
+        close(out); close(err)
     end
-    write("blocks/" * lpad(n, 4, '0') * ".out", String(take!(out)))
-    write("blocks/" * lpad(n, 4, '0') * ".err", String(take!(err)))
     write(rc_f * ".tmp", string(rc))
     mv(rc_f * ".tmp", rc_f, force=true)
     rm("current_block", force=true)

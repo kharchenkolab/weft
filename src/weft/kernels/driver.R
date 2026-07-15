@@ -15,9 +15,18 @@ repeat {
   err_f <- sprintf("blocks/%04d.err", n)
   rc <- 0L
   out_con <- file(out_f, open = "wt"); err_con <- file(err_f, open = "wt")
+  # created empty NOW; flushed between top-level expressions so a
+  # controller tailing the files streams statement-by-statement (R
+  # connections buffer internally — within one long expression output
+  # still arrives when it completes; that is the honest base-R limit)
+  flush(out_con); flush(err_con)
   sink(out_con, type = "output"); sink(err_con, type = "message")
   tryCatch({
-    eval(parse(text = paste(readLines(code_f), collapse = "\n")), envir = env)
+    exprs <- parse(text = paste(readLines(code_f), collapse = "\n"))
+    for (e in exprs) {   # same semantics as eval(exprs): no auto-print
+      eval(e, envir = env)
+      flush(out_con); flush(err_con)
+    }
   }, interrupt = function(e) {
     rc <<- 130L; message("[interrupted]")
   }, error = function(e) {

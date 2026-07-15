@@ -24,6 +24,46 @@ import traceback
 signal.signal(signal.SIGINT, signal.default_int_handler)
 
 
+class _LiveFile(io.TextIOBase):
+    """Write-through capture: the file exists (empty) the moment the
+    block starts and GROWS while it runs, so a controller tailing it
+    streams output live. Implicit flushes are throttled (~10/s) —
+    kernels live on parallel filesystems where a per-print flush storm
+    has a real metadata cost; an EXPLICIT flush() (print(flush=True),
+    tqdm) is caller intent and always goes through."""
+
+    _THROTTLE_S = 0.1
+
+    def __init__(self, path):
+        self._f = open(path, "w")
+        self._last = 0.0
+
+    def writable(self):
+        return True
+
+    def write(self, s):
+        n = self._f.write(s)
+        now = time.monotonic()
+        if now - self._last >= self._THROTTLE_S:
+            self._f.flush()
+            self._last = now
+        return n
+
+    def flush(self):
+        try:
+            self._f.flush()
+            self._last = time.monotonic()
+        except ValueError:
+            pass
+
+    def close(self):
+        try:
+            self._f.flush()
+            self._f.close()
+        except (ValueError, OSError):
+            pass
+
+
 def main():
     os.makedirs("blocks", exist_ok=True)
     globals_ns = {"__name__": "__main__"}
@@ -44,7 +84,8 @@ def main():
         art = f"blocks/{n:04d}.artifacts"
         os.makedirs(art, exist_ok=True)
         os.environ["WEFT_BLOCK_DIR"] = art
-        out, err = io.StringIO(), io.StringIO()
+        out = _LiveFile(f"blocks/{n:04d}.out")
+        err = _LiveFile(f"blocks/{n:04d}.err")
         rc = 0
         try:
             code = open(code_f).read()
@@ -58,8 +99,9 @@ def main():
         except BaseException:
             rc = 1
             err.write(traceback.format_exc())
-        open(f"blocks/{n:04d}.out", "w").write(out.getvalue())
-        open(f"blocks/{n:04d}.err", "w").write(err.getvalue())
+        finally:
+            out.close()
+            err.close()
         tmp = rc_f + ".tmp"
         open(tmp, "w").write(str(rc))
         os.replace(tmp, rc_f)

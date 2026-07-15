@@ -131,4 +131,28 @@ def test_r_kernel_with_env(wk):
     bad = wk.kernel_exec(k, "stop('bad fit')", timeout=60)
     assert bad["rc"] == 1 and "bad fit" in bad["err"]
     assert wk.kernel_exec(k, "cat(x)", timeout=60)["out"].strip() == "42"
+
+    # statement-level streaming: .out grows BETWEEN top-level expressions
+    # while the block runs (base-R limit: within one expression it
+    # arrives when the expression completes)
+    import time as _t
+    adapter = wk.adapters["local"]
+    jobdir = wk.store.get_kernel(k)["jobdir"]
+    r = wk.kernel_exec(
+        k, "cat('a\\n')\nSys.sleep(2)\ncat('b\\n')\nSys.sleep(2)\n"
+           "cat('c\\n')", wait=False)
+    n = r["block"]
+    partial = False
+    for _ in range(60):
+        _t.sleep(0.15)
+        if adapter.file_exists(f"{jobdir}/blocks/{n:04d}.rc"):
+            break
+        try:
+            body = adapter.read_file(f"{jobdir}/blocks/{n:04d}.out").decode()
+        except Exception:
+            continue
+        if 0 < len(body.split()) < 3:
+            partial = True
+    assert wk.kernel_poll(k, n, timeout=30).get("rc") == 0
+    assert partial, "R output never appeared between statements"
     wk.kernel_stop(k)

@@ -25,6 +25,15 @@ w.kernel_interrupt(k)       # hung block → finishes with rc 130, state kept
 w.kernel_stop(k)
 ```
 
+`blocks/NNNN.{out,err}` exist (empty) from block start and GROW while
+the block runs — hosts streaming live output tail them at an offset;
+`.rc` appearing (written last, atomic) is completion. Python streams
+per-write (implicit flushes throttled ~10/s; explicit flush() is
+immediate); R streams between top-level statements (base-R connection
+buffering holds output within a single long expression); Julia flushes
+on a 0.5 s timer. Output from SUBPROCESSES a block spawns goes to the
+kernel's runner log, not the block's .out (python-level redirection).
+
 ## When it dies (native crash, OOM, walltime — this happens)
 
 The poller notices and emits **`kernel.died`** with `cause`
