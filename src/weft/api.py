@@ -731,10 +731,38 @@ class Weft:
             return self.dataman.register_url(
                 path, self._fetchers, self.adapters, site=site,
                 expected_sha256=expected_sha256)
+        if site is not None:
+            # a file already ON the site (e.g. retained in place):
+            # hashed site-side, hardlinked into the site CAS — reuse on
+            # that site never crosses the WAN (retention.md R5)
+            adapter = self.adapters.get(site)
+            if adapter is None:
+                raise WeftError("task.invalid", f"unknown site: {site}",
+                                stage="infra",
+                                hints={"registered": sorted(self.adapters)})
+            return self.dataman.register_site_path(
+                adapter, site, path,
+                origin=self._lineage_origin(path, site),
+                expected_sha256=expected_sha256)
         p = Path(path)
         if not p.is_absolute():
             p = self.workspace / p
-        return self.dataman.register(p)
+        return self.dataman.register(p, origin=self._lineage_origin(str(p)))
+
+    def _lineage_origin(self, path: str, site: str | None = None) -> str | None:
+        """A path under a retained tree carries its producing run as
+        origin (`run:<target>/<relpath>`) — provenance() then recurses
+        THROUGH the file instead of dead-ending on a path string."""
+        for row in self.store.retained_where():
+            if site is None and row["in_place"]:
+                continue
+            if site is not None and (not row["in_place"]
+                                     or row["site"] != site):
+                continue
+            loc = row["location"].rstrip("/")
+            if path.startswith(loc + "/"):
+                return f"run:{row['target']}/{path[len(loc) + 1:]}"
+        return None
 
     def data_describe(self, ref: str) -> dict:
         return self.dataman.describe(ref)
@@ -1441,6 +1469,22 @@ class Weft:
             if origin.startswith("job:jobs/") and depth > 0:
                 node["produced_by"] = self.provenance(
                     origin.split("/", 1)[1], depth - 1)
+            elif origin.startswith("run:") and depth > 0:
+                # a RETAINED file re-entering compute: the chain walks
+                # THROUGH it into the producing run (retention.md R5)
+                run_target = origin[4:].split("/", 1)[0]
+                if self.store.get_job(run_target):
+                    node["produced_by"] = self.provenance(
+                        run_target, depth - 1)
+                else:
+                    k = self.store.get_kernel(run_target)
+                    if k:
+                        node["produced_by"] = {
+                            "kernel_id": run_target, "site": k["site"],
+                            "state": k["state"],
+                            "note": "interactive kernel run — "
+                                    "kernel_transcript(kernel_id) is the "
+                                    "derivation record"}
             return node
 
         job = self.store.get_job(target)

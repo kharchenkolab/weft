@@ -31,9 +31,9 @@ class DataManager:
 
     # -- registration ------------------------------------------------------
 
-    def register(self, path: str | Path) -> dict:
+    def register(self, path: str | Path, origin: str | None = None) -> dict:
         info = self.cas.register(Path(path))
-        meta = {"origin": str(path), "exec": info.exec}
+        meta = {"origin": origin or str(path), "exec": info.exec}
         if info.plain_sha256:
             meta["sha256_plain"] = info.plain_sha256
         self.store.put_dataref(info.ref, info.kind, info.bytes, info.chunks,
@@ -41,6 +41,50 @@ class DataManager:
         # "@workspace" is a reserved pseudo-site: the local CAS itself
         self.store.set_location(info.ref, "@workspace", str(self.cas.root))
         return {"ref": info.ref, "kind": info.kind, "bytes": info.bytes}
+
+    def register_site_path(self, adapter, site: str, abs_path: str,
+                           origin: str | None = None,
+                           expected_sha256: str | None = None) -> dict:
+        """A file already ON a site becomes a ref without moving: hashed
+        site-side, hardlinked into the site CAS (copy across devices).
+        The browsable original stays; reuse on that site stages 0 bytes
+        (retention.md R5)."""
+        import shlex as _sh
+        q = _sh.quote(abs_path)
+        r = adapter.run_cmd(
+            f"[ -f {q} ] && "
+            f"h=$(sha256sum {q} 2>/dev/null || shasum -a 256 {q}); "
+            f"printf '%s %s' \"${{h%% *}}\" \"$(wc -c < {q} | tr -d ' ')\"",
+            timeout=1800)
+        parts = (r.out or "").split()
+        if r.rc != 0 or len(parts) < 2:
+            raise WeftError("data.missing",
+                            f"no such file on {site}: {abs_path}",
+                            stage="staging",
+                            hints={"detail": (r.err or r.out)[-200:]})
+        digest, size = parts[0], int(parts[1])
+        self._check_expected(abs_path, digest, expected_sha256)
+        endpoint = adapter.transfer_endpoint()
+        blob_dir = f"{endpoint['cas_root']}/{digest[:2]}"
+        blob = f"{blob_dir}/{digest}"
+        r = adapter.run_cmd(
+            f"mkdir -p {_sh.quote(blob_dir)} && "
+            f"([ -f {_sh.quote(blob)} ] || ln {q} {_sh.quote(blob)} "
+            f"2>/dev/null || cp -p {q} {_sh.quote(blob)})", timeout=1800)
+        if r.rc != 0:
+            raise WeftError("data.transfer_failed",
+                            f"site-side ingest failed: {r.err[:200]}",
+                            stage="staging", retryable=True)
+        ref = f"dref:{digest}"
+        trust = "verified" if expected_sha256 else "first-fetch"
+        self.store.put_dataref(ref, "file", size,
+                               meta={"origin": origin or abs_path,
+                                     "trust": trust, "site_direct": site})
+        self.store.set_location(ref, site, endpoint["cas_root"])
+        return {"ref": ref, "kind": "file", "bytes": size,
+                "fetched_to": site, "trust": trust,
+                "note": "bytes live in the site CAS (the original stays "
+                        "in place); tasks on this site stage 0 bytes"}
 
     def register_url(self, url: str, fetchers: dict, adapters: dict,
                      site: str | None = None,
