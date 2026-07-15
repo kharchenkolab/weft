@@ -105,6 +105,12 @@ class Store:
         if "read_only" not in rcols:
             self._conn.execute(
                 "ALTER TABLE realizations ADD COLUMN read_only INTEGER DEFAULT 0")
+        kcols = {r[1] for r in
+                 self._conn.execute("PRAGMA table_info(kernels)")}
+        # empty = fresh DB, the CREATE below carries the column already
+        if kcols and "session_id" not in kcols:
+            self._conn.execute(
+                "ALTER TABLE kernels ADD COLUMN session_id TEXT")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS spec_aliases("
             "spec_hash TEXT PRIMARY KEY, env_id TEXT, created_at REAL)"
@@ -141,7 +147,7 @@ class Store:
             "CREATE TABLE IF NOT EXISTS kernels("
             "kernel_id TEXT PRIMARY KEY, site TEXT, lang TEXT, env_id TEXT,"
             "jobdir TEXT, handle TEXT, state TEXT, blocks_run INTEGER,"
-            "created_at REAL, last_used REAL, label TEXT)"
+            "created_at REAL, last_used REAL, label TEXT, session_id TEXT)"
         )
 
     # -- serialized access helpers ------------------------------------------
@@ -767,14 +773,15 @@ class Store:
 
     def put_kernel(self, kernel_id: str, site: str, lang: str,
                    env_id: str | None, jobdir: str, handle: str,
-                   label: str = "") -> None:
+                   label: str = "", session_id: str | None = None) -> None:
         now = time.time()
         self._write(
             "INSERT INTO kernels(kernel_id, site, lang, env_id, jobdir,"
-            " handle, state, blocks_run, created_at, last_used, label)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            " handle, state, blocks_run, created_at, last_used, label,"
+            " session_id)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (kernel_id, site, lang, env_id, jobdir, handle, "running",
-             0, now, now, label or None),
+             0, now, now, label or None, session_id),
         )
 
     def get_kernel(self, kernel_id: str) -> dict | None:

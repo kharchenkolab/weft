@@ -20,6 +20,7 @@ bump it, with a note here.
 | `output_bytes` | total |
 | `logs` | `{tail, site_path}` |
 | `transcript` | transcript-manifests only: ordered `[{block, code, rc}]` through the promoted block |
+| `session` | session-kernel promotions only: `{session_id, snapshotted_at_promote: true}` — the cited `env_id` is the snapshot minted AT promote (a live session is a moving target; the record never cites one) |
 
 ## `provenance:v1` — `provenance(job_id | dref)`
 

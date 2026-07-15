@@ -92,7 +92,8 @@ class Weft:
         self.sessions = SessionManager(self.store, self.envman, self.runner,
                                        self.dataman, self.adapters)
         from .kernel import KernelManager
-        self.kernels = KernelManager(self.store, self.adapters, self.runner)
+        self.kernels = KernelManager(self.store, self.adapters, self.runner,
+                                     sessions=self.sessions)
         from .service import ServiceManager
         self.services = ServiceManager(self.store, self.adapters,
                                        self.runner, self.dataman)
@@ -881,18 +882,25 @@ class Weft:
                      env_id: str | None = None,
                      walltime: str = "08:00:00",
                      resources: dict | None = None,
-                     label: str = "") -> dict:
+                     label: str = "",
+                     session_id: str | None = None) -> dict:
         """resources={"gpus": 1, "partition": "gpu"} on a scheduler site
         holds a node allocation and runs the kernel INSIDE it — live
         interactive analysis on a GPU node; no ports, the shared
         filesystem is the channel. label ("phonon exploration") is a
         display handle, carried into status/lists/death events and
-        inherited by kernel_restart's successor."""
+        inherited by kernel_restart's successor.
+
+        session_id (mutually exclusive with env_id) attaches the kernel
+        to a LIVE session prefix: session_install lands in the running
+        kernel, visible to the next block. Promotion auto-snapshots the
+        session into a real EnvID so the record never cites a moving
+        target."""
         try:
             r = self.kernels.start(site, lang, env_id, walltime, resources,
-                                   label=label)
+                                   label=label, session_id=session_id)
             self.store.audit_log(None, "kernel.start", site=site,
-                                 command=f"{lang} env={env_id}")
+                                 command=f"{lang} env={env_id or session_id}")
             return r
         except WeftError as e:
             return e.to_dict()

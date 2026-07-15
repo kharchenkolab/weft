@@ -25,6 +25,14 @@ w.kernel_interrupt(k)       # hung block → finishes with rc 130, state kept
 w.kernel_stop(k)
 ```
 
+`kernel_start(site, lang, session_id=…)` (mutually exclusive with
+env_id) attaches the kernel to a LIVE session prefix: a
+`session_install` lands in the running kernel — visible to the next
+block, no restart. `kernel_promote` then pins the moving target by
+auto-snapshotting the session into a real EnvID (recorded in the
+manifest with `session: {session_id, snapshotted_at_promote}`);
+`kernel_restart` replays into the session as it now is.
+
 `blocks/NNNN.{out,err}` exist (empty) from block start and GROW while
 the block runs — hosts streaming live output tail them at an offset;
 `.rc` appearing (written last, atomic) is completion. Python streams

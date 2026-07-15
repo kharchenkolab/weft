@@ -33,10 +33,13 @@ LANGUAGES: dict[str, tuple[str, str]] = {
 
 
 class KernelManager:
-    def __init__(self, store, adapters, runner):
+    def __init__(self, store, adapters, runner, sessions=None):
         self.store = store
         self.adapters = adapters
         self.runner = runner
+        # for session-attached kernels: promotion pins the live session
+        # into a real EnvID via session_snapshot
+        self.sessions = sessions
 
     def _adapter(self, site: str):
         if site not in self.adapters:
@@ -56,12 +59,23 @@ class KernelManager:
 
     def start(self, site: str, lang: str = "python",
               env_id: str | None = None, walltime: str = "08:00:00",
-              resources: dict | None = None, label: str = "") -> dict:
+              resources: dict | None = None, label: str = "",
+              session_id: str | None = None) -> dict:
         """`resources` places the INTERACTIVE session like a job: on slurm,
         {"gpus": 1, "partition": "gpu"} holds a GPU-node allocation and
         the kernel lives inside it — analysis on the node, not the login
         host. The file-block protocol needs no ports: the shared
-        filesystem IS the channel."""
+        filesystem IS the channel.
+
+        `session_id` attaches the kernel to a LIVE session prefix instead
+        of a frozen env: a session_install lands in the running kernel
+        with no restart (visible to the next block). Promotion pins the
+        moving target — it auto-snapshots the session into a real EnvID."""
+        if env_id and session_id:
+            raise WeftError(
+                "task.invalid",
+                "env_id and session_id are mutually exclusive — a kernel "
+                "attaches to a frozen env OR a live session", stage="infra")
         if lang not in LANGUAGES:
             raise WeftError(
                 "task.invalid", f"no kernel driver for lang {lang!r}",
@@ -89,6 +103,28 @@ class KernelManager:
                                          "site first (even `true`) — kernels "
                                          "attach to realized envs"})
             activate = f". {shlex.quote(adapter.path(rel))}/activate.sh"
+        elif session_id:
+            if self.sessions is None:
+                raise WeftError("task.invalid",
+                                "no session manager wired", stage="infra")
+            s = self.sessions._get(session_id)
+            if s["site"] != site:
+                raise WeftError(
+                    "task.invalid",
+                    f"session {session_id} lives on {s['site']!r}, "
+                    f"not {site!r} — kernels attach where the session "
+                    "prefix is", stage="infra")
+            manifest = adapter.path(f"{s['location']}/pixi.toml")
+            if not adapter.file_exists(f"{s['location']}/pixi.toml"):
+                raise WeftError(
+                    "task.invalid",
+                    f"session {session_id} has no prefix on {site}",
+                    stage="infra")
+            # the same activation session_exec uses: the LIVE prefix —
+            # a session_install is visible to the kernel's next block
+            activate = (f"eval \"$({shlex.quote(adapter.pixi_bin)} "
+                        f"shell-hook --manifest-path "
+                        f"{shlex.quote(manifest)})\"")
 
         kernel_id = "krn_" + uuid.uuid4().hex[:10]
         jobdir_rel = f"kernels/{kernel_id}"
@@ -130,7 +166,7 @@ class KernelManager:
                                          "day-long hold"})
         handle = adapter.submit(jobdir_rel, {"resources": res})
         self.store.put_kernel(kernel_id, site, lang, env_id, jobdir_rel,
-                              handle, label=label)
+                              handle, label=label, session_id=session_id)
         self.store.emit("kernel.started", kernel=kernel_id, site=site,
                         lang=lang, env_id=env_id, resources=res,
                         **({"label": label} if label else {}))
@@ -299,10 +335,20 @@ class KernelManager:
                     "blocks can be promoted", stage="collecting",
                     hints={"transcript": "kernel_transcript shows rc per block"})
 
+        env_id, snapshot_note = k["env_id"], None
+        if k.get("session_id"):
+            # a live session is a moving target — promotion PINS it: the
+            # snapshot mints a real EnvID and the record cites that, not
+            # "whatever the session happened to be"
+            snap = self.sessions.snapshot(
+                k["session_id"], name=f"promote-{kernel_id}")
+            env_id = snap["env_id"]
+            snapshot_note = {"session_id": k["session_id"],
+                             "snapshotted_at_promote": True}
         from .task import Task
         pseudo = Task.from_dict({
             "command": f"[kernel promotion of blocks {blocks}]",
-            "env": k["env_id"],
+            "env": env_id,
             "outputs": [f"blocks/{b:04d}.artifacts/" for b in blocks],
             "site": k["site"]})
         entries, total = dataman.collect_outputs(adapter, k["jobdir"], pseudo)
@@ -312,7 +358,7 @@ class KernelManager:
                  if e["block"] <= last]
         job_id = "jb_" + _uuid.uuid4().hex[:12]
         from .grade import grade_env, grade_manifest
-        env_row = self.store.get_env(k["env_id"]) if k["env_id"] else None
+        env_row = self.store.get_env(env_id) if env_id else None
         g = grade_manifest(
             grade_env(env_row["canonical"]) if env_row else None,
             transcript=True)
@@ -329,13 +375,14 @@ class KernelManager:
             "reproducibility_components": g["components"],
             "job_id": job_id, "kernel_id": kernel_id,
             "task_hash": task_id({"kernel_transcript": chain,
-                                  "env": k["env_id"]}),
-            "env_id": k["env_id"], "site": k["site"],
+                                  "env": env_id}),
+            "env_id": env_id, "site": k["site"],
             "node": node_name,
             "exit_code": 0, "wall_s": None, "max_rss_gb": None,
             "transcript": chain,
             "outputs": entries, "output_bytes": total,
             "logs": {"tail": "", "site_path": adapter.path(k["jobdir"])},
+            **({"session": snapshot_note} if snapshot_note else {}),
         }
         self.store.put_job(job_id, manifest["task_hash"], pseudo.to_dict(),
                            k["site"], "DONE")
@@ -361,9 +408,12 @@ class KernelManager:
                     codes.append(entry["code"])
         if k["state"] == "running":
             self.stop(kernel_id)
-        # the label names the WORK, which continues in the successor
+        # the label names the WORK, which continues in the successor.
+        # session kernels restart into the session AS IT NOW IS — the
+        # honest semantic for a live lane
         fresh = self.start(k["site"], k["lang"], k["env_id"],
-                           label=k.get("label") or "")
+                           label=k.get("label") or "",
+                           session_id=k.get("session_id"))
         replayed = 0
         for code in codes:
             r = self.exec(fresh["kernel_id"], code, wait=True, timeout=300)
