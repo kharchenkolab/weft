@@ -733,10 +733,13 @@ class Store:
 
     def update_retained(self, target: str, *, state: str | None = None,
                         method: str | None = None,
-                        error: str | None = None) -> None:
+                        error: str | None = None,
+                        files: int | None = None,
+                        nbytes: int | None = None) -> None:
         sets, vals = [], []
         for col, v in (("state", state), ("method", method),
-                       ("error", error)):
+                       ("error", error), ("files", files),
+                       ("bytes", nbytes)):
             if v is not None:
                 sets.append(f"{col}=?"); vals.append(v)
         if sets:

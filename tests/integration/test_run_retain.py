@@ -50,11 +50,13 @@ def test_local_retain_places_and_records(w, tmp_path):
                                                      "out.dat"}
 
 
-def test_retain_refuses_unfinished_and_overcap(w, tmp_path):
+def test_retain_on_running_job_pins_and_overcap_refused(w, tmp_path):
     r = w.task_submit({"command": "sleep 30", "site": "local"})
     time.sleep(1)
+    # a live-run retain is a PIN now (pin-at-settlement addendum)
     out = w.run_retain(r["job_id"], background=False)
-    assert out["error"] == "task.invalid" and "finished" in out["detail"]
+    assert out["state"] == "pinned-pending"
+    w.run_forget(target=r["job_id"])       # cancel the pin
     w.task_cancel(r["job_id"])
 
     jid = _run(w, "dd if=/dev/zero of=big.bin bs=1024 count=64 2>/dev/null")
@@ -77,14 +79,13 @@ def test_live_kernel_retains_completed_blocks_only(w):
     assert out["state"] == "done"
     dest = Path(out["location"]["path"])
     assert (dest / f"blocks/{r['block']:04d}.artifacts/t.csv").exists()
-    # the loose cwd file is NOT (the $WEFT_BLOCK_DIR contract)
-    bad = w.run_retain(k, include=["loose.txt"], background=False)
-    assert bad["error"] == "task.invalid"
-    assert "WEFT_BLOCK_DIR" in json.dumps(bad["hints"])
+    # a loose cwd file mid-life becomes a PIN, captured at settlement
+    pin = w.run_retain(k, include=["loose.txt"], background=False)
+    assert pin["state"] == "pinned-pending"
     w.kernel_stop(k)
-    # after stop, everything is retainable
-    ok = w.run_retain(k, include=["loose.txt"], background=False)
-    assert ok["state"] == "done"
+    row = w.store.get_retained(k)
+    assert row["state"] == "done"          # settled at stop
+    assert (Path(row["location"]) / "loose.txt").read_text() == "cwd file"
 
 
 def test_background_retain_survives_process_death(w, tmp_path, pixi_bin):

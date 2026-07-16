@@ -49,11 +49,17 @@ w.run_retain(target, include=["figs/**"], exclude=["tmp/**"],
              label="proj-9")           # keep: free locally (reflink/link),
                                        # in place under a site's declared
                                        # retain.dir, else background
-                                       # transfer home. Finished runs only;
-                                       # live kernels: completed blocks'
-                                       # artifact dirs (files MUST be under
-                                       # $WEFT_BLOCK_DIR to be retainable
-                                       # mid-session).
+                                       # transfer home. On a LIVE run this
+                                       # becomes a PIN (pinned-pending):
+                                       # the decision is recorded now, the
+                                       # EVENTUAL files are captured when
+                                       # the run settles (stop/death/
+                                       # completion). Completed blocks'
+                                       # $WEFT_BLOCK_DIR dirs capture
+                                       # immediately (protocol-immutable).
+                                       # layout="label" nests the tree as
+                                       # runs/<label>/<target>/ so keeps
+                                       # mirror the host's run structure.
 w.retained_runs(label="proj-9")        # what's kept, where — one query
 w.run_discard(target)                  # sandbox GC now (policy
                                        # run_remains_days sweeps the rest)

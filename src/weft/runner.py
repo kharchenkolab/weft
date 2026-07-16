@@ -777,6 +777,10 @@ class JobRunner:
         # a host seeing DONE/FAILED may rely on run_inventory existing
         # (idempotent under collect retries)
         self.record_run_inventory(job_id, adapter.name, jobdir_rel)
+        # the run has exited: pinned-pending retains settle NOW, before
+        # a terminal state a host could react to
+        if getattr(self, "retains", None) is not None:
+            self.retains.settle_pins(job_id)
         exit_code = int(status.get("exit_code", -1))
         tail = self.tail_log(adapter, jobdir_rel)
         max_rss_gb = round(int(status.get("max_rss_kb", 0) or 0) / 1048576, 3)

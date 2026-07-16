@@ -138,6 +138,33 @@ def test_mid_transfer_failure_is_honest_and_resumable(tmp_path, pixi_bin,
     assert got == (dest / "big.sha").read_text().split()[0]
 
 
+def test_remote_live_pin_settles_and_transfers(tmp_path, pixi_bin,
+                                               sshd_site):
+    """Pin on a LIVE remote kernel: recorded now, captured at stop,
+    transferred home byte-equal."""
+    w = Weft(tmp_path / "ws-p", pixi_bin=pixi_bin)
+    w.register_site("beam", "ssh", {
+        "host": sshd_site["host"], "port": sshd_site["port"],
+        "user": sshd_site["user"], "ssh_opts": sshd_site["ssh_opts"],
+        "root": sshd_site["root"], "pixi_source": pixi_bin})
+    w.runner.poll_interval = 0.3
+    k = w.kernel_start("beam", "python")["kernel_id"]
+    assert w.kernel_exec(k, "open('result.bin','wb')"
+                            ".write(bytes(range(256))*100)",
+                         timeout=120)["rc"] == 0
+    pin = w.run_retain(k, include=["result.bin"], label="remote-pin")
+    assert pin["state"] == "pinned-pending"
+    w.kernel_stop(k)
+    for _ in range(100):                        # transfer is async-ish
+        row = w.retained_runs(label="remote-pin")[0]
+        if row["state"] in ("done", "failed"):
+            break
+        time.sleep(0.3)
+    assert row["state"] == "done", row
+    body = (Path(row["location"]) / "result.bin").read_bytes()
+    assert body == bytes(range(256)) * 100
+
+
 def test_slurm_site_retention_smoke(tmp_path, pixi_bin, slurm_site):
     """Scheduler site: inventory + retain-home + forget, through sbatch."""
     w = Weft(tmp_path / "ws-s", pixi_bin=pixi_bin)

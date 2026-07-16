@@ -122,10 +122,37 @@ class RetainManager:
 
     # -- the verb -----------------------------------------------------------
 
+    def _resolve_dest(self, target: str, site: str, dest: str | None,
+                      label: str, layout: str) -> tuple[str, bool]:
+        """-> (location, in_place). layout="label" nests runs under the
+        host's grouping handle (runs/<label>/<target>/) so the retained
+        tree mirrors the host's own run structure for human browsing."""
+        if layout not in ("target", "label"):
+            raise WeftError("task.invalid",
+                            f"unknown layout {layout!r}", stage="infra",
+                            hints={"known": ["target", "label"]})
+        sub = f"runs/{label}/{target}" if layout == "label" \
+            else f"runs/{target}"
+        if layout == "label" and not label:
+            raise WeftError("task.invalid",
+                            "layout='label' needs a label", stage="infra")
+        site_cfg = (self.store.get_site(site) or {}).get("config") or {}
+        retain_dir = ((site_cfg.get("retain") or {}).get("dir")
+                      if not dest else None)
+        if retain_dir:
+            return f"{retain_dir.rstrip('/')}/{sub}", True
+        if dest:
+            return str(Path(dest)), False
+        return str(self.workspace / sub), False
+
+    def _is_finished(self, kind: str, row: dict) -> bool:
+        return (kind == "job" and row["state"] in TERMINAL_JOB) or \
+            (kind == "kernel" and row["state"] in TERMINAL_KERNEL)
+
     def retain(self, target: str, include=None, exclude=None,
                dest: str | None = None, max_gb: float | None = None,
                label: str = "", background: bool = True,
-               headroom_gb: float = 20.0) -> dict:
+               headroom_gb: float = 20.0, layout: str = "target") -> dict:
         if label and len(label) > 200:
             raise WeftError("task.invalid", "label max 200 chars",
                             stage="infra")
@@ -135,80 +162,56 @@ class RetainManager:
         if adapter is None:
             raise WeftError("site.unreachable",
                             f"site {site!r} not registered", stage="infra")
+        location, in_place = self._resolve_dest(target, site, dest,
+                                                label, layout)
+        selection = {"include": include, "exclude": exclude, "dest": dest,
+                     "max_gb": max_gb, "headroom_gb": headroom_gb,
+                     "layout": layout}
         selected = self._select(self._scan(adapter, jobdir_rel),
                                 include, exclude)
-        self._guard_finished(kind, row, selected, adapter)
+
+        if not self._is_finished(kind, row):
+            # LIVE target. Completed-block-only selections capture now
+            # (immutable by protocol); anything else — INCLUDING files
+            # that don't exist yet ("retain the eventual complete
+            # file") — becomes a PIN: mark now, capture at settlement.
+            immediate_ok = False
+            if selected:
+                try:
+                    self._guard_finished(kind, row, selected, adapter)
+                    immediate_ok = True
+                except WeftError:
+                    pass
+            if not immediate_ok:
+                self.store.put_retained(target, site, label or None,
+                                        location, in_place, 0, 0,
+                                        state="pinned-pending",
+                                        selection=selection)
+                self.store.emit("retain.pinned", target=target, site=site,
+                                matched_now=len(selected),
+                                **({"label": label} if label else {}))
+                return {"target": target, "state": "pinned-pending",
+                        "matched_now": len(selected),
+                        "location": {"site": site if in_place
+                                     else "@workspace", "path": location},
+                        "note": "captured when the run settles (stop/"
+                                "death/completion); run_forget cancels "
+                                "the pin"}
+
         if not selected:
             raise WeftError("data.missing",
                             "selection matched no files", stage="staging",
                             hints={"include": include, "exclude": exclude})
         total = sum(e["bytes"] for e in selected)
-        if max_gb is not None and total > max_gb * 1e9:
-            raise WeftError(
-                "task.invalid",
-                f"selection is {total/1e9:.2f} GB, over the "
-                f"{max_gb} GB cap", stage="staging",
-                hints={"files": len(selected),
-                       "suggestion": "narrow include/exclude or raise "
-                                     "max_gb"})
-
-        site_cfg = (self.store.get_site(site) or {}).get("config") or {}
-        retain_dir = ((site_cfg.get("retain") or {}).get("dir")
-                      if not dest else None)
-        local_like = adapter.__class__.__name__ == "LocalAdapter" or \
-            getattr(adapter, "transport", "ssh") == "local"
-        if retain_dir:
-            location = f"{retain_dir.rstrip('/')}/runs/{target}"
-            in_place = True
-        else:
-            location = str(Path(dest) if dest
-                           else self.workspace / "runs" / target)
-            in_place = False
-            free = shutil.disk_usage(
-                Path(location).parent if Path(location).parent.exists()
-                else self.workspace).free
-            if free - total < headroom_gb * 1e9:
-                raise WeftError(
-                    "task.invalid",
-                    f"retaining {total/1e9:.2f} GB would leave "
-                    f"{(free-total)/1e9:.2f} GB free (< {headroom_gb} GB "
-                    "headroom)", stage="staging",
-                    hints={"free_gb": round(free / 1e9, 2),
-                           "suggestion": "narrow the selection or lower "
-                                         "policy headroom deliberately"})
-
+        self._check_budgets(total, len(selected), max_gb, headroom_gb,
+                            location, in_place)
         self.store.put_retained(target, site, label or None, location,
                                 in_place, len(selected), total,
-                                state="queued",
-                                selection={"include": include,
-                                           "exclude": exclude,
-                                           "dest": dest})
+                                state="queued", selection=selection)
 
         def work():
-            try:
-                self.store.update_retained(target, state="inflight")
-                method = self._place(adapter, jobdir_rel, selected,
-                                     location, in_place, local_like)
-                self._sidecar(kind, row, target, site, label, selected,
-                              location, in_place, method, adapter)
-                self.store.update_retained(target, state="done",
-                                           method=method)
-                self.store.emit("retain.done", target=target, site=site,
-                                files=len(selected), bytes=total,
-                                method=method, location=location,
-                                **({"label": label} if label else {}))
-            except WeftError as e:
-                self.store.update_retained(target, state="failed",
-                                           error=json.dumps(e.to_dict()))
-                self.store.emit("retain.failed", target=target,
-                                **e.to_dict())
-            except Exception as e:  # noqa: BLE001 — surfaced, not raised
-                self.store.update_retained(
-                    target, state="failed",
-                    error=json.dumps({"error": "internal.error",
-                                      "detail": repr(e)}))
-                self.store.emit("retain.failed", target=target,
-                                error="internal.error", detail=repr(e))
+            self._capture(target, kind, row, jobdir_rel, adapter, site,
+                          selected, location, in_place, label)
 
         if background:
             threading.Thread(target=work, daemon=True).start()
@@ -221,6 +224,109 @@ class RetainManager:
                              "path": location},
                 "in_place": in_place, "state": state,
                 **({"label": label} if label else {})}
+
+    def _check_budgets(self, total, nfiles, max_gb, headroom_gb,
+                       location, in_place) -> None:
+        if max_gb is not None and total > max_gb * 1e9:
+            raise WeftError(
+                "task.invalid",
+                f"selection is {total/1e9:.2f} GB, over the "
+                f"{max_gb} GB cap", stage="staging",
+                hints={"files": nfiles,
+                       "suggestion": "narrow include/exclude or raise "
+                                     "max_gb"})
+        if not in_place:
+            free = shutil.disk_usage(
+                Path(location).parent if Path(location).parent.exists()
+                else self.workspace).free
+            if free - total < (headroom_gb or 20.0) * 1e9:
+                raise WeftError(
+                    "task.invalid",
+                    f"retaining {total/1e9:.2f} GB would leave "
+                    f"{(free-total)/1e9:.2f} GB free (< {headroom_gb} GB "
+                    "headroom)", stage="staging",
+                    hints={"free_gb": round(free / 1e9, 2),
+                           "suggestion": "narrow the selection or lower "
+                                         "policy headroom deliberately"})
+
+    def _capture(self, target, kind, row, jobdir_rel, adapter, site,
+                 selected, location, in_place, label) -> None:
+        """Place + sidecar + row update, with honest failure. Runs on
+        the caller's thread (immediate work()) or a settlement hook."""
+        local_like = adapter.__class__.__name__ == "LocalAdapter" or \
+            getattr(adapter, "transport", "ssh") == "local"
+        total = sum(e["bytes"] for e in selected)
+        try:
+            self.store.update_retained(target, state="inflight")
+            method = self._place(adapter, jobdir_rel, selected,
+                                 location, in_place, local_like)
+            self._sidecar(kind, row, target, site, label, selected,
+                          location, in_place, method, adapter)
+            self.store.update_retained(target, state="done",
+                                       method=method, files=len(selected),
+                                       nbytes=total)
+            self.store.emit("retain.done", target=target, site=site,
+                            files=len(selected), bytes=total,
+                            method=method, location=location,
+                            **({"label": label} if label else {}))
+        except WeftError as e:
+            self.store.update_retained(target, state="failed",
+                                       error=json.dumps(e.to_dict()))
+            self.store.emit("retain.failed", target=target, **e.to_dict())
+        except Exception as e:  # noqa: BLE001 — surfaced, not raised
+            self.store.update_retained(
+                target, state="failed",
+                error=json.dumps({"error": "internal.error",
+                                  "detail": repr(e)}))
+            self.store.emit("retain.failed", target=target,
+                            error="internal.error", detail=repr(e))
+
+    def settle_pins(self, target: str) -> None:
+        """Capture a pinned-pending retain at run settlement (stop,
+        death, completion). Call sites guarantee the run is finished —
+        the state-machine guard is theirs, not re-checked here. Literal
+        pinned paths that never materialized are reported, honestly,
+        while the rest capture."""
+        try:
+            prow = self.store.get_retained(target)
+            if not prow or prow["state"] != "pinned-pending":
+                return
+            kind, row, jobdir_rel = self._target_row(target)
+            adapter = self.adapters.get(row["site"])
+            if adapter is None:
+                return
+            sel = json.loads(prow.get("selection") or "{}")
+            include, exclude = sel.get("include"), sel.get("exclude")
+            selected = self._select(self._scan(adapter, jobdir_rel),
+                                    include, exclude)
+            missing = [p for p in (include or [])
+                       if not any(ch in p for ch in "*?[")
+                       and not any(e["path"] == p for e in selected)]
+            if missing:
+                self.store.emit("retain.pin_missing", target=target,
+                                paths=missing,
+                                note="pinned paths never materialized")
+            if not selected:
+                self.store.update_retained(
+                    target, state="failed",
+                    error=json.dumps({"error": "data.missing",
+                                      "detail": "no pinned file existed "
+                                                "at settlement",
+                                      "missing": missing}))
+                return
+            self._check_budgets(sum(e["bytes"] for e in selected),
+                                len(selected), sel.get("max_gb"),
+                                sel.get("headroom_gb") or 20.0,
+                                prow["location"], bool(prow["in_place"]))
+            self._capture(target, kind, row, jobdir_rel, adapter,
+                          row["site"], selected, prow["location"],
+                          bool(prow["in_place"]), prow["label"] or "")
+        except Exception as e:  # settlement must never break run teardown
+            try:
+                self.store.emit("retain.failed", target=target,
+                                error="internal.error", detail=repr(e))
+            except Exception:
+                pass
 
     # -- placement ----------------------------------------------------------
 
@@ -294,6 +400,8 @@ class RetainManager:
             raise WeftError("site.unreachable",
                             f"site {row['site']!r} not registered",
                             stage="infra", retryable=True)
+        # a discard must never destroy what a pin promised: capture first
+        self.settle_pins(target)
         adapter.run_cmd(
             f"rm -rf {shlex.quote(adapter.path(jobdir_rel))}",
             timeout=1800)
@@ -319,6 +427,15 @@ class RetainManager:
         rows = [r for r in rows if r]
         forgotten, pending = [], []
         for row in rows:
+            if row["state"] == "pinned-pending":
+                # nothing placed yet: forgetting a pending pin CANCELS it
+                self.store.delete_retained(row["target"])
+                self.store.emit("retain.pin_cancelled",
+                                target=row["target"])
+                forgotten.append({"target": row["target"], "bytes": 0,
+                                  "location": None,
+                                  "note": "pin cancelled before capture"})
+                continue
             if row["state"] in ("queued", "inflight"):
                 # deleting a destination WHILE a transfer writes into it
                 # would race — refuse until the retain settles

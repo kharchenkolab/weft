@@ -304,12 +304,17 @@ class SitePoller:
             except (WeftError, ValueError):
                 pass
             self.runner.store.update_kernel(w.job_id, state="died")
-            # receipt off-tick: a shim call must not delay sibling
-            # verdicts in this poll round
+            # receipt + pin settlement off-tick: shim calls must not
+            # delay sibling verdicts in this poll round
             import threading as _th
-            _th.Thread(target=self.runner.record_run_inventory,
-                       args=(w.job_id, self.site, w.jobdir_rel),
-                       daemon=True).start()
+
+            def _post_mortem():
+                self.runner.record_run_inventory(w.job_id, self.site,
+                                                 w.jobdir_rel)
+                retains = getattr(self.runner, "retains", None)
+                if retains is not None:
+                    retains.settle_pins(w.job_id)
+            _th.Thread(target=_post_mortem, daemon=True).start()
             self.runner.store.emit(
                 "kernel.died", kernel=w.job_id, site=self.site,
                 **({"label": k["label"]} if k.get("label") else {}),

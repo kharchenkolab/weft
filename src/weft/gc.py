@@ -182,6 +182,13 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
         evicted_bytes += r["bytes"]
     swept_remains = 0
     for r in p.get("run_remains") or []:
+        pin = weft.store.get_retained(r["target"])
+        if pin and pin["state"] == "pinned-pending":
+            # a stuck pin must not become silent data loss via the
+            # janitor — skip loudly; settle or forget it explicitly
+            weft.store.emit("run.remains_skipped", target=r["target"],
+                            site=site, why="pinned-pending retain")
+            continue
         weft.store.emit("run.remains_swept", target=r["target"],
                         site=site, age_days=r["age_days"])
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(r['jobdir']))}",

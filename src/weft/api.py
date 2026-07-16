@@ -97,6 +97,9 @@ class Weft:
         from .retain import RetainManager
         self.retains = RetainManager(self.store, self.adapters,
                                      self.workspace)
+        # settlement hooks (job collect, kernel stop/death) capture
+        # pinned-pending retains through this reference
+        self.runner.retains = self.retains
         from .service import ServiceManager
         self.services = ServiceManager(self.store, self.adapters,
                                        self.runner, self.dataman)
@@ -1297,13 +1300,23 @@ class Weft:
         # retains enqueued by a process that died mid-transfer resume
         # here (placement is idempotent — re-copy over partials)
         import json as _json
+        # pins whose settlement was missed by a dead process: capture if
+        # the target has since reached a terminal state
+        for row in self.store.retained_where(state="pinned-pending"):
+            t = row["target"]
+            trow = self.store.get_job(t) or self.store.get_kernel(t) or {}
+            if trow.get("state") in ("DONE", "FAILED", "CANCELLED",
+                                     "stopped", "died"):
+                self.retains.settle_pins(t)
+                actions.append({"retain": t, "action": "settle-pin"})
         for row in self.store.retained_where(state="queued") + \
                 self.store.retained_where(state="inflight"):
             sel = _json.loads(row.get("selection") or "{}")
             self.run_retain(row["target"], include=sel.get("include"),
                             exclude=sel.get("exclude"),
                             dest=sel.get("dest"),
-                            label=row["label"] or "", background=True)
+                            label=row["label"] or "", background=True,
+                            layout=sel.get("layout") or "target")
             actions.append({"retain": row["target"],
                             "action": "resume-retain"})
         return actions
@@ -1419,17 +1432,22 @@ class Weft:
     def run_retain(self, target: str, include: list[str] | None = None,
                    exclude: list[str] | None = None,
                    dest: str | None = None, max_gb: float | None = None,
-                   label: str = "", background: bool = True) -> dict:
-        """Keep chosen files from a finished run as PLAIN FILES — in
+                   label: str = "", background: bool = True,
+                   layout: str = "target") -> dict:
+        """Keep chosen files from a run as PLAIN FILES — in
         <workspace>/runs/<target>/ (background transfer for remote
         sites), or in place under the site's declared retain.dir.
         Placement per file: reflink → hardlink → copy → transfer,
-        reported honestly. Live kernels may retain completed blocks'
-        artifact dirs only ($WEFT_BLOCK_DIR contract). One sidecar
+        reported honestly. On a LIVE run, selections beyond completed
+        blocks' artifact dirs become a PIN ("pinned-pending"): recorded
+        now, captured when the run settles — the user usually means the
+        eventual complete file, never a torn snapshot. One sidecar
         (.weft-run.json) carries run-level provenance. `label` groups
-        several targets into one host-side unit."""
+        several targets into one host-side unit; layout="label" nests
+        the retained tree as runs/<label>/<target>/ so it mirrors the
+        host's own run structure."""
         return self.retains.retain(target, include, exclude, dest, max_gb,
-                                   label, background)
+                                   label, background, layout=layout)
 
     def run_discard(self, target: str) -> dict:
         """Active sandbox GC: delete a finished run's sandbox NOW.
