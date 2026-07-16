@@ -28,6 +28,24 @@ def test_unknown_session_refused(w):
 
 
 @pytest.mark.solver
+def test_snapshot_survives_session_stop(w):
+    """Late saves from session kernels: the snapshot synthesizes from
+    the session ROW (recorded base + captured installs), so promotion
+    can pin identity even after the prefix is gone."""
+    s = w.session_start({"name": "gone-soon",
+                         "deps": {"conda": ["python =3.12", "pip"]}},
+                        "local")
+    sid = s["session_id"]
+    w.session_install(sid, pypi=["six"])
+    w.session_stop(sid)                    # prefix rm -rf'd
+    snap = w.session_snapshot(sid, verify=False)
+    assert snap["env_id"].startswith("env:")
+    spec = w.store.get_spec(
+        w.store.get_env(snap["env_id"])["spec_hash"])
+    assert "six" in str(spec.get("deps"))  # the install was captured
+
+
+@pytest.mark.solver
 @pytest.mark.slow
 def test_live_install_visible_to_next_block(w):
     s = w.session_start({"name": "live-lane",

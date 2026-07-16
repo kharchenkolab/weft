@@ -914,7 +914,8 @@ class Weft:
                      walltime: str = "08:00:00",
                      resources: dict | None = None,
                      label: str = "",
-                     session_id: str | None = None) -> dict:
+                     session_id: str | None = None,
+                     capture: str = "transcript") -> dict:
         """resources={"gpus": 1, "partition": "gpu"} on a scheduler site
         holds a node allocation and runs the kernel INSIDE it — live
         interactive analysis on a GPU node; no ports, the shared
@@ -929,7 +930,8 @@ class Weft:
         target."""
         try:
             r = self.kernels.start(site, lang, env_id, walltime, resources,
-                                   label=label, session_id=session_id)
+                                   label=label, session_id=session_id,
+                                   capture=capture)
             self.store.audit_log(None, "kernel.start", site=site,
                                  command=f"{lang} env={env_id or session_id}")
             return r

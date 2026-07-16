@@ -60,7 +60,8 @@ class KernelManager:
     def start(self, site: str, lang: str = "python",
               env_id: str | None = None, walltime: str = "08:00:00",
               resources: dict | None = None, label: str = "",
-              session_id: str | None = None) -> dict:
+              session_id: str | None = None,
+              capture: str = "transcript") -> dict:
         """`resources` places the INTERACTIVE session like a job: on slurm,
         {"gpus": 1, "partition": "gpu"} holds a GPU-node allocation and
         the kernel lives inside it — analysis on the node, not the login
@@ -76,6 +77,10 @@ class KernelManager:
                 "task.invalid",
                 "env_id and session_id are mutually exclusive — a kernel "
                 "attaches to a frozen env OR a live session", stage="infra")
+        if capture not in ("transcript", "none"):
+            raise WeftError(
+                "task.invalid", f"unknown capture mode {capture!r}",
+                stage="infra", hints={"known": ["transcript", "none"]})
         if lang not in LANGUAGES:
             raise WeftError(
                 "task.invalid", f"no kernel driver for lang {lang!r}",
@@ -166,7 +171,8 @@ class KernelManager:
                                          "day-long hold"})
         handle = adapter.submit(jobdir_rel, {"resources": res})
         self.store.put_kernel(kernel_id, site, lang, env_id, jobdir_rel,
-                              handle, label=label, session_id=session_id)
+                              handle, label=label, session_id=session_id,
+                              capture=capture)
         self.store.emit("kernel.started", kernel=kernel_id, site=site,
                         lang=lang, env_id=env_id, resources=res,
                         **({"label": label} if label else {}))
@@ -191,6 +197,10 @@ class KernelManager:
         adapter = self._adapter(k["site"])
         n = k["blocks_run"]
         adapter.write_file(f"{k['jobdir']}/blocks/{n:04d}.code", code.encode())
+        if (k.get("capture") or "transcript") == "transcript":
+            # the durable half-record: code now, result when observed —
+            # replay and text saves survive sandbox sweeps
+            self.store.put_kernel_block(kernel_id, n, code=code)
         self.store.update_kernel(kernel_id, blocks_run=n + 1)
         if not wait:
             return {"kernel_id": kernel_id, "block": n, "state": "submitted"}
@@ -217,6 +227,9 @@ class KernelManager:
                 if rc != 0:
                     self.store.emit("kernel.block_failed", kernel=kernel_id,
                                     block=block, rc=rc, err_tail=err[-500:])
+                if (k.get("capture") or "transcript") == "transcript":
+                    self.store.put_kernel_block(kernel_id, block, rc=rc,
+                                                out=out, err=err)
                 return {"kernel_id": kernel_id, "block": block, "rc": rc,
                         "out": out, "err": err, "artifacts": arts,
                         "state": "done"}
@@ -261,23 +274,46 @@ class KernelManager:
                 "idle_s": round(time.time() - k["last_used"], 1)}
 
     def transcript(self, kernel_id: str, last: int = 20) -> list[dict]:
+        """Store-first (durable mirror survives sandbox sweeps and
+        scratch purges); site files are the fallback for capture="none"
+        kernels and blocks finished while nobody observed them — and
+        completions found there are mirrored on the way through."""
         k = self._get(kernel_id)
-        adapter = self._adapter(k["site"])
+        mirror = {r["block"]: r for r in self.store.kernel_blocks(kernel_id)}
+        capture = (k.get("capture") or "transcript") == "transcript"
+        adapter = None
         out = []
         for n in range(max(0, k["blocks_run"] - last), k["blocks_run"]):
+            m = mirror.get(n)
+            if m and m["rc"] is not None:
+                out.append({"block": n, "code": m["code"] or "",
+                            "rc": m["rc"],
+                            "out_tail": (m["out"] or "")[-2048:]})
+                continue
             base = f"{k['jobdir']}/blocks/{n:04d}"
             entry = {"block": n}
             try:
+                if adapter is None:
+                    adapter = self._adapter(k["site"])
                 entry["code"] = adapter.read_file(f"{base}.code", 4096).decode()
                 if adapter.file_exists(f"{base}.rc"):
                     entry["rc"] = int(adapter.read_file(f"{base}.rc"
                                                         ).decode().strip() or 1)
                     entry["out_tail"] = adapter.read_file(
                         f"{base}.out", 2048).decode("utf-8", "replace")
+                    if capture:   # observed now = durable now
+                        self.store.put_kernel_block(
+                            kernel_id, n, code=entry["code"],
+                            rc=entry["rc"], out=entry["out_tail"])
                 else:
                     entry["rc"] = None  # still running / never ran
             except WeftError:
-                entry["error"] = "unreadable"
+                if m:   # sandbox gone; the mirror's half-record is honest
+                    entry = {"block": n, "code": m["code"] or "",
+                             "rc": m["rc"], "note": "result never observed "
+                                                    "before the sandbox went"}
+                else:
+                    entry["error"] = "unreadable"
             out.append(entry)
         return out
 

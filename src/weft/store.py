@@ -111,12 +111,24 @@ class Store:
         if kcols and "session_id" not in kcols:
             self._conn.execute(
                 "ALTER TABLE kernels ADD COLUMN session_id TEXT")
+        if kcols and "capture" not in kcols:
+            self._conn.execute(
+                "ALTER TABLE kernels ADD COLUMN capture TEXT")
         # retention.md R1: the terminal receipt of what a run left behind.
         # KNOWLEDGE, not holdings — outlives sweeps, retain and forget.
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS run_inventories("
             "target TEXT PRIMARY KEY, site TEXT, recorded_at REAL,"
             "entries TEXT, truncated INTEGER, total INTEGER)"
+        )
+        # retention.md R6: durable kernel transcripts — block code/rc/
+        # capped text mirrored as OBSERVED, so text saves and
+        # restart-replay survive sandbox sweeps and scratch purges
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS kernel_blocks("
+            "kernel_id TEXT, block INTEGER, code TEXT, rc INTEGER,"
+            "out TEXT, err TEXT, recorded_at REAL,"
+            "PRIMARY KEY(kernel_id, block))"
         )
         # retention.md R2: HOLDINGS — where each retained run's files
         # live (workspace runs dir or a site retain.dir). Dropped by
@@ -164,7 +176,8 @@ class Store:
             "CREATE TABLE IF NOT EXISTS kernels("
             "kernel_id TEXT PRIMARY KEY, site TEXT, lang TEXT, env_id TEXT,"
             "jobdir TEXT, handle TEXT, state TEXT, blocks_run INTEGER,"
-            "created_at REAL, last_used REAL, label TEXT, session_id TEXT)"
+            "created_at REAL, last_used REAL, label TEXT, session_id TEXT,"
+            "capture TEXT)"
         )
 
     # -- serialized access helpers ------------------------------------------
@@ -685,6 +698,26 @@ class Store:
         out["truncated"] = bool(out["truncated"])
         return out
 
+    def put_kernel_block(self, kernel_id: str, block: int,
+                         code: str | None = None, rc: int | None = None,
+                         out: str | None = None,
+                         err: str | None = None) -> None:
+        self._write(
+            "INSERT INTO kernel_blocks(kernel_id, block, code, rc, out,"
+            " err, recorded_at) VALUES(?,?,?,?,?,?,?)"
+            " ON CONFLICT(kernel_id, block) DO UPDATE SET"
+            " code=COALESCE(excluded.code, code),"
+            " rc=COALESCE(excluded.rc, rc),"
+            " out=COALESCE(excluded.out, out),"
+            " err=COALESCE(excluded.err, err), recorded_at=excluded.recorded_at",
+            (kernel_id, block, code, rc, out, err, time.time()),
+        )
+
+    def kernel_blocks(self, kernel_id: str) -> list[dict]:
+        return [dict(r) for r in self._conn.execute(
+            "SELECT * FROM kernel_blocks WHERE kernel_id=? ORDER BY block",
+            (kernel_id,))]
+
     def put_retained(self, target: str, site: str, label: str | None,
                      location: str, in_place: bool, files: int,
                      nbytes: int, state: str,
@@ -856,15 +889,16 @@ class Store:
 
     def put_kernel(self, kernel_id: str, site: str, lang: str,
                    env_id: str | None, jobdir: str, handle: str,
-                   label: str = "", session_id: str | None = None) -> None:
+                   label: str = "", session_id: str | None = None,
+                   capture: str = "transcript") -> None:
         now = time.time()
         self._write(
             "INSERT INTO kernels(kernel_id, site, lang, env_id, jobdir,"
             " handle, state, blocks_run, created_at, last_used, label,"
-            " session_id)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            " session_id, capture)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (kernel_id, site, lang, env_id, jobdir, handle, "running",
-             0, now, now, label or None, session_id),
+             0, now, now, label or None, session_id, capture),
         )
 
     def get_kernel(self, kernel_id: str) -> dict | None:

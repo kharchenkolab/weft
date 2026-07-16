@@ -107,9 +107,9 @@ class SessionManager:
                        "recording any result",
         }
 
-    def _get(self, session_id: str) -> dict:
+    def _get(self, session_id: str, allow_stopped: bool = False) -> dict:
         s = self.store.get_session(session_id)
-        if not s or s["state"] != "active":
+        if not s or (s["state"] != "active" and not allow_stopped):
             raise WeftError(
                 "task.invalid", f"no active session {session_id}", stage="infra",
             )
@@ -220,7 +220,11 @@ class SessionManager:
         filesystem does not exist). `verify` then actually *realizes* the
         minted env before handing it back: a "citable EnvID" that cannot be
         rebuilt is worse than an error (live-agent eval finding)."""
-        s = self._get(session_id)
+        # snapshot synthesizes from the RECORD (base + captured
+        # installs) — the live prefix is not needed, so a STOPPED
+        # session still snapshots (late saves from session kernels;
+        # retention.md R6)
+        s = self._get(session_id, allow_stopped=True)
         env_row = self.store.get_env(s["base_env_id"])
         installers = s.get("installers") or []
         spec = {
