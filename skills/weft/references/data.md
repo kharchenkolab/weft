@@ -45,6 +45,10 @@ BROWSABLE FILES — no refs, no hashes — with run-level provenance in a
 ```python
 w.run_inventory(job_or_kernel_id)      # what the run left (recorded at
                                        # terminal state; survives EVERYTHING)
+w.run_inventory(target, live=True)     # a RUNNING run's sandbox as it is
+                                       # NOW — same shape, {"live": true},
+                                       # never persisted; the receipt is
+                                       # still written at terminal state
 w.run_retain(target, include=["figs/**"], exclude=["tmp/**"],
              label="proj-9")           # keep: free locally (reflink/link),
                                        # in place under a site's declared
@@ -82,6 +86,11 @@ w.run_forget(label="proj-9")           # reclaim retained bytes; the
   (provenance walks THROUGH it into the producing run);
   `data_register(path, site=...)` registers site-side (hardlink into
   the site CAS, original stays, same-site reuse stages 0 bytes).
+  DIRECTORIES work as units: a retained `.zarr` registered site-side
+  mints a tree ref (same convention as output collection) — usable as
+  a task input, or `data_fetch(ref, dest)` rebuilds the directory at
+  the workspace pulling only blobs it doesn't already hold (an evolved
+  store re-registered moves just its new chunks).
 - Kernels default to `capture="transcript"`: block code/rc/text mirror
   into the store as observed — text saves and `kernel_restart(replay)`
   survive scratch purges; `capture="none"` opts out.

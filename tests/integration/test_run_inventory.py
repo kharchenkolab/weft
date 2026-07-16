@@ -91,3 +91,36 @@ def test_missing_inventory_is_honest(w):
     r = w.run_inventory("jb_never_ran")
     assert r["error"] == "data.missing"
     assert "terminal" in r["hints"]["note"]
+
+
+def test_live_inventory_scans_the_sandbox_now(w):
+    """live=True: the Run card's mid-flight manifest — same shape as
+    the receipt, flagged live, never persisted."""
+    k = w.kernel_start("local", "python")["kernel_id"]
+    r = w.kernel_exec(k, "open('loose.csv', 'w').write('a,b\\n')",
+                      timeout=60)
+    assert r["rc"] == 0
+    # no receipt yet (the run is alive) — but the live view sees files
+    assert w.run_inventory(k)["error"] == "data.missing"
+    inv = w.run_inventory(k, live=True)
+    assert inv["live"] is True and inv["recorded_at"] is None
+    assert "loose.csv" in {e["path"] for e in inv["entries"]}
+    # filters apply to the live view too
+    only = w.run_inventory(k, live=True, glob="*.csv")
+    assert {e["path"] for e in only["entries"]} == {"loose.csv"}
+
+    w.kernel_stop(k)
+    # settled: the receipt exists and is the default answer
+    rec = w.run_inventory(k)
+    assert rec["live"] is False and rec["recorded_at"] is not None
+    assert "loose.csv" in {e["path"] for e in rec["entries"]}
+
+    # swept sandbox: live view honestly gone, receipt still answers
+    jobdir = w.store.get_kernel(k)["jobdir"]
+    w.adapters["local"].run_cmd(
+        f"rm -rf {w.adapters['local'].path(jobdir)}")
+    gone = w.run_inventory(k, live=True)
+    assert gone["error"] == "data.missing"
+    assert gone["hints"]["receipt_recorded"] is True
+    assert "loose.csv" in {e["path"]
+                           for e in w.run_inventory(k)["entries"]}

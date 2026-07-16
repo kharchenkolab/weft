@@ -65,6 +65,11 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   actually happened (a live probe gates; no userns → honest fallback
   to build-at-destination).
 
+- `env_packages(env_id, platform=None)` lists the RESOLVED records
+  wholesale — name, version, ecosystem (conda/pypi/cran/…), platform —
+  from the stored lock; one read, no solve. (`env_why` stays the
+  per-name explainer.) Layer records carry platform=None: source
+  releases, resolved per site at realize time.
 - Adoption reads the catalog's stored lock — NO solving (re-solving
   decays as the index moves and would silently rebuild privately).
 - Versions are catalog pointers over immutable content-addressed dirs;

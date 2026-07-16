@@ -675,6 +675,45 @@ class Weft:
         row = self.sites_describe(site)
         return suggest_gpu_spec(row.get("capabilities") or {}, site)
 
+    def env_packages(self, env_id: str,
+                     platform: str | None = None) -> dict:
+        """The env's RESOLVED package records — name, version, ecosystem
+        (conda/pypi/cran/julia/…), platform — from the stored lock: one
+        read, no solve. Answers "what's in this env?" wholesale where
+        env_why answers for one name. Layer records (cran, julia) carry
+        platform=None: they are source releases resolved per site at
+        realize time, not per-platform binaries."""
+        row = self.store.get_env(env_id)
+        if not row:
+            raise WeftError("task.invalid", f"unknown EnvID: {env_id}",
+                            stage="infra",
+                            hints={"suggestion": "env_ensure or env_adopt "
+                                                 "first; list_envs() "
+                                                 "enumerates known envs"})
+        canonical = row["canonical"]
+        packages = []
+        for plat, records in sorted(
+                (canonical.get("platforms") or {}).items()):
+            if platform and plat != platform:
+                continue
+            for rec in records:
+                packages.append({
+                    "name": rec.get("name"),
+                    "version": rec.get("version"),
+                    "ecosystem": rec.get("kind", "conda"),
+                    "platform": plat,
+                    **({"build": rec["build"]} if rec.get("build") else {}),
+                })
+        for eco, layer in sorted((canonical.get("layers") or {}).items()):
+            for rec in layer.get("records") or []:
+                packages.append({"name": rec.get("name"),
+                                 "version": rec.get("version"),
+                                 "ecosystem": eco, "platform": None})
+        packages.sort(key=lambda p: ((p["name"] or ""),
+                                     (p["platform"] or "")))
+        return {"env_id": env_id, "count": len(packages),
+                "platforms": row["platforms"], "packages": packages}
+
     # -- published envs (institutional read-only trees) ---------------------
 
     def env_publish(self, env_id: str, site: str, tree: str, name: str,
@@ -728,9 +767,13 @@ class Weft:
                       expected_sha256: str | None = None) -> dict:
         """Hash a workspace path — or ingest a URL (http/s/s3/gs/azure) —
         into a DataRef. With site=, a URL is fetched straight into that
-        site's CAS (hashed site-side; no controller detour). Pass
-        expected_sha256 to verify against a published checksum; otherwise
-        hash-on-arrival is the identity (meta.trust = "first-fetch")."""
+        site's CAS (hashed site-side; no controller detour), and a plain
+        path may be a FILE or a whole DIRECTORY already on that site
+        (e.g. retained in place): directories mint a tree ref usable as
+        a task input or fetched home as a unit. Pass expected_sha256 to
+        verify against a published checksum (for a directory: the tree
+        hash); otherwise hash-on-arrival is the identity (meta.trust =
+        "first-fetch")."""
         if "://" in path:
             if not hasattr(self, "_fetchers"):
                 from .sources import default_fetchers
@@ -1406,22 +1449,49 @@ class Weft:
         return import_bundle(self, path)
 
     def run_inventory(self, target: str, glob: str | None = None,
-                      min_bytes: int = 0,
-                      max_entries: int = 5000) -> dict:
+                      min_bytes: int = 0, max_entries: int = 5000,
+                      live: bool = False) -> dict:
         """What a finished run LEFT BEHIND (recorded at terminal state,
         stat-only, budgeted): {path, bytes, mtime} per file — the
         triage facts for retention. Knowledge, not holdings: survives
         sandbox sweeps, run_retain and run_forget. Filters apply at
-        read; `truncated` says the recording hit its budget."""
-        row = self.store.get_run_inventory(target)
-        if not row:
-            raise WeftError(
-                "data.missing", f"no inventory recorded for {target}",
-                stage="infra",
-                hints={"note": "inventories are recorded when a run "
-                               "reaches a terminal state; runs finished "
-                               "before this weft version have none"})
-        entries = row["entries"]
+        read; `truncated` says the recording hit its budget.
+
+        live=True: a fresh stat-only scan of the sandbox AS IT IS NOW —
+        same shape, flagged {"live": true}, never persisted (the durable
+        receipt is still written at terminal state). One schema for a
+        run card whether the run is mid-flight or settled. Fails
+        data.missing once the sandbox is swept — use the receipt then."""
+        if live:
+            kind, row, jobdir_rel = self.retains._target_row(target)
+            try:
+                entries = self.retains._scan(self._adapter(row["site"]),
+                                             jobdir_rel)
+            except WeftError as e:
+                raise WeftError(
+                    "data.missing",
+                    f"cannot scan {target} live: {e.detail}",
+                    stage="infra",
+                    hints={"receipt_recorded": bool(
+                               self.store.get_run_inventory(target)),
+                           "note": "a swept sandbox has no live view; "
+                                   "the terminal receipt (live=False) "
+                                   "is the record"})
+            total, recorded_at, budget_hit = len(entries), None, False
+        else:
+            row = self.store.get_run_inventory(target)
+            if not row:
+                raise WeftError(
+                    "data.missing", f"no inventory recorded for {target}",
+                    stage="infra",
+                    hints={"note": "inventories are recorded when a run "
+                                   "reaches a terminal state; runs "
+                                   "finished before this weft version "
+                                   "have none; live=True scans a still-"
+                                   "running run's sandbox"})
+            entries = row["entries"]
+            total, recorded_at = row["total"], row["recorded_at"]
+            budget_hit = row["truncated"]
         if glob:
             import fnmatch
             entries = [e for e in entries
@@ -1429,11 +1499,11 @@ class Weft:
         if min_bytes:
             entries = [e for e in entries if e["bytes"] >= min_bytes]
         return {"target": target, "site": row["site"],
-                "recorded_at": row["recorded_at"],
+                "recorded_at": recorded_at, "live": live,
                 "entries": entries[:max_entries],
                 "matched": len(entries),
-                "truncated": row["truncated"] or len(entries) > max_entries,
-                "total_files": row["total"]}
+                "truncated": budget_hit or len(entries) > max_entries,
+                "total_files": total}
 
     def run_retain(self, target: str, include: list[str] | None = None,
                    exclude: list[str] | None = None,
@@ -1677,8 +1747,8 @@ PUBLIC_TOOLS = [
     "site_probe_deep", "site_load", "site_associations", "site_note",
     "site_route_probe", "module_check", "module_list", "site_exec",
     "job_node_exec", "site_teardown", "site_unregister",
-    "env_ensure", "env_status", "env_why", "env_repair", "env_gpu_hint",
-    "env_revise", "env_find_near",
+    "env_ensure", "env_status", "env_why", "env_packages", "env_repair",
+    "env_gpu_hint", "env_revise", "env_find_near",
     "env_publish", "env_adopt", "env_unpublish", "env_published",
     "data_register", "data_describe", "data_fetch",
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",

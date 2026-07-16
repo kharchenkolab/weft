@@ -45,14 +45,30 @@ class DataManager:
     def register_site_path(self, adapter, site: str, abs_path: str,
                            origin: str | None = None,
                            expected_sha256: str | None = None) -> dict:
-        """A file already ON a site becomes a ref without moving: hashed
+        """A file — or a whole DIRECTORY (a .zarr, a results folder) —
+        already ON a site becomes a ref without moving: hashed
         site-side, hardlinked into the site CAS (copy across devices).
         The browsable original stays; reuse on that site stages 0 bytes
-        (retention.md R5)."""
+        (retention.md R5). Directories mint a tree ref (same convention
+        as output collection, so identical content re-registered mints
+        identical refs and only new blobs are placed)."""
         import shlex as _sh
         q = _sh.quote(abs_path)
+        probe = adapter.run_cmd(
+            f"if [ -d {q} ]; then echo dir; "
+            f"elif [ -f {q} ]; then echo file; else echo none; fi",
+            timeout=120)
+        kind = (probe.out or "").strip()
+        if kind == "dir":
+            return self._register_site_tree(adapter, site, abs_path,
+                                            origin, expected_sha256)
+        if kind != "file":
+            raise WeftError("data.missing",
+                            f"no such file or directory on {site}: "
+                            f"{abs_path}",
+                            stage="staging",
+                            hints={"detail": (probe.err or probe.out)[-200:]})
         r = adapter.run_cmd(
-            f"[ -f {q} ] && "
             f"h=$(sha256sum {q} 2>/dev/null || shasum -a 256 {q}); "
             f"printf '%s %s' \"${{h%% *}}\" \"$(wc -c < {q} | tr -d ' ')\"",
             timeout=1800)
@@ -85,6 +101,84 @@ class DataManager:
                 "fetched_to": site, "trust": trust,
                 "note": "bytes live in the site CAS (the original stays "
                         "in place); tasks on this site stage 0 bytes"}
+
+    def _register_site_tree(self, adapter, site: str, abs_path: str,
+                            origin: str | None,
+                            expected_sha256: str | None) -> dict:
+        """Directory-as-a-unit registration (retention re-entry for
+        .zarr-style stores): one shim hash-tree call hashes every file
+        site-side, one shim ingest call hardlinks the blobs into the
+        site CAS, and the manifest is adopted locally so tasks can
+        mount the tree and data_fetch can pull it home. The tree hash
+        follows the output-collection convention exactly — identity is
+        content, wherever it was minted."""
+        import shlex as _sh
+        import uuid as _uuid
+        listing = adapter.shim(["hash-tree", "--root", abs_path],
+                               timeout=3600)
+        if listing.rc != 0:
+            raise WeftError(
+                "data.missing",
+                f"cannot hash {abs_path} on {site}: "
+                f"{(listing.err or listing.out)[:200]}",
+                stage="staging", retryable=True)
+        tree_entries, ingest_rows, total = [], [], 0
+        for line in listing.out.splitlines():
+            kind, path, is_exec, size, digest = line.split("\t")
+            if kind == "link":
+                tree_entries.append({"path": path, "kind": "link",
+                                     "target": digest})
+                continue
+            size = int(size)
+            tree_entries.append({"path": path, "kind": "file",
+                                 "exec": is_exec == "1",
+                                 "size": size, "sha256": digest})
+            ingest_rows.append(f"{path}\t{digest}")
+            total += size
+        if not ingest_rows:
+            raise WeftError(
+                "data.missing",
+                f"{abs_path} on {site} contains no files — nothing to "
+                f"register", stage="staging")
+        tree_hash = sha256_bytes(canonical_json(tree_entries))
+        self._check_expected(abs_path, tree_hash, expected_sha256)
+        endpoint = adapter.transfer_endpoint()
+        plan_rel = f"tmp/ingest-{_uuid.uuid4().hex[:10]}.tsv"
+        adapter.write_file(plan_rel,
+                           ("\n".join(ingest_rows) + "\n").encode())
+        r = adapter.shim(
+            ["ingest", "--cas", endpoint["cas_root"], "--root", abs_path,
+             "--plan", adapter.path(plan_rel)], timeout=3600)
+        adapter.run_cmd(f"rm -f {_sh.quote(adapter.path(plan_rel))}",
+                        timeout=120)
+        if r.rc != 0:
+            raise WeftError("data.transfer_failed",
+                            f"site-side tree ingest failed: "
+                            f"{(r.err or r.out)[:200]}",
+                            stage="staging", retryable=True)
+        ref = f"dref:{tree_hash}"
+        trust = "verified" if expected_sha256 else "first-fetch"
+        self.cas.put_tree_manifest(tree_hash, tree_entries)
+        self.store.put_dataref(ref, "tree", total,
+                               meta={"origin": origin or abs_path,
+                                     "trust": trust, "site_direct": site})
+        self.store.set_location(ref, site, endpoint["cas_root"])
+        nfiles = 0
+        for e in tree_entries:
+            if e["kind"] != "file":
+                continue
+            nfiles += 1
+            fref = f"dref:{e['sha256']}"
+            self.store.put_dataref(fref, "file", e["size"],
+                                   meta={"origin": origin or abs_path,
+                                         "exec": e["exec"]})
+            self.store.set_location(fref, site, endpoint["cas_root"])
+        return {"ref": ref, "kind": "tree", "bytes": total,
+                "files": nfiles, "fetched_to": site, "trust": trust,
+                "note": "blobs live in the site CAS (the original tree "
+                        "stays in place); tasks on this site stage 0 "
+                        "bytes; data_fetch(ref, dest) rebuilds the "
+                        "directory elsewhere"}
 
     def register_url(self, url: str, fetchers: dict, adapters: dict,
                      site: str | None = None,
@@ -556,7 +650,30 @@ class DataManager:
         dest = Path(to_path)
         if not dest.is_absolute():
             dest = self.workspace / dest
-        if self.cas.kind_of(ref) is None:
+        kind_here = self.cas.kind_of(ref)
+        if kind_here == "tree":
+            # the manifest is local knowledge; the blobs may not be —
+            # pull only what's missing (an evolved re-registered store
+            # moves just its new chunks)
+            manifest = self.cas.tree_manifest(ref)
+            missing = sorted({
+                (e["sha256"], e.get("size", 0)) for e in manifest
+                if e["kind"] == "file"
+                and not self.cas._blob_path(e["sha256"]).exists()})
+            if missing:
+                locations = self.store.locations_of(ref)
+                remote = [l for l in locations if l["site"] in adapters]
+                if not remote:
+                    raise WeftError(
+                        "data.missing",
+                        f"no known site holds the blobs of tree {ref}",
+                        stage="staging",
+                        hints={"missing_blobs": len(missing)})
+                adapter = adapters[remote[0]["site"]]
+                endpoint = adapter.transfer_endpoint()
+                method = transfers.get(endpoint["method"])
+                method.fetch(list(missing), self.cas, endpoint)
+        elif kind_here is None:
             # find a site that has it and pull blobs back
             locations = self.store.locations_of(ref)
             remote = [l for l in locations if l["site"] in adapters]
@@ -572,10 +689,12 @@ class DataManager:
             if row and row["kind"] == "tree":
                 raise WeftError(
                     "data.missing",
-                    "tree refs can only be fetched from sites that still hold "
-                    "the originating job sandbox; fetch the file refs instead",
+                    "this workspace has no manifest for the tree — it can "
+                    "enumerate no blobs to pull",
                     stage="staging",
-                    hints={"suggestion": "fetch individual file refs from the manifest"},
+                    hints={"suggestion": "register the tree (data_register"
+                                         "(path, site=...)) or import the "
+                                         "bundle that minted it first"},
                 )
             method.fetch(
                 [(ref.split(":")[-1], row["bytes"] if row else 0)], self.cas, endpoint
