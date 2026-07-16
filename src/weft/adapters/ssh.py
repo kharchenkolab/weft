@@ -24,7 +24,8 @@ from ..errors import WeftError
 from .base import ShimResult, SiteAdapter
 
 SHIM_SRC = Path(__file__).resolve().parent.parent / "shim" / "weft-shim"
-BOOTSTRAP_VERSION = 3  # v3: CA bundle found on darwin controllers too
+BOOTSTRAP_VERSION = 4  # v4: shim v6 (list-tree file roots)
+                       # v3: CA bundle found on darwin controllers too
 
 
 import functools

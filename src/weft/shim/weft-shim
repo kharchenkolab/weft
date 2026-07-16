@@ -5,7 +5,8 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=5   # v5: squashfs realization inputs (fuse/squashfuse/
+WEFT_SHIM_VERSION=6   # v6: list-tree file roots (fingerprint verb)
+                      # v5: squashfs realization inputs (fuse/squashfuse/
                       # mksquashfs/userns/root fs); host-first glibc
 
 json_bool() { if [ "$1" = "0" ]; then echo true; else echo false; fi; }
@@ -348,6 +349,21 @@ cmd_list_tree() {
             *) echo "list-tree: unknown arg $1" >&2; exit 2;;
         esac
     done
+    if [ -f "$root" ]; then
+        # file root: one row at "." — same convention as hash-tree
+        if stat -c %s "$root" >/dev/null 2>&1; then
+            set -- $(stat -c '%s %Y' "$root")
+        else
+            set -- $(stat -f '%z %m' "$root")
+        fi
+        sz=${1:-0}; mt=${2:-0}; h=""
+        if [ "$hash_under" -gt 0 ] && [ "$sz" -le "$hash_under" ]; then
+            h=$(sha256_of "$root")
+        fi
+        printf '#total 1\n' >&2
+        printf '.\t%s\t%s\t%s\n' "$sz" "$mt" "$h"
+        return 0
+    fi
     [ -d "$root" ] || { echo "list-tree: no such dir: $root" >&2; exit 2; }
     root=$(cd "$root" && pwd)
     if stat -c %s "$root" >/dev/null 2>&1; then st=gnu; else st=bsd; fi

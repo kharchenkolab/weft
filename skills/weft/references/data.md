@@ -44,13 +44,22 @@ BROWSABLE FILES — no refs, no hashes — with run-level provenance in a
 
 ```python
 w.run_inventory(job_or_kernel_id)      # what the run left (recorded at
-                                       # terminal state; survives EVERYTHING)
+                                       # terminal state; survives EVERYTHING).
+                                       # Weft-written files carry
+                                       # scaffold: true — the CONTRACT for
+                                       # splitting "the run's products" from
+                                       # weft plumbing (blocks/*.artifacts/**
+                                       # is the user's; block protocol files
+                                       # are not)
 w.run_inventory(target, live=True)     # a RUNNING run's sandbox as it is
                                        # NOW — same shape, {"live": true},
                                        # never persisted; the receipt is
                                        # still written at terminal state
 w.run_retain(target, include=["figs/**"], exclude=["tmp/**"],
-             label="proj-9")           # keep: free locally (reflink/link),
+             label="proj-9")           # keep: free locally (reflink/link).
+                                       # With NO include, "retain all" means
+                                       # all MY files (scaffold stays out);
+                                       # an explicit include is sovereign,
                                        # in place under a site's declared
                                        # retain.dir, else background
                                        # transfer home. On a LIVE run this
@@ -107,6 +116,39 @@ w.data_register(url, expected_sha256="ab12…")                # verify a
 `s3://`, `gs://`, `azure://` work when rclone sits next to pixi. Without an
 expected hash, hash-on-arrival is the identity (`meta.trust =
 "first-fetch"`). Ingest only — discovery and cataloging stay above weft.
+
+## Reference-in-place (big data on stable storage)
+
+When the data lives on a cluster's durable share and the site CAS sits
+on scratch, ingesting would COPY it across filesystems. Instead:
+
+```python
+w.data_fingerprint(path, site)         # cheap stat manifest {path, bytes,
+                                       # mtime}; hash_under=N samples small
+                                       # files — drift detection, no identity
+w.data_register(path, site=..., ingest=False)
+                                       # hash site-side (one read, NO write):
+                                       # the path itself is the ref's durable
+                                       # home. Same-site tasks mount it as a
+                                       # SYMLINK — zero bytes move
+```
+
+- Every staging re-checks a STAT-FENCE (file: size+mtime; tree: file
+  count+bytes): a drifted home fails `data.verify_failed` with
+  `hints.source = "external-home"` + recorded-vs-observed — identity is
+  content, so a changed home means a DEAD ref; re-register for the new
+  content. Content drift subtler than a stat change is caught by hash
+  verification whenever bytes move.
+- Bytes ingest LAZILY only when they must move (cross-site staging,
+  `data_fetch`): fence, then ingest into the source site's CAS
+  (`data.ingested_for_transfer` event), then the normal verified
+  transfer. Forced ingest is never needed — it happens when physics
+  demands it.
+- Sharper teeth on read-only inputs: through a symlink, a task that
+  writes its input damages the DURABLE HOME, not a re-obtainable cache
+  copy.
+- GC never lists external locations (weft holds no bytes there); the
+  home's lifecycle belongs to its owner.
 
 ## Reproducibility bundles (the record that travels)
 

@@ -361,7 +361,7 @@ class SessionManager:
                                         "mount_as": entry["mount_as"]}]})
         self.dataman.ensure_at([entry["ref"]], adapter,
                                self.runner.transfers)
-        plan = self.dataman.materialize_plan(t)
+        plan = self.dataman.materialize_plan(t, site=adapter.name)
         adapter.write_file(f"{location}/inputs.tsv", plan.encode())
         endpoint = adapter.transfer_endpoint()
         r = adapter.shim(

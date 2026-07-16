@@ -44,14 +44,25 @@ class DataManager:
 
     def register_site_path(self, adapter, site: str, abs_path: str,
                            origin: str | None = None,
-                           expected_sha256: str | None = None) -> dict:
+                           expected_sha256: str | None = None,
+                           ingest: bool = True) -> dict:
         """A file — or a whole DIRECTORY (a .zarr, a results folder) —
         already ON a site becomes a ref without moving: hashed
         site-side, hardlinked into the site CAS (copy across devices).
         The browsable original stays; reuse on that site stages 0 bytes
         (retention.md R5). Directories mint a tree ref (same convention
         as output collection, so identical content re-registered mints
-        identical refs and only new blobs are placed)."""
+        identical refs and only new blobs are placed).
+
+        ingest=False — REFERENCE-IN-PLACE, for big data on stable
+        storage whose CAS sits on scratch (a cross-filesystem ingest
+        would copy it): hash site-side (one read pass, NO write) and
+        record the path itself as the ref's durable home. Same-site
+        tasks stage it as a SYMLINK (read-only inputs contract — a task
+        writing through it damages the HOME, not a re-obtainable cache
+        copy); a stat-fence at every staging fails data.verify_failed
+        if the home drifted. Bytes are ingested lazily only when they
+        must MOVE (cross-site staging / fetch)."""
         import shlex as _sh
         q = _sh.quote(abs_path)
         probe = adapter.run_cmd(
@@ -61,7 +72,8 @@ class DataManager:
         kind = (probe.out or "").strip()
         if kind == "dir":
             return self._register_site_tree(adapter, site, abs_path,
-                                            origin, expected_sha256)
+                                            origin, expected_sha256,
+                                            ingest=ingest)
         if kind != "file":
             raise WeftError("data.missing",
                             f"no such file or directory on {site}: "
@@ -70,7 +82,9 @@ class DataManager:
                             hints={"detail": (probe.err or probe.out)[-200:]})
         r = adapter.run_cmd(
             f"h=$(sha256sum {q} 2>/dev/null || shasum -a 256 {q}); "
-            f"printf '%s %s' \"${{h%% *}}\" \"$(wc -c < {q} | tr -d ' ')\"",
+            f"m=$(stat -c %Y {q} 2>/dev/null || stat -f %m {q}); "
+            f"printf '%s %s %s' \"${{h%% *}}\" "
+            f"\"$(wc -c < {q} | tr -d ' ')\" \"$m\"",
             timeout=1800)
         parts = (r.out or "").split()
         if r.rc != 0 or len(parts) < 2:
@@ -79,7 +93,27 @@ class DataManager:
                             stage="staging",
                             hints={"detail": (r.err or r.out)[-200:]})
         digest, size = parts[0], int(parts[1])
+        mtime = int(parts[2]) if len(parts) > 2 else 0
         self._check_expected(abs_path, digest, expected_sha256)
+        ref = f"dref:{digest}"
+        trust = "verified" if expected_sha256 else "first-fetch"
+        if not ingest:
+            self.store.put_dataref(
+                ref, "file", size,
+                meta={"origin": origin or abs_path, "trust": trust,
+                      "site_direct": site,
+                      "external": {"site": site, "home": abs_path,
+                                   "bytes": size, "mtime": mtime}})
+            self.store.set_location(ref, site, f"external:{abs_path}")
+            self.store.emit("data.external_registered", ref=ref,
+                            site=site, home=abs_path, bytes=size)
+            return {"ref": ref, "kind": "file", "bytes": size,
+                    "external_home": abs_path, "trust": trust,
+                    "note": "referenced in place — no copy; same-site "
+                            "tasks stage a symlink behind a stat-fence; "
+                            "bytes ingest lazily if they ever must move. "
+                            "Inputs are read-only BY CONTRACT: writing "
+                            "through the symlink damages the home."}
         endpoint = adapter.transfer_endpoint()
         blob_dir = f"{endpoint['cas_root']}/{digest[:2]}"
         blob = f"{blob_dir}/{digest}"
@@ -91,8 +125,6 @@ class DataManager:
             raise WeftError("data.transfer_failed",
                             f"site-side ingest failed: {r.err[:200]}",
                             stage="staging", retryable=True)
-        ref = f"dref:{digest}"
-        trust = "verified" if expected_sha256 else "first-fetch"
         self.store.put_dataref(ref, "file", size,
                                meta={"origin": origin or abs_path,
                                      "trust": trust, "site_direct": site})
@@ -104,7 +136,8 @@ class DataManager:
 
     def _register_site_tree(self, adapter, site: str, abs_path: str,
                             origin: str | None,
-                            expected_sha256: str | None) -> dict:
+                            expected_sha256: str | None,
+                            ingest: bool = True) -> dict:
         """Directory-as-a-unit registration (retention re-entry for
         .zarr-style stores): one shim hash-tree call hashes every file
         site-side, one shim ingest call hardlinks the blobs into the
@@ -142,6 +175,27 @@ class DataManager:
                 f"register", stage="staging")
         tree_hash = sha256_bytes(canonical_json(tree_entries))
         self._check_expected(abs_path, tree_hash, expected_sha256)
+        trust = "verified" if expected_sha256 else "first-fetch"
+        if not ingest:
+            ref = f"dref:{tree_hash}"
+            self.cas.put_tree_manifest(tree_hash, tree_entries)
+            self.store.put_dataref(
+                ref, "tree", total,
+                meta={"origin": origin or abs_path, "trust": trust,
+                      "site_direct": site,
+                      "external": {"site": site, "home": abs_path,
+                                   "bytes": total,
+                                   "files": len(ingest_rows)}})
+            self.store.set_location(ref, site, f"external:{abs_path}")
+            self.store.emit("data.external_registered", ref=ref,
+                            site=site, home=abs_path, bytes=total,
+                            files=len(ingest_rows))
+            return {"ref": ref, "kind": "tree", "bytes": total,
+                    "files": len(ingest_rows), "external_home": abs_path,
+                    "trust": trust,
+                    "note": "referenced in place — no copy; same-site "
+                            "tasks stage a symlink behind a stat-fence; "
+                            "blobs ingest lazily if they ever must move"}
         endpoint = adapter.transfer_endpoint()
         plan_rel = f"tmp/ingest-{_uuid.uuid4().hex[:10]}.tsv"
         adapter.write_file(plan_rel,
@@ -179,6 +233,124 @@ class DataManager:
                         "stays in place); tasks on this site stage 0 "
                         "bytes; data_fetch(ref, dest) rebuilds the "
                         "directory elsewhere"}
+
+    # -- reference-in-place (external homes) --------------------------------
+
+    def external_home_at(self, ref: str, site: str) -> str | None:
+        """The durable-home path of an external-source ref at `site`,
+        None when the ref is (or has become) CAS-backed there."""
+        for l in self.store.locations_of(ref):
+            if l["site"] == site and str(l["path"]).startswith("external:"):
+                return str(l["path"])[len("external:"):]
+        return None
+
+    def _fence_external(self, adapter, ref: str, home: str) -> None:
+        """Stat-fence at staging: the home must still LOOK like what was
+        registered (size/mtime for a file; file count + total bytes for
+        a tree). Cheap by design — content drift subtler than a stat
+        change is caught by hash verification whenever bytes move. A
+        drifted home means the ref is DEAD (identity is content):
+        re-registering mints the new content's ref."""
+        import shlex as _sh
+        row = self.store.get_dataref(ref) or {}
+        ext = (row.get("meta") or {}).get("external") or {}
+
+        def _fail(observed):
+            raise WeftError(
+                "data.verify_failed",
+                f"external source for {ref} changed or vanished",
+                stage="staging",
+                hints={"source": "external-home", "site": adapter.name,
+                       "home": home,
+                       "recorded": {k: v for k, v in ext.items()
+                                    if k in ("bytes", "mtime", "files")},
+                       "observed": observed,
+                       "suggestion": "the durable home moved or its "
+                                     "content changed: restore it, or "
+                                     "re-register the path (new content "
+                                     "= new ref) and update the task"})
+        if row.get("kind") == "tree":
+            r = adapter.shim(["list-tree", "--root", home,
+                              "--max", "100000"], timeout=900)
+            if r.rc != 0:
+                _fail({"error": (r.err or r.out)[:200]})
+            files, nbytes = 0, 0
+            for line in r.out.splitlines():
+                p = line.split("\t")
+                if len(p) >= 2:
+                    files += 1
+                    nbytes += int(p[1])
+            if files != ext.get("files") or nbytes != ext.get("bytes"):
+                _fail({"files": files, "bytes": nbytes})
+            return
+        q = _sh.quote(home)
+        r = adapter.run_cmd(
+            f"[ -f {q} ] && printf '%s %s' "
+            f"\"$(wc -c < {q} | tr -d ' ')\" "
+            f"\"$(stat -c %Y {q} 2>/dev/null || stat -f %m {q})\"",
+            timeout=300)
+        parts = (r.out or "").split()
+        if r.rc != 0 or len(parts) < 2:
+            _fail({"error": "missing or unreadable"})
+        if int(parts[0]) != ext.get("bytes") \
+                or int(parts[1]) != ext.get("mtime"):
+            _fail({"bytes": int(parts[0]), "mtime": int(parts[1])})
+
+    def _ingest_external(self, adapter, ref: str, home: str) -> None:
+        """Bytes must MOVE (cross-site staging / fetch): ingest the
+        external home into ITS OWN site's CAS first, so every transfer
+        path sees a normal blob layout. Fence first — never ingest
+        drifted content under an old identity; wire verification then
+        re-checks content hashes as bytes move."""
+        import shlex as _sh
+        import uuid as _uuid
+        self._fence_external(adapter, ref, home)
+        row = self.store.get_dataref(ref) or {}
+        endpoint = adapter.transfer_endpoint()
+        if row.get("kind") == "tree":
+            manifest = self.cas.tree_manifest(ref)
+            rows = [f"{e['path']}\t{e['sha256']}" for e in manifest
+                    if e["kind"] == "file"]
+            plan_rel = f"tmp/ingest-{_uuid.uuid4().hex[:10]}.tsv"
+            adapter.write_file(plan_rel, ("\n".join(rows) + "\n").encode())
+            r = adapter.shim(
+                ["ingest", "--cas", endpoint["cas_root"], "--root", home,
+                 "--plan", adapter.path(plan_rel)], timeout=3600)
+            adapter.run_cmd(
+                f"rm -f {_sh.quote(adapter.path(plan_rel))}", timeout=120)
+            if r.rc != 0:
+                raise WeftError("data.transfer_failed",
+                                f"ingest of external tree failed: "
+                                f"{(r.err or r.out)[:200]}",
+                                stage="staging", retryable=True)
+            for e in manifest:
+                if e["kind"] != "file":
+                    continue
+                fref = f"dref:{e['sha256']}"
+                self.store.put_dataref(fref, "file", e["size"],
+                                       meta={"origin": home,
+                                             "exec": e.get("exec", False)})
+                self.store.set_location(fref, adapter.name,
+                                        endpoint["cas_root"])
+        else:
+            digest = ref.split(":")[-1]
+            blob_dir = f"{endpoint['cas_root']}/{digest[:2]}"
+            blob = f"{blob_dir}/{digest}"
+            r = adapter.run_cmd(
+                f"mkdir -p {_sh.quote(blob_dir)} && "
+                f"([ -f {_sh.quote(blob)} ] || ln {_sh.quote(home)} "
+                f"{_sh.quote(blob)} 2>/dev/null || cp -p {_sh.quote(home)} "
+                f"{_sh.quote(blob)})", timeout=3600)
+            if r.rc != 0:
+                raise WeftError("data.transfer_failed",
+                                f"ingest of external file failed: "
+                                f"{r.err[:200]}",
+                                stage="staging", retryable=True)
+        # the location flips to CAS-backed; meta.external stays as record
+        self.store.set_location(ref, adapter.name, endpoint["cas_root"])
+        self.store.emit("data.ingested_for_transfer", ref=ref,
+                        site=adapter.name, home=home,
+                        bytes=row.get("bytes", 0))
 
     def register_url(self, url: str, fetchers: dict, adapters: dict,
                      site: str | None = None,
@@ -424,8 +596,24 @@ class DataManager:
         Refs whose bytes the workspace never held route SITE-TO-SITE first
         (shared-FS link or direct pull over the user's own keys) when a
         probed route exists — the controller stays out of the data path."""
+        # external-home refs used ON their own site: stat-fence, no bytes
+        for ref in dict.fromkeys(refs):
+            home = self.external_home_at(ref, adapter.name)
+            if home:
+                self._fence_external(adapter, ref, home)
         plan = self.plan_for(refs, adapter.name)
         if plan.to_transfer and adapters:
+            # bytes must MOVE: external sources ingest into their own
+            # site's CAS first (fence + wire hashes keep it honest), then
+            # every existing route works unchanged
+            for ref in plan.to_transfer:
+                for l in self.store.locations_of(ref):
+                    if str(l["path"]).startswith("external:") \
+                            and l["site"] in adapters:
+                        self._ingest_external(
+                            adapters[l["site"]], ref,
+                            str(l["path"])[len("external:"):])
+                        break
             routed = self._route_from_sites(list(plan.to_transfer), adapter,
                                             adapters, job_id)
             # controller detour for what no direct route satisfied: pull
@@ -506,11 +694,20 @@ class DataManager:
 
     # -- sandbox materialization --------------------------------------------
 
-    def materialize_plan(self, task: Task) -> str:
-        """TSV consumed by `weft-shim materialize` (path, sha/target, flag)."""
+    def materialize_plan(self, task: Task, site: str | None = None) -> str:
+        """TSV consumed by `weft-shim materialize` (path, sha/target, flag).
+        With `site`, refs whose bytes live at an external home ON that
+        site mount as one SYMLINK to the home (file or tree root) — the
+        zero-copy path for reference-in-place data; the read-only inputs
+        contract is what makes it safe (as with hardlink staging)."""
         rows: list[str] = []
         mounts = list(task.inputs) + ([task.code] if task.code else [])
         for inp in mounts:
+            if site:
+                home = self.external_home_at(inp.ref, site)
+                if home:
+                    rows.append(f"{inp.mount_as}\t{home}\tL")
+                    continue
             row = self.store.get_dataref(inp.ref)
             kind = row["kind"] if row else self.cas.kind_of(inp.ref)
             if kind is None:
@@ -670,6 +867,12 @@ class DataManager:
                         stage="staging",
                         hints={"missing_blobs": len(missing)})
                 adapter = adapters[remote[0]["site"]]
+                if str(remote[0]["path"]).startswith("external:"):
+                    # bytes must move: ingest the home into its own
+                    # site's CAS first (fenced + wire-verified)
+                    self._ingest_external(
+                        adapter, ref,
+                        str(remote[0]["path"])[len("external:"):])
                 endpoint = adapter.transfer_endpoint()
                 method = transfers.get(endpoint["method"])
                 method.fetch(list(missing), self.cas, endpoint)
@@ -683,6 +886,9 @@ class DataManager:
                 )
             loc = remote[0]
             adapter = adapters[loc["site"]]
+            if str(loc["path"]).startswith("external:"):
+                self._ingest_external(
+                    adapter, ref, str(loc["path"])[len("external:"):])
             endpoint = adapter.transfer_endpoint()
             method = transfers.get(endpoint["method"])
             row = self.store.get_dataref(ref)

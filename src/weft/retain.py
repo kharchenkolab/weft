@@ -27,6 +27,37 @@ from .errors import WeftError
 TERMINAL_JOB = ("DONE", "FAILED", "CANCELLED")
 TERMINAL_KERNEL = ("stopped", "died")
 
+# every file weft itself writes into a run sandbox — the CONTRACT that
+# lets a host split "what the run produced" from weft's plumbing without
+# guessing from names (weft-ui ask). Kept next to the writers: runner
+# (cmd.sh/activate.sh/inputs.tsv/ingest.tsv/ns), shim job-start
+# (runner.sh/log/pid*/exit_code/wall_s/rusage), kernel drivers
+# (driver.*, blocks/NNNN.{code,out,err,rc} — but blocks/*.artifacts/**
+# is $WEFT_BLOCK_DIR: USER files).
+_SCAFFOLD_EXACT = {
+    "cmd.sh", "activate.sh", "inputs.tsv", "ingest.tsv", "ns",
+    "runner.sh", "log", "log.err", "pid", "pid.real", "exit_code",
+    "wall_s", "rusage", "driver.py", "driver.R", "driver.jl",
+}
+
+
+def is_scaffold(path: str) -> bool:
+    if path in _SCAFFOLD_EXACT:
+        return True
+    if path.startswith("blocks/"):
+        # top-level protocol files only; anything nested (NNNN.artifacts/)
+        # is the block's saved output — the user's
+        return "/" not in path[len("blocks/"):]
+    return False
+
+
+def mark_scaffold(entries: list[dict]) -> list[dict]:
+    """Flag weft-written files in a scan/inventory entry list, in place."""
+    for e in entries:
+        if is_scaffold(e.get("path", "")):
+            e["scaffold"] = True
+    return entries
+
 
 class RetainManager:
     def __init__(self, store, adapters, workspace: Path):
@@ -106,10 +137,15 @@ class RetainManager:
             if len(p) >= 3:
                 out.append({"path": p[0], "bytes": int(p[1]),
                             "mtime": int(p[2])})
-        return out
+        return mark_scaffold(out)
 
     @staticmethod
     def _select(entries: list[dict], include, exclude) -> list[dict]:
+        # with no explicit include, "retain everything" means everything
+        # the RUN produced — weft's own plumbing (scaffold) stays out.
+        # An explicit include is sovereign: it selects whatever it names.
+        if include is None:
+            entries = [e for e in entries if not e.get("scaffold")]
         inc = include or ["**"]
         exc = exclude or []
 

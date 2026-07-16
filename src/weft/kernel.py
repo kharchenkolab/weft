@@ -337,13 +337,18 @@ class KernelManager:
             data = r.out if r.rc == 0 else ""
             return data, off + len(data.encode("utf-8", "surrogateescape"))
 
-        out, out_off = delta("out", out_offset)
-        err, err_off = delta("err", err_offset)
+        # rc FIRST, streams after: every driver closes the streams
+        # before writing .rc, so rc-present ⇒ the files are complete —
+        # this order can only over-deliver. The reverse raced a block
+        # finishing mid-peek into "running: false" with a truncated
+        # final delta (callers rightly stop polling on that).
         rc = None
         try:
             rc = int(adapter.read_file(f"{base}.rc", 64).decode().strip())
         except (WeftError, ValueError):
             pass
+        out, out_off = delta("out", out_offset)
+        err, err_off = delta("err", err_offset)
         return {"out_delta": out, "err_delta": err,
                 "out_offset": out_off, "err_offset": err_off,
                 "running": rc is None, "rc": rc}

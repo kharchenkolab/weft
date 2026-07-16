@@ -144,6 +144,19 @@ Retained files that feed later calculations re-enter the data plane
 lazily: `data_register(path[, site=])` gives them identity plus a
 lineage origin so provenance walks through them into the producing run.
 
+### Reference-in-place (big data on stable storage)
+
+`data_register(path, site=..., ingest=False)` hashes a site path
+without copying it: the path is recorded as the ref's durable home,
+same-site tasks mount it as a symlink (zero bytes move; read-only
+inputs contract), and a stat-fence at every staging fails
+`data.verify_failed` — naming the external source — if the home
+drifted. Bytes ingest lazily only when they must move off-site
+(`data.ingested_for_transfer`). GC never touches external homes.
+`data_fingerprint(path, site)` gives the cheap stat manifest
+(`hash_under=` samples small files) for registration-time fingerprints
+and drift detection without minting identity.
+
 ### Session lifecycle
 
 Sessions track `last_used` (every session verb touches it);

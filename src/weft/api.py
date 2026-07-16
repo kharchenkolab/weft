@@ -764,7 +764,8 @@ class Weft:
     # -- data -----------------------------------------------------------------
 
     def data_register(self, path: str, site: str | None = None,
-                      expected_sha256: str | None = None) -> dict:
+                      expected_sha256: str | None = None,
+                      ingest: bool = True) -> dict:
         """Hash a workspace path — or ingest a URL (http/s/s3/gs/azure) —
         into a DataRef. With site=, a URL is fetched straight into that
         site's CAS (hashed site-side; no controller detour), and a plain
@@ -773,7 +774,24 @@ class Weft:
         a task input or fetched home as a unit. Pass expected_sha256 to
         verify against a published checksum (for a directory: the tree
         hash); otherwise hash-on-arrival is the identity (meta.trust =
-        "first-fetch")."""
+        "first-fetch").
+
+        ingest=False (site paths only) — REFERENCE-IN-PLACE for big
+        data on stable storage when the site CAS sits on scratch: hash
+        site-side without copying, record the path as the ref's durable
+        home. Same-site tasks mount it as a symlink behind a stat-fence
+        (drift → data.verify_failed naming the external source); bytes
+        ingest lazily only when they must move off-site. Inputs are
+        read-only by contract — through a symlink, a write damages the
+        HOME."""
+        if not ingest and (site is None or "://" in path):
+            raise WeftError(
+                "task.invalid",
+                "ingest=False (reference-in-place) applies to site paths "
+                "only", stage="staging",
+                hints={"suggestion": "pass site=<name> with an absolute "
+                                     "path on that site; URLs and "
+                                     "workspace paths always ingest"})
         if "://" in path:
             if not hasattr(self, "_fetchers"):
                 from .sources import default_fetchers
@@ -795,7 +813,7 @@ class Weft:
             return self.dataman.register_site_path(
                 adapter, site, path,
                 origin=self._lineage_origin(path, site),
-                expected_sha256=expected_sha256)
+                expected_sha256=expected_sha256, ingest=ingest)
         p = Path(path)
         if not p.is_absolute():
             p = self.workspace / p
@@ -818,6 +836,50 @@ class Weft:
 
     def data_describe(self, ref: str) -> dict:
         return self.dataman.describe(ref)
+
+    def data_fingerprint(self, path: str, site: str,
+                         hash_under: int = 0,
+                         max_entries: int = 5000) -> dict:
+        """Cheap fingerprint of a site path (file or directory): a
+        stat-only {path, bytes, mtime} manifest — no ingest, no full
+        hash, no identity minted. hash_under=N additionally hashes
+        files ≤N bytes (sampled content check: cheap on the small
+        metadata files that signal change in chunked stores). For
+        registration-time fingerprints and drift detection; identity
+        still comes from data_register at first computational use."""
+        adapter = self._adapter(site)
+        args = ["list-tree", "--root", path, "--max", str(max_entries)]
+        if hash_under:
+            args += ["--hash-under", str(hash_under)]
+        r = adapter.shim(args, timeout=900)
+        if r.rc != 0:
+            raise WeftError(
+                "data.missing",
+                f"cannot fingerprint {path} on {site}: "
+                f"{(r.err or r.out)[:200]}",
+                stage="infra",
+                hints={"note": "old site shims lack file-root list-tree "
+                               "— re-register the site to refresh"})
+        entries = []
+        for line in r.out.splitlines():
+            p = line.split("\t")
+            if len(p) >= 3:
+                e = {"path": p[0], "bytes": int(p[1]), "mtime": int(p[2])}
+                if len(p) > 3 and p[3]:
+                    e["sha256"] = p[3]
+                entries.append(e)
+        total = len(entries)
+        for tok in (r.err or "").splitlines():
+            if tok.startswith("#total "):
+                total = int(tok.split()[1])
+        return {"site": site, "path": path, "entries": entries,
+                "files": total, "listed": len(entries),
+                "total_bytes": sum(e["bytes"] for e in entries),
+                "max_mtime": max((e["mtime"] for e in entries),
+                                 default=0),
+                "truncated": total > len(entries),
+                "note": "stat-only facts over LISTED entries; identity "
+                        "is data_register's job"}
 
     def data_fetch(self, ref: str, to_path: str) -> dict:
         return self.dataman.fetch(ref, to_path, self.adapters, self.transfers)
@@ -1786,7 +1848,7 @@ PUBLIC_TOOLS = [
     "env_ensure", "env_status", "env_why", "env_packages", "env_repair",
     "env_gpu_hint", "env_revise", "env_find_near",
     "env_publish", "env_adopt", "env_unpublish", "env_published",
-    "data_register", "data_describe", "data_fetch",
+    "data_register", "data_describe", "data_fetch", "data_fingerprint",
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_elements", "array_result", "array_retry",
     "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",

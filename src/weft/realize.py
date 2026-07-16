@@ -632,7 +632,7 @@ def _stage_post_install_inputs(env_row: dict, adapter: SiteAdapter, rel: str,
         "inputs": [{"ref": i["ref"], "mount_as": i["mount_as"]}
                    for i in inputs]})
     dataman.ensure_at([i["ref"] for i in inputs], adapter, transfers)
-    plan = dataman.materialize_plan(t)
+    plan = dataman.materialize_plan(t, site=adapter.name)
     if not plan:
         return
     adapter.write_file(f"{rel}/post-inputs.tsv", plan.encode())

@@ -212,7 +212,7 @@ class JobRunner:
         self.dataman.ensure_at(task.required_refs(), adapter,
                                 self.transfers, adapters=self.adapters)
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(group_rel))}")
-        plan_tsv = self.dataman.materialize_plan(task)
+        plan_tsv = self.dataman.materialize_plan(task, site=adapter.name)
         if plan_tsv:
             adapter.write_file(f"{group_rel}/inputs.tsv", plan_tsv.encode())
         adapter.write_file(
@@ -642,7 +642,7 @@ class JobRunner:
         job_id: str, activate_line: str, spec_env_vars: dict[str, str] | None = None,
     ) -> None:
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(jobdir_rel))}")
-        plan_tsv = self.dataman.materialize_plan(task)
+        plan_tsv = self.dataman.materialize_plan(task, site=adapter.name)
         if self.ns_wrap_needed(task.env, adapter.name):
             adapter.write_file(f"{jobdir_rel}/ns", b"1\n")
         adapter.write_file(
@@ -711,6 +711,8 @@ class JobRunner:
                     if len(parts) > 3 and parts[3]:
                         e["sha256"] = parts[3]
                     entries.append(e)
+            from .retain import mark_scaffold
+            mark_scaffold(entries)
             total = len(entries)
             for tok in (r.err or "").splitlines():
                 if tok.startswith("#total "):

@@ -97,6 +97,10 @@ def plan(weft, site: str | None = None) -> dict:
         for ref in weft.store.refs_present_at(name):
             locs = [l for l in weft.store.locations_of(ref)
                     if l["site"] == name]
+            # external-home refs hold no CAS bytes here: nothing to evict
+            # (the home's lifecycle belongs to its owner, never to gc)
+            if locs and str(locs[0]["path"]).startswith("external:"):
+                continue
             if locs and locs[0]["verified_at"] < cutoff:
                 d = weft.store.get_dataref(ref)
                 stale_refs.append({"ref": ref,
