@@ -382,6 +382,65 @@ class RetainManager:
                             hints={"missing": missing[:5]})
         return "transfer"
 
+    # -- sandbox file access (preview tier; aba Files panel) ------------------
+
+    _READ_HARD_CAP = 8 << 20   # a preview channel, not a transport
+
+    def _sandbox_path(self, target: str, rel: str) -> tuple:
+        """(adapter, abs_path) with the path CONFINED to the jobdir —
+        a '../' escape is refused, never resolved."""
+        kind, row, jobdir_rel = self._target_row(target)
+        adapter = self.adapters.get(row["site"])
+        if adapter is None:
+            raise WeftError("site.unreachable",
+                            f"site {row['site']!r} not registered",
+                            stage="infra", retryable=True)
+        root = adapter.path(jobdir_rel)
+        joined = os.path.normpath(os.path.join(root, rel))
+        if not joined.startswith(root.rstrip("/") + "/"):
+            raise WeftError("task.invalid",
+                            f"path escapes the run sandbox: {rel!r}",
+                            stage="infra")
+        return adapter, joined
+
+    def file_stat(self, target: str, rel: str) -> dict:
+        adapter, path = self._sandbox_path(target, rel)
+        r = adapter.run_cmd(
+            f'[ -f {shlex.quote(path)} ] && '
+            f'(stat -c "%s %Y" {shlex.quote(path)} 2>/dev/null || '
+            f'stat -f "%z %m" {shlex.quote(path)}) || echo ABSENT',
+            timeout=60)
+        out = (r.out or "").strip()
+        if r.rc != 0 or out == "ABSENT" or not out:
+            return {"target": target, "path": rel, "exists": False}
+        parts = out.split()
+        return {"target": target, "path": rel, "exists": True,
+                "bytes": int(parts[0]), "mtime": int(parts[1])}
+
+    def file_read(self, target: str, rel: str,
+                  max_bytes: int = 1 << 20) -> dict:
+        max_bytes = min(max_bytes, self._READ_HARD_CAP)
+        adapter, path = self._sandbox_path(target, rel)
+        st = self.file_stat(target, rel)
+        if not st["exists"]:
+            raise WeftError("data.missing",
+                            f"no such file in the run sandbox: {rel}",
+                            stage="infra",
+                            hints={"note": "run_inventory shows what the "
+                                           "run produced; the sandbox may "
+                                           "have been swept"})
+        r = adapter.run_cmd(
+            f"head -c {max_bytes} {shlex.quote(path)} | base64",
+            timeout=300)
+        if r.rc != 0:
+            raise WeftError("data.missing",
+                            f"read failed: {(r.err or '')[:200]}",
+                            stage="infra", retryable=True)
+        return {"target": target, "path": rel,
+                "bytes_b64": "".join(r.out.split()),
+                "bytes_total": st["bytes"],
+                "truncated": st["bytes"] > max_bytes}
+
     # -- GC: the other half ---------------------------------------------------
 
     def discard(self, target: str) -> dict:

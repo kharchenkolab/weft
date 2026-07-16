@@ -1449,6 +1449,21 @@ class Weft:
         return self.retains.retain(target, include, exclude, dest, max_gb,
                                    label, background, layout=layout)
 
+    def run_file_stat(self, target: str, rel: str) -> dict:
+        """Existence + size + mtime of a file in a run's sandbox — the
+        in-sandbox vs swept distinction a Files panel needs (inventory
+        says what EXISTED; this says what's still on disk)."""
+        return self.retains.file_stat(target, rel)
+
+    def run_file_read(self, target: str, rel: str,
+                      max_bytes: int = 1 << 20) -> dict:
+        """Size-capped preview read from a run's sandbox (live or dead;
+        path confined to the jobdir). Returns base64 bytes + truncated
+        flag. A preview channel, not a transport — hard-capped at 8 MB;
+        big files travel via data_register(path, site=…) → data_fetch,
+        which also mints the lineage edge."""
+        return self.retains.file_read(target, rel, max_bytes)
+
     def run_discard(self, target: str) -> dict:
         """Active sandbox GC: delete a finished run's sandbox NOW.
         Retained files and the terminal inventory survive. The passive
@@ -1665,6 +1680,7 @@ PUBLIC_TOOLS = [
     "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",
     "events_poll", "doctor", "reconcile", "provenance", "run_inventory",
     "run_retain", "retained_runs", "run_discard", "run_forget",
+    "run_file_stat", "run_file_read",
     "bundle_export", "bundle_import",
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",
     "env_evict", "site_footprint",

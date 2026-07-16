@@ -68,7 +68,15 @@ w.run_forget(label="proj-9")           # reclaim retained bytes; the
 ```
 
 - Retain-vs-surface: retention is DURABILITY; rendering an output in a
-  UI right now is a foreground fetch — different operation.
+  UI right now is a foreground fetch — different operation. The
+  surface verbs: `run_file_stat(target, rel)` (on-disk vs swept —
+  inventory says what EXISTED, stat says what remains) and
+  `run_file_read(target, rel, max_bytes=)` (capped base64 preview from
+  the sandbox, live or dead; hard cap 8 MB — a preview channel, not a
+  transport). Fetching a big or in-place-retained file home is the
+  blessed COMPOSITION: `data_register(path, site=...) →
+  data_fetch(ref, dest)` — the register mints the lineage edge, so
+  fetch-on-open and re-entry are one mechanism.
 - Re-entry: a retained file feeding a NEW calculation gets identity
   lazily — `data_register(path)` carries `origin run:<target>/<path>`
   (provenance walks THROUGH it into the producing run);
