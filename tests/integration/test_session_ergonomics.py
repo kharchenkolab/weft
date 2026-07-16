@@ -62,3 +62,24 @@ def test_bespoke_installer_is_captured_and_carried(w, tmp_path):
     assert st["notes"] == ["kept until upstream 0.2 ships"]
     assert st["step_notes"]["0"].startswith("vendored")
     w.session_stop(sid)
+
+
+def test_fast_pypi_add_is_usable_and_snapshot_solves(w):
+    """The interactive hot path (aba note): a one-leaf pypi add lands
+    without re-solving the manifest, is immediately importable, and the
+    snapshot's full solve still mints honest identity from the recorded
+    dep."""
+    s = w.session_start({"name": "hot", "deps": {"conda": ["python =3.12",
+                                                           "pip"]}},
+                        "local")
+    sid = s["session_id"]
+    r = w.session_install(sid, pypi=["six"])
+    assert r.get("solved") is False, r        # no solve happened
+    assert r["method"] in ("uv", "pip")
+    assert r["verified_at"] == "snapshot"
+    assert w.session_exec(
+        sid, "python -c 'import six; print(six.__version__)'")["rc"] == 0
+    snap = w.session_snapshot(sid, name="hot-snap")
+    assert "env_id" in snap, snap             # the real solve happened here
+    assert snap["spec"]["deps"]["pypi"] == ["six"]
+    w.session_stop(sid)

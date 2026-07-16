@@ -144,6 +144,18 @@ Retained files that feed later calculations re-enter the data plane
 lazily: `data_register(path[, site=])` gives them identity plus a
 lineage origin so provenance walks through them into the producing run.
 
+### Session lifecycle
+
+Sessions track `last_used` (every session verb touches it);
+`list_sessions(site)` reports `idle_s` and `has_kernel` per session,
+and an `env_evict` blocked by active sessions lists the same facts per
+holder. A record whose directory is gone (crash leftover) is retired
+by `gc_orphans` — it could never serve an exec and would block evict
+forever. Site policy `session_idle_days` (default OFF) lets the gc
+sweep stop kernel-less sessions idle past the threshold; sessions with
+a running kernel are never touched, and without the policy nothing
+reaps automatically — `session_stop` remains the contract.
+
 ### Controller on a submit node
 
 Registering a `slurm` site without `host` (or with `transport:

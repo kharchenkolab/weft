@@ -123,6 +123,25 @@ def plan(weft, site: str | None = None) -> dict:
                                 "jobdir": k["jobdir"],
                                 "age_days": round(
                                     (now - k["last_used"]) / 86400, 1)})
+        # session_idle_days (default OFF): kernel-less active sessions
+        # idle past the grace are crash-leftover-shaped — hosts that mint
+        # sessions programmatically opt in; nobody's interactive session
+        # dies by default. A session with a RUNNING kernel is never idle.
+        session_idle = site_policy(row).get("session_idle_days")
+        idle_sessions = []
+        if session_idle is not None:
+            s_cutoff = now - float(session_idle) * 86400
+            running = {k.get("session_id")
+                       for k in weft.store.list_kernels(state="running")}
+            for s in weft.store.list_sessions(name):
+                last = s.get("last_used") or s["created_at"]
+                if s["state"] == "active" \
+                        and s["session_id"] not in running \
+                        and last < s_cutoff:
+                    idle_sessions.append({
+                        "session_id": s["session_id"],
+                        "base_env_id": s.get("base_env_id"),
+                        "idle_days": round((now - last) / 86400, 1)})
         out["sites"][name] = {
             "idle_days_policy": idle_days,
             "evictable_realizations": realizations,
@@ -131,6 +150,8 @@ def plan(weft, site: str | None = None) -> dict:
             "evictable_refs": stale_refs,
             "run_remains_days_policy": remains_days,
             "run_remains": remains,
+            "session_idle_days_policy": session_idle,
+            "idle_sessions": idle_sessions,
             "reclaimable_bytes": sum(r["bytes"] for r in stale_refs),
         }
     return out
@@ -160,6 +181,20 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
         return {"site": site, "evicted_bytes": evicted,
                 "note": "unpinned workspace refs removed; pinned provenance "
                         "content untouched"}
+    adapter = weft.adapters[site]
+    # idle sessions FIRST: they hold envs, so stopping them before the
+    # evict loop lets one sweep both reap the session and reclaim its
+    # base (otherwise the env waits for the next pass)
+    stopped_sessions = 0
+    for s in p.get("idle_sessions") or []:
+        try:
+            weft.sessions.stop(s["session_id"], adapter)
+            weft.store.emit("session.reaped", session=s["session_id"],
+                            site=site, why=f"idle {s['idle_days']}d past "
+                                           f"session_idle_days policy")
+            stopped_sessions += 1
+        except WeftError:
+            pass    # raced an explicit stop, or touched since the plan
     evicted_envs, skipped = 0, []
     for r in p["evictable_realizations"]:
         # through evict(), NOT a raw rm: the in-use and overlay-dependent
@@ -170,7 +205,6 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
             evicted_envs += 1
         except WeftError as e:
             skipped.append({"env_id": r["env_id"], "why": e.code})
-    adapter = weft.adapters[site]
     import shlex
     evicted_bytes = 0
     endpoint = adapter.transfer_endpoint()
@@ -196,12 +230,15 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
         swept_remains += 1
     weft.store.audit_log(None, "gc.sweep", site=site,
                          result=f"envs={evicted_envs} bytes={evicted_bytes}"
-                                f" remains={swept_remains}")
+                                f" remains={swept_remains}"
+                                f" sessions={stopped_sessions}")
     weft.store.emit("gc.swept", site=site, realizations=evicted_envs,
-                    bytes=evicted_bytes, run_remains=swept_remains)
+                    bytes=evicted_bytes, run_remains=swept_remains,
+                    idle_sessions=stopped_sessions)
     out = {"site": site, "evicted_realizations": evicted_envs,
            "evicted_bytes": evicted_bytes,
            "swept_run_remains": swept_remains,
+           "stopped_idle_sessions": stopped_sessions,
            "note": "evicted content re-stages/rebuilds automatically on "
                    "next use — correctness is unaffected"}
     if skipped:

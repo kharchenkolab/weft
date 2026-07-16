@@ -113,6 +113,10 @@ class SessionManager:
             raise WeftError(
                 "task.invalid", f"no active session {session_id}", stage="infra",
             )
+        if s["state"] == "active":
+            # every session verb passes through here — last_used is the
+            # activity fact idle policies and evict hints reason from
+            self.store.touch_session(session_id)
         return s
 
     def exec(self, session_id: str, adapter: SiteAdapter, cmd: str) -> dict:
@@ -130,11 +134,37 @@ class SessionManager:
         return {"rc": r.rc, "stdout": r.out[-8000:], "stderr": r.err[-4000:]}
 
     def install(self, session_id: str, adapter: SiteAdapter,
-                conda: list[str] | None = None, pypi: list[str] | None = None) -> dict:
+                conda: list[str] | None = None,
+                pypi: list[str] | None = None, fast: bool = True) -> dict:
+        """Add packages to the session. pypi-only requests take a FAST
+        PATH by default: a direct pip/uv install into the session prefix
+        — no re-solve of the whole manifest (which dominates a one-leaf
+        add on a big base). The package is still recorded as a DEP, so
+        the snapshot's full re-solve remains the identity mint and the
+        conflict check; the session itself is unhashed scratch by
+        contract, so in-prefix divergence is tolerable until then.
+        fast=False (or any conda dep) keeps solve-at-add; a failed fast
+        install falls through to the full path automatically."""
         s = self._get(session_id)
         conda, pypi = list(conda or []), list(pypi or [])
         if not conda and not pypi:
             raise WeftError("task.invalid", "nothing to install", stage="realize")
+        fallback_tail = None
+        if fast and pypi and not conda:
+            out = self._fast_pypi(s, adapter, pypi)
+            if out is not None and "error" not in out:
+                self.store.session_add_deps(session_id, [], pypi)
+                self.store.emit("session.installed", session=session_id,
+                                conda=[], pypi=pypi, fast=True)
+                return {"installed": {"conda": [], "pypi": pypi},
+                        "session_id": session_id, "solved": False,
+                        "method": out["method"],
+                        "verified_at": "snapshot",
+                        "note": "installed without a solve — the "
+                                "snapshot's full re-solve is the "
+                                "conflict check; pass fast=False to "
+                                "solve at add time"}
+            fallback_tail = (out or {}).get("detail")
         manifest = adapter.path(f"{s['location']}/pixi.toml")
         parts = []
         if conda:
@@ -159,8 +189,40 @@ class SessionManager:
         self.store.session_add_deps(session_id, conda, pypi)
         self.store.emit("session.installed", session=session_id,
                         conda=conda, pypi=pypi)
-        return {"installed": {"conda": conda, "pypi": pypi},
-                "session_id": session_id}
+        out = {"installed": {"conda": conda, "pypi": pypi},
+               "session_id": session_id}
+        if fallback_tail:
+            out["fast_fallback"] = ("direct install failed; solved the "
+                                    "full manifest instead: "
+                                    + fallback_tail[-300:])
+        return out
+
+    def _fast_pypi(self, s: dict, adapter: SiteAdapter,
+                   pypi: list[str]) -> dict | None:
+        """Direct install into the session prefix — uv when the site has
+        it (much faster), else the prefix's own pip. Returns None when
+        neither tool exists (silent fall-through to the solve path);
+        {"error", "detail"} when the install itself failed (reported on
+        the fallback result — a real conflict is worth seeing)."""
+        py = adapter.path(
+            f"{s['location']}/.pixi/envs/default/bin/python")
+        pkgs = " ".join(shlex.quote(_pixi_spec(p)) for p in pypi)
+        r = adapter.run_cmd(
+            f"if command -v uv >/dev/null 2>&1; then echo '#method uv'; "
+            f"uv pip install --python {shlex.quote(py)} {pkgs}; "
+            f"elif {shlex.quote(py)} -m pip --version >/dev/null 2>&1; "
+            f"then echo '#method pip'; "
+            f"{shlex.quote(py)} -m pip install --quiet {pkgs}; "
+            f"else echo '#method none'; exit 87; fi",
+            timeout=600)
+        method = "uv" if "#method uv" in r.out else \
+            "pip" if "#method pip" in r.out else None
+        if method is None:
+            return None                    # no tool: not an error
+        if r.rc != 0:
+            return {"error": "env.solve_conflict",
+                    "detail": (r.err or r.out)[-1500:]}
+        return {"method": method}
 
     def run_installer(self, session_id: str, adapter: SiteAdapter, cmd: str,
                       note: str = "", source: str | None = None) -> dict:

@@ -65,9 +65,19 @@ def evict(weft, env_id: str, site: str, archive: bool = False,
                 and (j.get("task") or {}).get("env") == env_id:
             in_use.append({"kind": "job", "id": j["job_id"],
                            "state": j["state"]})
+    now = time.time()
+    running_sessions = {k.get("session_id")
+                        for k in weft.store.list_kernels(state="running")}
     for s in weft.store.list_sessions(site):
         if s["state"] == "active" and s.get("base_env_id") == env_id:
-            in_use.append({"kind": "session", "id": s["session_id"]})
+            # idle_s + has_kernel: the facts a holder-stopping decision
+            # needs (a kernel-less session idle for days reads very
+            # differently from one that ran a block a minute ago)
+            in_use.append({"kind": "session", "id": s["session_id"],
+                           "idle_s": round(now - (s.get("last_used")
+                                                  or s["created_at"])),
+                           "has_kernel": s["session_id"]
+                           in running_sessions})
     for k in weft.store.list_kernels(state="running"):
         if k.get("env_id") == env_id and k.get("site") == site:
             in_use.append({"kind": "kernel", "id": k["kernel_id"]})
@@ -436,13 +446,27 @@ def footprint(weft, site: str) -> dict:
 
 def gc_orphans(weft, site: str, confirm: bool = False) -> dict:
     """Directories weft left behind that no record claims — crashed session
-    clones, stale kernel sandboxes, evicted-but-not-removed env dirs."""
+    clones, stale kernel sandboxes, evicted-but-not-removed env dirs.
+    Also the INVERSE: an "active" session record whose directory is gone
+    is factually dead (it can never serve an exec again) yet blocks
+    env_evict forever — those records are retired to match reality in
+    both modes (record truth, not deletion; no bytes are touched)."""
+    adapter = weft.adapters[site]
+    reaped = []
+    for s in weft.store.list_sessions(site):
+        if s["state"] == "active" \
+                and not adapter.file_exists(s["location"]):
+            weft.store.set_session_state(s["session_id"], "stopped")
+            weft.store.emit("session.reaped", session=s["session_id"],
+                            site=site, why="directory gone (crash "
+                                           "leftover or manual rm)")
+            reaped.append(s["session_id"])
     fp = footprint(weft, site)
     if not confirm:
         return {"site": site, "orphans": fp["orphans"],
                 "orphan_bytes": fp["orphan_bytes"],
+                "dead_session_records": reaped,
                 "note": "pass confirm=true to remove these"}
-    adapter = weft.adapters[site]
     freed = 0
     for o in fp["orphans"]:
         adapter.run_cmd(
@@ -452,4 +476,5 @@ def gc_orphans(weft, site: str, confirm: bool = False) -> dict:
                          result=f"freed={freed}")
     weft.store.emit("gc.orphans", site=site, freed_bytes=freed,
                     count=len(fp["orphans"]))
-    return {"site": site, "removed": len(fp["orphans"]), "freed_bytes": freed}
+    return {"site": site, "removed": len(fp["orphans"]),
+            "freed_bytes": freed, "dead_session_records": reaped}

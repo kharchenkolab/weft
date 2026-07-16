@@ -104,6 +104,18 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   variant forced: `pytorch-gpu` metapackage or `"pytorch 2.* *cuda*"`
   build selector. Apple Silicon needs nothing (MPS is in default builds).
 - **Sessions (interactive):** `session_start(spec_or_env_id, site)` → a
+  scratch prefix.
+  - pypi-only `session_install` is FAST by default: direct uv/pip into
+    the prefix, no manifest re-solve (which dominates a one-leaf add on
+    big bases). The dep is still recorded — the snapshot's full solve
+    stays the identity mint and conflict check. `fast=False` (or any
+    conda dep) solves at add time; a failed direct install falls
+    through to the solve with the reason in `fast_fallback`.
+  - `list_sessions(site)` shows holders with `idle_s`/`has_kernel` —
+    the facts for stop-or-keep (active sessions block `env_evict`; the
+    refusal lists the same fields). Crash leftovers (record active,
+    directory gone) are retired by `gc_orphans`; the OPT-IN site policy
+    `session_idle_days` lets the sweep stop kernel-less idle sessions.
   mutable scratch clone (one call: it realizes the base for you);
   `session_exec`, `session_install(conda=[...])`,
   `session_run_installer(cmd, note=...)`; when it stabilizes,

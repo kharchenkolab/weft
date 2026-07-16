@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS sessions(
 
 _SESSION_MIGRATIONS = [
     ("installers", "ALTER TABLE sessions ADD COLUMN installers TEXT"),
+    ("last_used", "ALTER TABLE sessions ADD COLUMN last_used REAL"),
 ]
 
 
@@ -770,14 +771,15 @@ class Store:
 
     def put_session(self, session_id: str, base_env_id: str, site: str,
                     location: str) -> None:
+        now = time.time()
         self._write(
             # column-explicit: migrations add columns, and a positional
             # INSERT would break the moment one lands
             "INSERT INTO sessions(session_id, base_env_id, site, location,"
-            " added_conda, added_pypi, state, created_at)"
-            " VALUES(?,?,?,?,?,?,?,?)",
+            " added_conda, added_pypi, state, created_at, last_used)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
             (session_id, base_env_id, site, location, "[]", "[]",
-             "active", time.time()),
+             "active", now, now),
         )
 
     def get_session(self, session_id: str) -> dict | None:
@@ -793,7 +795,16 @@ class Store:
             "installers": json.loads(r["installers"]) if "installers" in keys
             and r["installers"] else [],
             "state": r["state"],
+            "created_at": r["created_at"],
+            # pre-migration rows have no last_used: creation is the only
+            # activity fact on record — never invent a fresher one
+            "last_used": (r["last_used"] if "last_used" in keys
+                          and r["last_used"] else r["created_at"]),
         }
+
+    def touch_session(self, session_id: str) -> None:
+        self._write("UPDATE sessions SET last_used=? WHERE session_id=?",
+                    (time.time(), session_id))
 
     def list_sessions(self, site: str | None = None) -> list[dict]:
         q, vals = "SELECT session_id FROM sessions", ()

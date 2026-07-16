@@ -928,11 +928,18 @@ class Weft:
         return self.sessions.exec(session_id, self._session_adapter(session_id), cmd)
 
     def session_install(self, session_id: str, conda: list[str] | None = None,
-                        pypi: list[str] | None = None) -> dict:
-        """Add packages to the session (fast: the site's package cache is
-        warm). Captured, so a snapshot carries them into the spec."""
+                        pypi: list[str] | None = None,
+                        fast: bool = True) -> dict:
+        """Add packages to the session. Captured, so a snapshot carries
+        them into the spec. pypi-only adds skip the full manifest
+        re-solve by default (direct uv/pip into the scratch prefix —
+        the solve dominates a one-leaf add on big bases); the snapshot's
+        re-solve stays the identity mint and conflict check. fast=False
+        (or any conda dep) solves at add time; a failed direct install
+        falls through to the solve automatically."""
         return self.sessions.install(
-            session_id, self._session_adapter(session_id), conda, pypi)
+            session_id, self._session_adapter(session_id), conda, pypi,
+            fast=fast)
 
     def session_run_installer(self, session_id: str, cmd: str,
                               note: str = "", source: str | None = None) -> dict:
@@ -958,6 +965,35 @@ class Weft:
 
     def session_stop(self, session_id: str) -> dict:
         return self.sessions.stop(session_id, self._session_adapter(session_id))
+
+    def list_sessions(self, site: str | None = None,
+                      state: str | None = "active") -> list[dict]:
+        """Sessions with the facts a stop-or-keep decision needs:
+        idle_s since the last session verb touched it, and whether a
+        RUNNING kernel is attached. state=None lists stopped ones too.
+        (Active sessions hold their base env against env_evict — the
+        refusal's in_use list carries these same fields.)"""
+        import time as _t
+        now = _t.time()
+        running = {k.get("session_id")
+                   for k in self.store.list_kernels(state="running")}
+        out = []
+        for s in self.store.list_sessions(site):
+            if state and s["state"] != state:
+                continue
+            out.append({
+                "session_id": s["session_id"], "site": s["site"],
+                "base_env_id": s.get("base_env_id"),
+                "state": s["state"],
+                "added": {"conda": s["added_conda"],
+                          "pypi": s["added_pypi"]},
+                "installers": len(s.get("installers") or []),
+                "created_at": s["created_at"],
+                "idle_s": round(now - (s.get("last_used")
+                                       or s["created_at"])),
+                "has_kernel": s["session_id"] in running,
+            })
+        return sorted(out, key=lambda r: r["idle_s"])
 
     # -- kernels (persistent interactive interpreters) --------------------------
 
@@ -1761,7 +1797,7 @@ PUBLIC_TOOLS = [
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",
     "env_evict", "site_footprint",
     "session_start", "session_exec", "session_install", "session_snapshot",
-    "session_run_installer", "session_stop",
+    "session_run_installer", "session_stop", "list_sessions",
     "kernel_start", "kernel_exec", "kernel_poll", "kernel_peek",
     "kernel_status",
     "kernel_transcript", "kernel_interrupt", "kernel_restart", "kernel_stop",
