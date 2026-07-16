@@ -59,6 +59,40 @@ def test_pin_before_file_exists(w):
         == "model-object"
 
 
+def test_directory_literal_pins_and_captures_as_a_unit(w):
+    """A bare directory name (a .zarr-style store) is a first-class
+    retention unit: the pin selects the whole subtree, the capture
+    reconstructs it, and NO pin_missing fires for the literal."""
+    k = w.kernel_start("local", "python")["kernel_id"]
+    pin = w.run_retain(k, include=["out/embedding.zarr"], label="zarr")
+    assert pin["state"] == "pinned-pending" and pin["matched_now"] == 0
+    r = w.kernel_exec(
+        k, "import os\n"
+           "os.makedirs('out/embedding.zarr/g1', exist_ok=True)\n"
+           "open('out/embedding.zarr/.zattrs', 'w').write('{}')\n"
+           "open('out/embedding.zarr/g1/.zarray', 'w').write('{}')\n"
+           "open('out/embedding.zarr/g1/0.0', 'w').write('chunk')\n"
+           "open('unrelated.txt', 'w').write('no')", timeout=60)
+    assert r["rc"] == 0
+    w.kernel_stop(k)
+    row = w.retained_runs(label="zarr")[0]
+    assert row["state"] == "done"
+    dest = Path(row["location"])
+    assert (dest / "out/embedding.zarr/g1/0.0").read_text() == "chunk"
+    assert (dest / "out/embedding.zarr/.zattrs").exists()
+    assert not (dest / "unrelated.txt").exists()
+    # sidecar enumerates the directory's files — the viewer's manifest
+    sidecar = json.loads((dest / ".weft-run.json").read_text())
+    zarr_files = {f["path"] for f in sidecar["files"]}
+    assert zarr_files == {"out/embedding.zarr/.zattrs",
+                          "out/embedding.zarr/g1/.zarray",
+                          "out/embedding.zarr/g1/0.0"}
+    # the literal was satisfied by its children: no false pin_missing
+    ev = [e for e in w.events_poll(0, 500)["events"]
+          if e["kind"] == "retain.pin_missing"]
+    assert not ev, ev
+
+
 def test_pin_never_materializes_is_honest(w):
     k = w.kernel_start("local", "python")["kernel_id"]
     w.run_retain(k, include=["never.csv"])

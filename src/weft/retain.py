@@ -299,9 +299,14 @@ class RetainManager:
             include, exclude = sel.get("include"), sel.get("exclude")
             selected = self._select(self._scan(adapter, jobdir_rel),
                                     include, exclude)
+            # a literal include can be a FILE or a DIRECTORY-as-a-unit
+            # (e.g. a .zarr): present when any selected path IS it or
+            # lives under it — else a captured directory would still
+            # report pin_missing (found by the aba viewer questions)
             missing = [p for p in (include or [])
                        if not any(ch in p for ch in "*?[")
-                       and not any(e["path"] == p for e in selected)]
+                       and not any(e["path"] == p or e["path"].startswith(
+                           p.rstrip("/") + "/") for e in selected)]
             if missing:
                 self.store.emit("retain.pin_missing", target=target,
                                 paths=missing,
