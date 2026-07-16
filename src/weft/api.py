@@ -678,17 +678,23 @@ class Weft:
     # -- published envs (institutional read-only trees) ---------------------
 
     def env_publish(self, env_id: str, site: str, tree: str, name: str,
-                    version: str, notes: str = "",
-                    latest: bool = True) -> dict:
+                    version: str, notes: str = "", latest: bool = True,
+                    staging: str | None = None) -> dict:
         """Build env_id as a squashfs image at {tree}/envs/<hash> and
         point catalog[name][version] at it — the admin half of ro_roots.
         The tree must live OUTSIDE the weft root; the catalog stores the
-        spec+lock so consumers adopt by NAME with no solving. Publish is
-        a rebuild at the destination (conda envs bake absolute paths);
-        the site package cache makes it cheap after a test build."""
+        spec+lock so consumers adopt by NAME with no solving. Paths are
+        baked FOR the tree, but on userns sites the file churn lands in
+        a staging dir (bind-mounted at the tree path per build command)
+        and the tree receives one sequential image write — key when the
+        tree is slow netfs. `staging`: 'auto' (default; under the site
+        root), an absolute dir (e.g. node-local scratch), or 'none' for
+        the classic build-at-destination; site config `publish_staging`
+        sets the site's default. The result's `staging` field says what
+        actually happened."""
         from . import publish as _p
         return _p.publish(self, env_id, site, tree, name, version,
-                          notes=notes, latest=latest)
+                          notes=notes, latest=latest, staging=staging)
 
     def env_adopt(self, site: str, tree: str, name: str,
                   version: str = "latest") -> dict:

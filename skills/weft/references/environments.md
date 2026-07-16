@@ -57,6 +57,13 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   (adopted-ro/ready/building/failed/missing), `last_used`.
 - Variant publishes (e.g. an old-glibc build of the same release) pass
   `latest=False` so they don't hijack the default pointer.
+- On userns sites the build churn lands in a STAGING dir (bind-mounted
+  at the tree path per build command — baked paths stay the tree's);
+  the tree gets one sequential image write. Vital for slow netfs trees.
+  Levers: `env_publish(..., staging="auto"|"/fast/dir"|"none")`, site
+  config `publish_staging`. The result's `staging` field says what
+  actually happened (a live probe gates; no userns → honest fallback
+  to build-at-destination).
 
 - Adoption reads the catalog's stored lock — NO solving (re-solving
   decays as the index moves and would silently rebuild privately).

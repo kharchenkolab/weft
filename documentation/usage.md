@@ -167,13 +167,27 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07")   # pointer only;
                                                     # purge=True deletes
 ```
 
-The tree must live OUTSIDE any weft root; publish is a rebuild at the
-destination (baked absolute paths) and is audited as "user". Versions
-are catalog pointers over immutable content-addressed dirs — upgrades
-publish alongside and flip `latest`, never edit in place. The base is
-filesystem-read-only for consumers (EROFS), adopted in place via
-ro_roots, mounted per-job in private namespaces where userns exists —
-and `extends_env` overlays stack on top exactly as on private parents.
+The tree must live OUTSIDE any weft root; publish is a rebuild FOR the
+destination path (baked absolute paths) and is audited as "user".
+Versions are catalog pointers over immutable content-addressed dirs —
+upgrades publish alongside and flip `latest`, never edit in place. The
+base is filesystem-read-only for consumers (EROFS), adopted in place
+via ro_roots, mounted per-job in private namespaces where userns
+exists — and `extends_env` overlays stack on top exactly as on private
+parents.
+
+On userns sites the build's file churn does NOT hit the tree: the
+prefix materializes in a staging dir bind-mounted at the tree path
+inside each build command's namespace, and the tree receives one
+sequential `image.sqfs` write — decisive when the tree is slow netfs
+(NFS metadata ops are the pathology; ~10^4 small files become one
+stream). `staging=` on `env_publish` ('auto' default → under the site
+root; an absolute dir, e.g. node-local or parallel scratch; 'none' for
+the classic build-at-destination), or site config `publish_staging` for
+the site's default. A live probe gates it — where the bind cannot work
+the build falls back to the destination and says so (`staging` field in
+the result; `realize.staged` / `realize.staging_skipped` events).
+Consumers are unaffected either way: same image, same mount path.
 
 ### Data between sites
 

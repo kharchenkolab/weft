@@ -395,6 +395,75 @@ def _ns_wrap_cmd(script: str) -> str:
     return f"unshare -rm sh -c {shlex.quote(inner)}"
 
 
+def _bind_wrap_cmd(script: str, staging: str, mount: str) -> str:
+    """Like _ns_wrap_cmd, but with `staging` bind-mounted at `mount`
+    first: the command sees (and writes) the prefix at the path that
+    gets baked into shebangs/RPATHs while the bytes land on fast
+    storage. Unprivileged — the bind lives and dies inside the
+    throwaway userns; realpath through a bind is the mount path, so
+    nothing can leak the staging location into the artifact (a symlink
+    could)."""
+    inner = (f"if command -v bash >/dev/null 2>&1; then "
+             f"exec bash -c {shlex.quote(script)}; "
+             f"else exec sh -c {shlex.quote(script)}; fi")
+    s, m = shlex.quote(staging), shlex.quote(mount)
+    pre = (f"mount --make-rprivate / 2>/dev/null; "
+           f"mount --bind {s} {m} 2>/dev/null || mount -o bind {s} {m} || "
+           f"{{ echo 'weft: staging bind-mount failed in userns' >&2; "
+           f"exit 97; }}; ")
+    return f"unshare -rm sh -c {shlex.quote(pre + inner)}"
+
+
+class _StagedBuild:
+    """Adapter proxy for bind-staged squashfs builds (netfs trees, the
+    weft-ui ask): every command runs inside a throwaway userns with the
+    staging dir bind-mounted at the canonical mount path — so the paths
+    baked into the prefix stay the published tree's — and every file
+    helper is redirected so the BYTES land in staging. The slow tree
+    never sees the small-file churn, only the finished image."""
+
+    def __init__(self, adapter: SiteAdapter, mount: str, staging: str):
+        self._a = adapter
+        self._mount = mount.rstrip("/")
+        self._staging = staging.rstrip("/")
+
+    def _twin(self, p: str) -> str | None:
+        if p == self._mount or p.startswith(self._mount + "/"):
+            return self._staging + p[len(self._mount):]
+        return None
+
+    def _redirect(self, rel: str) -> str:
+        return self._twin(self._a.path(rel)) or rel
+
+    def run_cmd(self, script: str, *, timeout: float = 120.0):
+        return self._a.run_cmd(
+            _bind_wrap_cmd(script, self._staging, self._mount),
+            timeout=timeout)
+
+    def run_activated(self, script: str, *, timeout: float = 120.0):
+        # the bind wrap's inner shell already prefers bash
+        return self.run_cmd(script, timeout=timeout)
+
+    def write_file(self, rel: str, data: bytes, mode: int = 0o644) -> None:
+        return self._a.write_file(self._redirect(rel), data, mode=mode)
+
+    def read_file(self, rel: str, max_bytes: int | None = None) -> bytes:
+        return self._a.read_file(self._redirect(rel), max_bytes=max_bytes)
+
+    def file_exists(self, rel: str) -> bool:
+        return self._a.file_exists(self._redirect(rel))
+
+    def shim(self, argv: list[str], *, timeout: float = 60.0):
+        # adapters exec the shim OUTSIDE any namespace: rewrite path
+        # arguments under the mount to their staging twins (the shim's
+        # file placement bakes no paths, so this is transparent)
+        return self._a.shim([self._twin(a) or a for a in argv],
+                            timeout=timeout)
+
+    def __getattr__(self, name):
+        return getattr(self._a, name)
+
+
 def _marker(adapter: SiteAdapter, rel: str) -> dict:
     """The .weft-ready marker's contents, {} if unreadable."""
     import json as _json
@@ -437,9 +506,13 @@ def _virtual_pkg_overrides(env_row: dict) -> str:
 
 def _build_prefix(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
-    modules: list[str], modules_init: str = "",
+    modules: list[str], modules_init: str = "", fresh: bool = True,
 ) -> None:
-    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))}")
+    # fresh=False: the caller already made the wipe-or-resume decision
+    # (squashfs resume preserves partial content — this rm was silently
+    # repaying resumed source builds until it learned to stand down)
+    if fresh:
+        adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))}")
     adapter.write_file(f"{rel}/pixi.toml", env_row["manifest"].encode())
     adapter.write_file(f"{rel}/pixi.lock", env_row["native_lock"].encode())
     manifest_path = adapter.path(f"{rel}/pixi.toml")
@@ -1002,7 +1075,7 @@ def _spot_check_and_mark(
 def _build_packed(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str, caps: dict | None,
-    pack_tools: dict,
+    pack_tools: dict, fresh: bool = True,
 ) -> None:
     """Pack locally (pixi-pack: locked packages + offline installer),
     ship the archive as an ordinary CAS blob, unpack-verify on site.
@@ -1076,7 +1149,9 @@ def _build_packed(
 
     site_tar = f"{endpoint['cas_root']}/{digest[:2]}/{digest}"
     dest = adapter.path(rel)
-    adapter.run_cmd(f"rm -rf {shlex.quote(dest)} && mkdir -p {shlex.quote(dest)}")
+    # fresh=False: wipe-or-resume was decided upstream (squashfs resume)
+    adapter.run_cmd((f"rm -rf {shlex.quote(dest)} && " if fresh else "")
+                    + f"mkdir -p {shlex.quote(dest)}")
     unpack = adapter.run_cmd(
         f"cd {shlex.quote(dest)} && "
         f"{shlex.quote(adapter.path('bin/pixi-unpack'))} "
@@ -1107,7 +1182,7 @@ def _build_packed(
 def _build_squashfs(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str, caps: dict | None,
-    pack_tools: dict, emit,
+    pack_tools: dict, emit, staging_rel: str | None = None,
 ) -> dict:
     """One mounted image instead of ~100k files on the shared FS.
 
@@ -1126,6 +1201,14 @@ def _build_squashfs(
     lazy at activation (direct mode) or namespace-scoped per job (userns
     mode; the runner wraps the job — misc/sqaush.md, verified on
     cbe.next 2026-07-14).
+
+    `staging_rel` decouples build STORAGE from build PATH (publish to a
+    slow netfs tree): the prefix materializes in the staging dir, which
+    every build command sees bind-mounted at mnt/ inside its userns —
+    baked paths stay the tree's, the small-file churn stays on fast
+    storage, and the tree receives one sequential image write. Gated by
+    a live probe; a site where the bind cannot work falls back to
+    building at the destination, with the reason emitted and returned.
     """
     from .capability import compute_view
     sq = compute_view(caps or {}).get("squashfs") or {}
@@ -1138,7 +1221,30 @@ def _build_squashfs(
             hints={"squashfs": sq})
     inner = f"{rel}/mnt"
     internet = bool(compute_view(caps or {}).get("internet"))
-    # resume, don't repay: a killed/failed build leaves content at mnt/;
+    build = adapter          # what the content stages talk to
+    content = inner          # where the bytes actually are
+    staging_note = None
+    if staging_rel:
+        mount_abs, staging_abs = adapter.path(inner), \
+            adapter.path(staging_rel)
+        adapter.run_cmd(f"mkdir -p {shlex.quote(staging_abs)} "
+                        f"{shlex.quote(mount_abs)}", timeout=300)
+        # capabilities can be stale and container/kernel policy varies:
+        # the gate is a live probe of the exact harness, not a belief
+        probe = adapter.run_cmd(
+            _bind_wrap_cmd("true", staging_abs, mount_abs), timeout=120)
+        if probe.rc == 0:
+            build = _StagedBuild(adapter, mount_abs, staging_abs)
+            content = staging_rel
+            emit("realize.staged", env_id=env_id, site=adapter.name,
+                 staging=staging_abs, mount=mount_abs)
+        else:
+            staging_note = ("bind probe failed: "
+                            + ((probe.err or probe.out) or "")[-240:])
+            emit("realize.staging_skipped", env_id=env_id,
+                 site=adapter.name, reason=staging_note)
+            staging_rel = None
+    # resume, don't repay: a killed/failed build leaves content behind;
     # when its pixi.lock is byte-identical to THIS env's lock the content
     # can only be a partial build of the same identity — every stage
     # below is incremental (pixi revalidates, layer installers skip
@@ -1148,11 +1254,11 @@ def _build_squashfs(
     import hashlib as _hl
     want = _hl.sha256(env_row["native_lock"].encode()).hexdigest()
     have = ""
-    if adapter.file_exists(f"{inner}/pixi.lock"):
+    if adapter.file_exists(f"{content}/pixi.lock"):
         r0 = adapter.run_cmd(
-            f"sha256sum {shlex.quote(adapter.path(inner))}/pixi.lock "
+            f"sha256sum {shlex.quote(adapter.path(content))}/pixi.lock "
             f"2>/dev/null || shasum -a 256 "
-            f"{shlex.quote(adapter.path(inner))}/pixi.lock 2>/dev/null",
+            f"{shlex.quote(adapter.path(content))}/pixi.lock 2>/dev/null",
             timeout=300)
         if r0.rc != 0 or not (r0.out or "").strip():
             # unknown ≠ mismatch: a probe that CANNOT verify must never
@@ -1161,14 +1267,14 @@ def _build_squashfs(
                 "env.realize_failed",
                 "existing build content found but its lock cannot be "
                 "verified for resume", stage="realize", retryable=True,
-                hints={"location": rel,
+                hints={"location": content,
                        "suggestion": "retry (transient fs/transport "
                                      "error), or remove the directory "
                                      "manually for a clean slate"})
         have = r0.out.split()[0]
     if have == want:
         emit("realize.resumed", env_id=env_id, site=adapter.name,
-             location=rel)
+             location=content)
     else:
         # big trees on parallel filesystems take minutes to unlink — a
         # timeout mid-rm would leave a half-dead tree AND keep deleting
@@ -1176,26 +1282,33 @@ def _build_squashfs(
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
                         f"mkdir -p {shlex.quote(adapter.path(rel))}",
                         timeout=1800)
+        if staging_rel:
+            # both sides start clean; mnt/ comes back as the mountpoint
+            adapter.run_cmd(
+                f"rm -rf {shlex.quote(adapter.path(staging_rel))} && "
+                f"mkdir -p {shlex.quote(adapter.path(staging_rel))} "
+                f"{shlex.quote(adapter.path(inner))}", timeout=1800)
     # content: modules stay OUT of the image (module preludes are host
     # state, run before activation — the outer script carries them)
     if internet:
-        _build_prefix(env_id, env_row, adapter, inner, [], modules_init)
+        _build_prefix(env_id, env_row, build, inner, [], modules_init,
+                      fresh=False)
     else:
-        _build_packed(env_id, env_row, adapter, inner, [], modules_init,
-                      caps, pack_tools)
-    _realize_layers(env_id, env_row, adapter, inner,
+        _build_packed(env_id, env_row, build, inner, [], modules_init,
+                      caps, pack_tools, fresh=False)
+    _realize_layers(env_id, env_row, build, inner,
                     pack_tools.get("solvers") or {}, emit,
                     offline=not internet, pack_tools=pack_tools)
-    _stage_post_install_inputs(env_row, adapter, inner, pack_tools)
-    _run_post_install(env_row, adapter, inner)
+    _stage_post_install_inputs(env_row, build, inner, pack_tools)
+    _run_post_install(env_row, build, inner)
 
     img = adapter.path(f"{rel}/image.sqfs")
     t0 = __import__("time").time()
     emit("realize.squashfs", env_id=env_id, site=adapter.name)
     r = adapter.run_cmd(
-        f"{shlex.quote(mk)} {shlex.quote(adapter.path(inner))} "
+        f"{shlex.quote(mk)} {shlex.quote(adapter.path(content))} "
         f"{shlex.quote(img)} -comp zstd -noappend -no-progress 2>&1 || "
-        f"{shlex.quote(mk)} {shlex.quote(adapter.path(inner))} "
+        f"{shlex.quote(mk)} {shlex.quote(adapter.path(content))} "
         f"{shlex.quote(img)} -noappend -no-progress 2>&1",
         timeout=3600)
     if r.rc != 0:
@@ -1213,7 +1326,7 @@ def _build_squashfs(
     # the tree was scaffolding; the image is the realization (unlinking
     # ~10^5 files on a parallel FS takes minutes — same lesson as the
     # resume-path rm: a 120s default timeout abandons a half-running rm)
-    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(inner))} && "
+    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(content))} && "
                     f"mkdir -p {shlex.quote(adapter.path(inner))}",
                     timeout=1800)
 
@@ -1221,7 +1334,12 @@ def _build_squashfs(
     emit("realize.squashfs.done", env_id=env_id, site=adapter.name,
          image_bytes=image_bytes,
          elapsed_s=round(__import__("time").time() - t0, 1))
-    return {"image_sha256": image_sha256, "image_bytes": image_bytes}
+    out = {"image_sha256": image_sha256, "image_bytes": image_bytes}
+    if staging_rel:
+        out["staging"] = {"used": True, "dir": adapter.path(staging_rel)}
+    elif staging_note:
+        out["staging"] = {"used": False, "why": staging_note}
+    return out
 
 
 def _write_squashfs_activation(adapter: SiteAdapter, rel: str,

@@ -97,8 +97,41 @@ def _validate(weft, site: str, tree: str, name: str, version: str) -> tuple:
     return adapter, t
 
 
+def _staging_plan(caps: dict, site_row: dict, staging: str | None,
+                  env_hash: str, tree: str) -> tuple[str | None, str | None]:
+    """Where should the build's small-file churn land? Build STORAGE is
+    decoupled from build PATH (the prefix is bind-mounted at the tree
+    path inside each build command's userns), so a slow netfs tree
+    receives one sequential image write instead of ~10^4 small-file ops.
+    Returns (staging_rel | None, why_not | None). Precedence: call arg >
+    site config `publish_staging` > 'auto' (under the site root — the
+    filesystem regular realizations already build on). 'none' keeps the
+    classic build-at-destination."""
+    import hashlib
+    from .capability import compute_view
+    choice = str(staging
+                 or (site_row.get("config") or {}).get("publish_staging")
+                 or "auto")
+    if choice.lower() in ("none", "off", "destination"):
+        return None, "staging disabled ('none')"
+    if not (compute_view(caps or {}).get("squashfs") or {}).get("userns"):
+        return None, ("no user namespaces on this site — bind-staging "
+                      "needs unshare -rm; building at the destination")
+    sub = (f"{env_hash[:24]}-"
+           f"{hashlib.sha256(tree.encode()).hexdigest()[:8]}")
+    if choice == "auto":
+        return f"stage/publish/{sub}", None
+    if not choice.startswith("/"):
+        raise WeftError(
+            "task.invalid",
+            f"staging must be an absolute path, 'auto' or 'none' "
+            f"(got {choice!r})", stage="infra")
+    return f"{choice.rstrip('/')}/{sub}", None
+
+
 def publish(weft, env_id: str, site: str, tree: str, name: str,
-            version: str, notes: str = "", latest: bool = True) -> dict:
+            version: str, notes: str = "", latest: bool = True,
+            staging: str | None = None) -> dict:
     """Build `env_id` as a squashfs realization AT {tree}/envs/<hash> and
     point catalog[name][version] at it. Idempotent per (env, dest)."""
     from .capability import squashfs_mode
@@ -141,11 +174,13 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
         meta = {"image_sha256": already.get("image_sha256"),
                 "image_bytes": already.get("image_bytes")}
     else:
+        staging_rel, staging_why = _staging_plan(
+            caps, site_row, staging, env_id.rsplit(":", 1)[-1], tree)
         t0 = time.time()
         try:
             meta = _build_squashfs(env_id, env_row, adapter, rel, modules,
                                    modules_init, caps, pack_tools,
-                                   weft.store.emit)
+                                   weft.store.emit, staging_rel=staging_rel)
         except WeftError as e:
             # publishes have no realization row — leave a durable trace
             weft.store.emit("env.publish.failed", env_id=env_id, site=site,
@@ -165,6 +200,9 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
             adapter.run_cmd(f"fusermount -u {mnt} 2>/dev/null || "
                             f"fusermount3 -u {mnt} 2>/dev/null; true")
         meta["build_s"] = round(time.time() - t0, 1)
+        if staging_why and "staging" not in meta:
+            # honest numbers: say WHERE the churn landed and why
+            meta["staging"] = {"used": False, "why": staging_why}
 
     # lock sidecar: everything a consumer needs to adopt WITHOUT solving
     lock_rel = f"{tree}/locks/{env_id.rsplit(':', 1)[-1]}.json"

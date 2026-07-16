@@ -58,12 +58,25 @@ def lab(tmp_path_factory, pixi_bin, sshd_site, linux_platforms):
     r = pub.env_publish(py_base["env_id"], "beam", TREE,
                         name="lab-py", version="2026.07")
     assert r["image_bytes"] > 0, r
+    # the fixture container has userns (SYS_ADMIN): lab-py builds via
+    # BIND STAGING — every downstream test (adopt, run, extend, kernel)
+    # is then proof that a staged-built image byte-works at the tree path
+    assert r["staging"]["used"] is True, r
+    a = pub.adapters["beam"]
+    assert r["staging"]["dir"].startswith("/home/physicist/.weft-pub/")
+    # scaffolding is gone; the tree kept only image + sidecars
+    assert not a.file_exists(r["staging"]["dir"])
+    h = py_base["env_id"].rsplit(":", 1)[-1]
+    mnt_ls = a.run_cmd(f"ls -A {TREE}/envs/{h}/mnt").out.strip()
+    assert mnt_ls == "", f"tree mountpoint not empty: {mnt_ls!r}"
 
     tiny = pub.env_ensure({"name": "lab-tiny", "platforms": linux_platforms,
                            "deps": {"conda": ["xz >=5"]}})
     assert "env_id" in tiny, tiny
-    pub.env_publish(tiny["env_id"], "beam", TREE,
-                    name="lab-tiny", version="1")
+    # the classic build-at-destination path stays covered
+    r2 = pub.env_publish(tiny["env_id"], "beam", TREE,
+                         name="lab-tiny", version="1", staging="none")
+    assert r2["staging"] == {"used": False, "why": "staging disabled ('none')"}
 
     # the tree becomes ADMIN-OWNED, world-readable: the real deployment
     _exec(sshd_site["container"],
