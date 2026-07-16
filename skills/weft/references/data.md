@@ -35,6 +35,43 @@ table knows which sites hold what; staging is the set difference.
   insists on mutating its input, copy it inside the job sandbox first
   (`cp data/in.h5 work.h5 && tool work.h5`).
 
+## Retention: keeping run outputs as plain files
+
+Runs leave files; most are never wanted, some become precious LATE.
+The retention tier (misc/retention.md) keeps chosen files as ORDINARY
+BROWSABLE FILES — no refs, no hashes — with run-level provenance in a
+`.weft-run.json` sidecar:
+
+```python
+w.run_inventory(job_or_kernel_id)      # what the run left (recorded at
+                                       # terminal state; survives EVERYTHING)
+w.run_retain(target, include=["figs/**"], exclude=["tmp/**"],
+             label="proj-9")           # keep: free locally (reflink/link),
+                                       # in place under a site's declared
+                                       # retain.dir, else background
+                                       # transfer home. Finished runs only;
+                                       # live kernels: completed blocks'
+                                       # artifact dirs (files MUST be under
+                                       # $WEFT_BLOCK_DIR to be retainable
+                                       # mid-session).
+w.retained_runs(label="proj-9")        # what's kept, where — one query
+w.run_discard(target)                  # sandbox GC now (policy
+                                       # run_remains_days sweeps the rest)
+w.run_forget(label="proj-9")           # reclaim retained bytes; the
+                                       # inventory (knowledge) survives
+```
+
+- Retain-vs-surface: retention is DURABILITY; rendering an output in a
+  UI right now is a foreground fetch — different operation.
+- Re-entry: a retained file feeding a NEW calculation gets identity
+  lazily — `data_register(path)` carries `origin run:<target>/<path>`
+  (provenance walks THROUGH it into the producing run);
+  `data_register(path, site=...)` registers site-side (hardlink into
+  the site CAS, original stays, same-site reuse stages 0 bytes).
+- Kernels default to `capture="transcript"`: block code/rc/text mirror
+  into the store as observed — text saves and `kernel_restart(replay)`
+  survive scratch purges; `capture="none"` opts out.
+
 ## Ingesting remote sources
 
 ```python

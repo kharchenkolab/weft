@@ -127,6 +127,23 @@ Read the code, use the hints:
 
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 
+### Retaining run outputs (plain files)
+
+Every finished run records an inventory of what it left behind
+(`run_inventory` — knowledge that survives all cleanup). Keep chosen
+files with `run_retain(target, include=[...], label=...)`: they land as
+ordinary files under `<workspace>/runs/<target>/` (zero-copy locally
+via reflink/hardlink; background transfer from remote sites) or stay in
+place under a site's declared `retain: {dir: ...}` long-term storage,
+with a `.weft-run.json` sidecar carrying run-level provenance.
+`retained_runs()` lists everything kept and where. GC has two halves:
+sandboxes go via `run_discard` or the `policy.run_remains_days` TTL
+sweep; retained bytes only via explicit `run_forget(target=|label=)` —
+deliberate keeps never expire, and the inventory survives even forget.
+Retained files that feed later calculations re-enter the data plane
+lazily: `data_register(path[, site=])` gives them identity plus a
+lineage origin so provenance walks through them into the producing run.
+
 ### Controller on a submit node
 
 Registering a `slurm` site without `host` (or with `transport:
