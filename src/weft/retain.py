@@ -186,6 +186,7 @@ class RetainManager:
 
         def work():
             try:
+                self.store.update_retained(target, state="inflight")
                 method = self._place(adapter, jobdir_rel, selected,
                                      location, in_place, local_like)
                 self._sidecar(kind, row, target, site, label, selected,
@@ -318,6 +319,13 @@ class RetainManager:
         rows = [r for r in rows if r]
         forgotten, pending = [], []
         for row in rows:
+            if row["state"] in ("queued", "inflight"):
+                # deleting a destination WHILE a transfer writes into it
+                # would race — refuse until the retain settles
+                pending.append({"target": row["target"],
+                                "why": "retain.in_flight",
+                                "retryable": True})
+                continue
             try:
                 if row["in_place"]:
                     adapter = self.adapters.get(row["site"])
