@@ -28,7 +28,7 @@ def _run(w, cmd):
 
 def test_discard_spares_retained_and_knowledge(w):
     jid = _run(w, "echo keep > fig.png; echo junk > scratch.tmp")
-    kept = w.run_retain(jid, include=["fig.png"], background=False)
+    kept = w.run_retain(jid, include=["fig.png"], background=False, dest="@workspace")
     dest = Path(kept["location"]["path"])
 
     out = w.run_discard(jid)
@@ -47,31 +47,50 @@ def test_discard_spares_retained_and_knowledge(w):
     w.task_cancel(r["job_id"])
 
 
-def test_ttl_sweep_lists_and_sweeps_dead_sandboxes(w):
+def test_ttl_defaults_off_and_sweeps_when_opted_in(w, tmp_path,
+                                                   pixi_bin):
+    # DEFAULT OFF (retention2): a year-old sandbox is untouchable
+    # unless the site opted into the TTL
     jid = _run(w, "echo residue > r.txt")
-    # fresh: not a candidate
-    plan = w.gc_plan("local")["sites"]["local"]
-    assert jid not in {r["target"] for r in plan["run_remains"]}
-    # age the job artificially past the TTL
     w.store._write("UPDATE jobs SET updated_at=? WHERE job_id=?",
-                   (time.time() - 30 * 86400, jid))
+                   (time.time() - 365 * 86400, jid))
     plan = w.gc_plan("local")["sites"]["local"]
-    assert jid in {r["target"] for r in plan["run_remains"]}
-    swept = w.gc_sweep("local", confirm=True)
+    assert plan["run_remains_days_policy"] is None
+    assert plan["run_remains"] == []
+    w.gc_sweep("local", confirm=True)
+    assert Path(w.adapters["local"].path(f"jobs/{jid}")).exists()
+
+    # OPT-IN: the policy sweeps aged sandboxes as before
+    w2 = Weft(tmp_path / "ws-opt", pixi_bin=pixi_bin)
+    w2.register_site("local", "local", {
+        "root": str(tmp_path / "site-opt"), "pixi_source": pixi_bin,
+        "policy": {"run_remains_days": 14}})
+    w2.runner.poll_interval = 0.2
+    r = w2.task_submit({"command": "echo residue > r.txt",
+                        "site": "local"})
+    jid2 = r["job_id"]
+    assert w2.runner.wait(jid2, 120)["state"] == "DONE"
+    plan = w2.gc_plan("local")["sites"]["local"]
+    assert jid2 not in {x["target"] for x in plan["run_remains"]}  # fresh
+    w2.store._write("UPDATE jobs SET updated_at=? WHERE job_id=?",
+                    (time.time() - 30 * 86400, jid2))
+    plan = w2.gc_plan("local")["sites"]["local"]
+    assert jid2 in {x["target"] for x in plan["run_remains"]}
+    swept = w2.gc_sweep("local", confirm=True)
     assert swept["swept_run_remains"] >= 1
-    assert not Path(w.adapters["local"].path(f"jobs/{jid}")).exists()
+    assert not Path(w2.adapters["local"].path(f"jobs/{jid2}")).exists()
     # knowledge survives the sweep too
-    assert w.run_inventory(jid)["entries"]
-    ev = [e for e in w.events_poll(0, 500)["events"]
-          if e["kind"] == "run.remains_swept" and e["target"] == jid]
+    assert w2.run_inventory(jid2)["entries"]
+    ev = [e for e in w2.events_poll(0, 500)["events"]
+          if e["kind"] == "run.remains_swept" and e["target"] == jid2]
     assert ev, "sweep must announce itself"
 
 
 def test_forget_reclaims_by_target_and_label(w):
     j1 = _run(w, "echo a > a.txt")
     j2 = _run(w, "echo b > b.txt")
-    w.run_retain(j1, include=["a.txt"], label="proj-9", background=False)
-    w.run_retain(j2, include=["b.txt"], label="proj-9", background=False)
+    w.run_retain(j1, include=["a.txt"], label="proj-9", background=False, dest="@workspace")
+    w.run_retain(j2, include=["b.txt"], label="proj-9", background=False, dest="@workspace")
     locs = {r["target"]: Path(r["location"])
             for r in w.retained_runs(label="proj-9")}
 

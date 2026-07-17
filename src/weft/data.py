@@ -352,6 +352,66 @@ class DataManager:
                         site=adapter.name, home=home,
                         bytes=row.get("bytes", 0))
 
+    def ensure_from_keep(self, ref: str, adapters: dict) -> bool:
+        """retention2.md LINK, the consuming half: a ref whose caches
+        were evicted but whose bytes were RETAINED re-enters from the
+        keep — hash-verified against the known digest (drift = honest
+        data.verify_failed, never silent). Returns True when the ref
+        gained a live location."""
+        import shlex as _sh
+        row = self.store.get_dataref(ref)
+        keep = ((row or {}).get("meta") or {}).get("keep")
+        if not keep:
+            return False
+        digest = ref.split(":")[-1]
+        if keep["site"] == "@workspace":
+            p = Path(keep["path"])
+            if not p.is_file():
+                return False
+            info = self.cas.register_file(p)
+            if info.ref != ref:
+                raise WeftError(
+                    "data.verify_failed",
+                    f"retained copy of {ref} no longer matches its "
+                    f"content", stage="staging",
+                    hints={"source": "keep", "path": keep["path"],
+                           "suggestion": "the keep was modified; "
+                                         "re-register it as new content"})
+            self.store.set_location(ref, "@workspace", str(self.cas.root))
+            return True
+        adapter = adapters.get(keep["site"])
+        if adapter is None:
+            return False
+        endpoint = adapter.transfer_endpoint()
+        blob_dir = f"{endpoint['cas_root']}/{digest[:2]}"
+        q = _sh.quote(keep["path"])
+        r = adapter.run_cmd(
+            f"[ -f {q} ] || exit 9; "
+            f"h=$(sha256sum {q} 2>/dev/null || shasum -a 256 {q}); "
+            f"[ \"${{h%% *}}\" = {digest} ] || exit 8; "
+            f"mkdir -p {_sh.quote(blob_dir)} && "
+            f"([ -f {_sh.quote(blob_dir + '/' + digest)} ] || "
+            f"ln {q} {_sh.quote(blob_dir + '/' + digest)} 2>/dev/null || "
+            f"cp -p {q} {_sh.quote(blob_dir + '/' + digest)})",
+            timeout=3600)
+        if r.rc == 9:
+            return False                       # keep gone (forgotten?)
+        if r.rc == 8:
+            raise WeftError(
+                "data.verify_failed",
+                f"retained copy of {ref} no longer matches its content",
+                stage="staging",
+                hints={"source": "keep", "site": keep["site"],
+                       "path": keep["path"],
+                       "suggestion": "the keep was modified; re-register "
+                                     "it as new content"})
+        if r.rc != 0:
+            return False
+        self.store.set_location(ref, keep["site"], endpoint["cas_root"])
+        self.store.emit("data.reobtained_from_keep", ref=ref,
+                        site=keep["site"], target=keep.get("target"))
+        return True
+
     def register_url(self, url: str, fetchers: dict, adapters: dict,
                      site: str | None = None,
                      expected_sha256: str | None = None) -> dict:
@@ -602,6 +662,15 @@ class DataManager:
             if home:
                 self._fence_external(adapter, ref, home)
         plan = self.plan_for(refs, adapter.name)
+        if plan.to_transfer and adapters:
+            # refs with NO live source but a retained keep re-enter from
+            # the keep first (retention2 LINK — hash-verified); a keep on
+            # the TARGET site satisfies the plan outright on re-plan
+            for ref in list(plan.to_transfer):
+                if not self.store.locations_of(ref) \
+                        and self.cas.kind_of(ref) is None:
+                    self.ensure_from_keep(ref, adapters)
+            plan = self.plan_for(refs, adapter.name)
         if plan.to_transfer and adapters:
             # bytes must MOVE: external sources ingest into their own
             # site's CAS first (fence + wire hashes keep it honest), then
@@ -880,31 +949,41 @@ class DataManager:
             # find a site that has it and pull blobs back
             locations = self.store.locations_of(ref)
             remote = [l for l in locations if l["site"] in adapters]
-            if not remote:
-                raise WeftError(
-                    "data.missing", f"no known location holds {ref}", stage="staging",
-                )
-            loc = remote[0]
-            adapter = adapters[loc["site"]]
-            if str(loc["path"]).startswith("external:"):
-                self._ingest_external(
-                    adapter, ref, str(loc["path"])[len("external:"):])
-            endpoint = adapter.transfer_endpoint()
-            method = transfers.get(endpoint["method"])
-            row = self.store.get_dataref(ref)
-            if row and row["kind"] == "tree":
+            if not remote and self.ensure_from_keep(ref, adapters):
+                # caches were evicted but the bytes were RETAINED: the
+                # keep re-entered (site CAS, or the LOCAL cas for a
+                # home keep) and the fetch proceeds normally
+                locations = self.store.locations_of(ref)
+                remote = [l for l in locations if l["site"] in adapters]
+            if not remote and self.cas.kind_of(ref) is None:
                 raise WeftError(
                     "data.missing",
-                    "this workspace has no manifest for the tree — it can "
-                    "enumerate no blobs to pull",
-                    stage="staging",
-                    hints={"suggestion": "register the tree (data_register"
-                                         "(path, site=...)) or import the "
-                                         "bundle that minted it first"},
-                )
-            method.fetch(
-                [(ref.split(":")[-1], row["bytes"] if row else 0)], self.cas, endpoint
-            )
+                    f"no known location holds {ref}", stage="staging",
+                    hints={"note": "caches evicted and no retained "
+                                   "keep carries this ref"})
+            if remote:
+                loc = remote[0]
+                adapter = adapters[loc["site"]]
+                if str(loc["path"]).startswith("external:"):
+                    self._ingest_external(
+                        adapter, ref, str(loc["path"])[len("external:"):])
+                endpoint = adapter.transfer_endpoint()
+                method = transfers.get(endpoint["method"])
+                row = self.store.get_dataref(ref)
+                if row and row["kind"] == "tree":
+                    raise WeftError(
+                        "data.missing",
+                        "this workspace has no manifest for the tree — it "
+                        "can enumerate no blobs to pull",
+                        stage="staging",
+                        hints={"suggestion": "register the tree "
+                                             "(data_register(path, "
+                                             "site=...)) or import the "
+                                             "bundle that minted it first"},
+                    )
+                method.fetch(
+                    [(ref.split(":")[-1], row["bytes"] if row else 0)],
+                    self.cas, endpoint)
         # verify + materialize into workspace
         if not self.cas.verify(ref):
             raise WeftError("data.verify_failed", f"content of {ref} failed verification",

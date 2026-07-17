@@ -223,7 +223,7 @@ def test_inventory_flags_scaffold_and_retain_all_means_my_files(w):
     for p in ("cmd.sh", "activate.sh", "log"):
         assert by[p]["scaffold"] is True, p               # weft's
     # "retain all" keeps MY files only...
-    kept = w.run_retain(jid, background=False)
+    kept = w.run_retain(jid, background=False, dest="@workspace")
     dest = Path(kept["location"]["path"])
     assert (dest / "result.csv").exists()
     assert not (dest / "cmd.sh").exists()
@@ -231,7 +231,7 @@ def test_inventory_flags_scaffold_and_retain_all_means_my_files(w):
     # ...but an explicit include is sovereign
     w.run_forget(target=jid)
     kept = w.run_retain(jid, include=["log", "result.csv"],
-                        background=False)
+                        background=False, dest="@workspace")
     dest = Path(kept["location"]["path"])
     assert (dest / "log").exists() and (dest / "result.csv").exists()
 

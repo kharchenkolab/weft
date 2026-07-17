@@ -12,6 +12,9 @@ EXCLUDED = {
     "env_ensure_dry_run": "exclusion inherited, not yet deliberate — "
                           "flagged 2026-07-15; add to PUBLIC_TOOLS or "
                           "justify here",
+    "resolve_run_file": "reached through data_register(run=, rel=) and "
+                        "{'run','rel'} task inputs — one tool surface "
+                        "for one concept",
 }
 
 

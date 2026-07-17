@@ -127,22 +127,37 @@ Read the code, use the hints:
 
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 
-### Retaining run outputs (plain files)
+### Retaining run outputs (retain marks; storage moves only when it must)
 
 Every finished run records an inventory of what it left behind
-(`run_inventory` — knowledge that survives all cleanup). Keep chosen
-files with `run_retain(target, include=[...], label=...)`: they land as
-ordinary files under `<workspace>/runs/<target>/` (zero-copy locally
-via reflink/hardlink; background transfer from remote sites) or stay in
-place under a site's declared `retain: {dir: ...}` long-term storage,
-with a `.weft-run.json` sidecar carrying run-level provenance.
-`retained_runs()` lists everything kept and where. GC has two halves:
-sandboxes go via `run_discard` or the `policy.run_remains_days` TTL
-sweep; retained bytes only via explicit `run_forget(target=|label=)` —
-deliberate keeps never expire, and the inventory survives even forget.
-Retained files that feed later calculations re-enter the data plane
-lazily: `data_register(path[, site=])` gives them identity plus a
-lineage origin so provenance walks through them into the producing run.
+(`run_inventory` — knowledge that survives all cleanup). A KEEP is a
+pinned selection at a durable address; where it lives follows from the
+site's one storage fact, `durable`:
+
+- `durable: true` (the root is safe): `run_retain` MARKS in place —
+  zero bytes move, the sandbox paths stay valid forever, the sandbox
+  becomes sweep-exempt. `{"moved": false}` says so.
+- `durable: "/abs/path"`: one site-side hop into
+  `<path>/runs/<label>/<target>/` — never crosses the wire.
+- neither: the site can keep nothing — pass `dest="@workspace"`
+  (background transfer home, progress events) or the call refuses
+  with `retain.no_durable` and the three levers in its hints.
+
+`run_forget` is the INVERSE of retain: it removes what retain created
+(the pin always; copies only where a move made them) — unmarking
+deletes nothing. `run_discard` alone destroys sandbox bytes, and on a
+still-marked target it is SELECTIVE (junk goes, keeps stay); full
+deletion is forget then discard. The TTL sweep
+(`policy: {run_remains_days: N}`) is opt-in and defaults to OFF;
+retained targets are exempt regardless.
+
+Files are addressed by the (run, relpath) KEY everywhere:
+`run_file_stat/read(target, rel)` resolve sandbox → keep and say which
+answered (`at`); task inputs accept `{"run": ..., "rel": ...,
+"mount_as": ...}` (resolved to the output's ref — no rehash for
+declared outputs); `data_register(run=, rel=)` re-enters explicitly.
+Keeps of declared outputs anchor their refs: after cache eviction,
+fetch and staging re-obtain the bytes from the keep, hash-verified.
 
 ### Reference-in-place (big data on stable storage)
 

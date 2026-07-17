@@ -108,7 +108,7 @@ def test_mid_transfer_failure_is_honest_and_resumable(tmp_path, pixi_bin,
     assert w.runner.wait(jid, 300)["state"] == "DONE"
 
     out = w.run_retain(jid, include=["big.bin", "big.sha"],
-                       background=True)
+                       background=True, dest="@workspace")
     # freeze the container while bytes are in flight
     for _ in range(100):
         row = w.store.get_retained(jid)
@@ -130,7 +130,7 @@ def test_mid_transfer_failure_is_honest_and_resumable(tmp_path, pixi_bin,
                        check=True)
 
     retry = w.run_retain(jid, include=["big.bin", "big.sha"],
-                         background=False)     # retry converges
+                         background=False, dest="@workspace")     # retry converges
     assert retry["state"] == "done"
     dest = Path(retry["location"]["path"])
     import hashlib
@@ -152,7 +152,7 @@ def test_remote_live_pin_settles_and_transfers(tmp_path, pixi_bin,
     assert w.kernel_exec(k, "open('result.bin','wb')"
                             ".write(bytes(range(256))*100)",
                          timeout=120)["rc"] == 0
-    pin = w.run_retain(k, include=["result.bin"], label="remote-pin")
+    pin = w.run_retain(k, include=["result.bin"], label="remote-pin", dest="@workspace")
     assert pin["state"] == "pinned-pending"
     w.kernel_stop(k)
     for _ in range(100):                        # transfer is async-ish
@@ -181,7 +181,7 @@ def test_slurm_site_retention_smoke(tmp_path, pixi_bin, slurm_site):
     assert w.runner.wait(jid, 240)["state"] == "DONE"
     assert "point.txt" in {e["path"] for e in
                            w.run_inventory(jid)["entries"]}
-    kept = w.run_retain(jid, include=["point.txt"], background=False)
+    kept = w.run_retain(jid, include=["point.txt"], background=False, dest="@workspace")
     assert kept["state"] == "done"
     dest = Path(kept["location"]["path"])
     assert (dest / "point.txt").read_text() == "scan-done\n"

@@ -110,23 +110,31 @@ def plan(weft, site: str | None = None) -> dict:
         # files are unaffected (they live elsewhere, or the surviving
         # hardlink keeps the inode); the terminal inventory (knowledge)
         # is never a candidate for anything.
-        remains_days = float(site_policy(row).get("run_remains_days", 14))
-        remains_cutoff = now - remains_days * 86400
+        # retention2.md: the TTL defaults to OFF — a default that deletes
+        # what the user forgot to retain violates "no silent loss".
+        # Opt in per site with policy run_remains_days=<days>. Retained
+        # targets are exempt regardless (the pin IS the promise).
+        remains_days = site_policy(row).get("run_remains_days")
         remains = []
-        for job in weft.store.jobs_where(site=name):
-            if job["state"] in ("DONE", "FAILED", "CANCELLED") \
-                    and job["updated_at"] < remains_cutoff:
-                remains.append({"target": job["job_id"],
-                                "jobdir": f"jobs/{job['job_id']}",
-                                "age_days": round(
-                                    (now - job["updated_at"]) / 86400, 1)})
-        for k in weft.store.list_kernels():
-            if k["site"] == name and k["state"] in ("stopped", "died") \
-                    and k["last_used"] < remains_cutoff:
-                remains.append({"target": k["kernel_id"],
-                                "jobdir": k["jobdir"],
-                                "age_days": round(
-                                    (now - k["last_used"]) / 86400, 1)})
+        if remains_days is not None:
+            remains_cutoff = now - float(remains_days) * 86400
+            candidates = []
+            for job in weft.store.jobs_where(site=name):
+                if job["state"] in ("DONE", "FAILED", "CANCELLED") \
+                        and job["updated_at"] < remains_cutoff:
+                    candidates.append((job["job_id"],
+                                       f"jobs/{job['job_id']}",
+                                       job["updated_at"]))
+            for k in weft.store.list_kernels():
+                if k["site"] == name and k["state"] in ("stopped", "died") \
+                        and k["last_used"] < remains_cutoff:
+                    candidates.append((k["kernel_id"], k["jobdir"],
+                                       k["last_used"]))
+            for target, jobdir, ts in candidates:
+                if weft.store.get_retained(target):
+                    continue          # kept: exempt, whatever the age
+                remains.append({"target": target, "jobdir": jobdir,
+                                "age_days": round((now - ts) / 86400, 1)})
         # session_idle_days (default OFF): kernel-less active sessions
         # idle past the grace are crash-leftover-shaped — hosts that mint
         # sessions programmatically opt in; nobody's interactive session

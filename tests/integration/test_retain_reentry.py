@@ -25,7 +25,7 @@ def test_lineage_survives_reentry(w):
                         "site": "local"})
     a_id = ra["job_id"]
     assert w.runner.wait(a_id, 120)["state"] == "DONE"
-    kept = w.run_retain(a_id, include=["table.csv"], background=False)
+    kept = w.run_retain(a_id, include=["table.csv"], background=False, dest="@workspace")
 
     # weeks later: the retained file feeds run B
     retained_path = str(Path(kept["location"]["path"]) / "table.csv")
@@ -52,7 +52,7 @@ def test_kernel_lineage_notes_the_transcript(w):
            ".write('mu=3.1')", timeout=60)
     w.kernel_stop(k)
     kept = w.run_retain(k, include=["blocks/*.artifacts/**"],
-                        background=False)
+                        background=False, dest="@workspace")
     f = str(Path(kept["location"]["path"])
             / f"blocks/{r['block']:04d}.artifacts/fit.txt")
     ref = w.data_register(f)["ref"]

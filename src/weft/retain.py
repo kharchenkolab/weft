@@ -27,6 +27,46 @@ from .errors import WeftError
 TERMINAL_JOB = ("DONE", "FAILED", "CANCELLED")
 TERMINAL_KERNEL = ("stopped", "died")
 
+
+def storage_facts(config: dict) -> dict:
+    """The site's declared storage facts (retention2.md): `durable`
+    answers "is there durable storage on this node, and where?" —
+    absent/False = no, True = the root itself, "<abs path>" = there.
+    NEVER guessed: durability is a user assertion. The path heuristic
+    exists only to phrase a courtesy hint at registration."""
+    config = config or {}
+    d = config.get("durable")
+    if d is None:
+        legacy = (config.get("retain") or {}).get("dir")
+        if legacy:
+            return {"durable": legacy,
+                    "source": "retain.dir (deprecated — use durable=)"}
+    if d is True:
+        return {"durable": True, "source": "declared"}
+    if isinstance(d, str):
+        if not d.startswith("/"):
+            raise WeftError(
+                "task.invalid",
+                f"durable must be True or an absolute path (got {d!r})",
+                stage="infra")
+        return {"durable": d, "source": "declared"}
+    if d not in (None, False):
+        raise WeftError(
+            "task.invalid",
+            f"durable must be True, False/absent, or an absolute path "
+            f"(got {d!r})", stage="infra")
+    out = {"durable": None, "source": "not declared"}
+    root = str(config.get("root") or "")
+    if root.startswith(("/home/", "/users/", "/user/")) or "/home/" in root:
+        out["hint"] = (f"root {root} looks like a home filesystem — "
+                       f"add durable=true if weft may keep files there")
+    elif root.startswith(("/scratch", "/tmp", "/var/tmp")) \
+            or "/scratch" in root:
+        out["hint"] = (f"root {root} looks like scratch — retains will "
+                       f"need dest= (e.g. '@workspace') or a "
+                       f"durable=<path> declaration")
+    return out
+
 # every file weft itself writes into a run sandbox — the CONTRACT that
 # lets a host split "what the run produced" from weft's plumbing without
 # guessing from names (weft-ui ask). Kept next to the writers: runner
@@ -158,28 +198,55 @@ class RetainManager:
 
     # -- the verb -----------------------------------------------------------
 
-    def _resolve_dest(self, target: str, site: str, dest: str | None,
-                      label: str, layout: str) -> tuple[str, bool]:
-        """-> (location, in_place). layout="label" nests runs under the
-        host's grouping handle (runs/<label>/<target>/) so the retained
-        tree mirrors the host's own run structure for human browsing."""
+    def _placement(self, target: str, site: str, jobdir_rel: str,
+                   dest: str | None, label: str, layout: str,
+                   adapter) -> dict:
+        """retention2.md PLACE: where do the keeps live?
+        -> {mode: mark|hop|home, location, in_place, moved}.
+        `mark` = the sandbox itself is durable — zero bytes touched;
+        `hop` = one site-side move to the declared durable path;
+        `home` = transfer to the controller (only ever EXPLICIT:
+        dest='@workspace' or a controller path). No durable + no dest
+        → retain.no_durable with the levers in the hints."""
         if layout not in ("target", "label"):
             raise WeftError("task.invalid",
                             f"unknown layout {layout!r}", stage="infra",
                             hints={"known": ["target", "label"]})
-        sub = f"runs/{label}/{target}" if layout == "label" \
-            else f"runs/{target}"
         if layout == "label" and not label:
             raise WeftError("task.invalid",
                             "layout='label' needs a label", stage="infra")
-        site_cfg = (self.store.get_site(site) or {}).get("config") or {}
-        retain_dir = ((site_cfg.get("retain") or {}).get("dir")
-                      if not dest else None)
-        if retain_dir:
-            return f"{retain_dir.rstrip('/')}/{sub}", True
-        if dest:
-            return str(Path(dest)), False
-        return str(self.workspace / sub), False
+        sub = f"runs/{label}/{target}" if layout == "label" \
+            else f"runs/{target}"
+        if dest is not None:
+            if dest == "@workspace":
+                return {"mode": "home", "in_place": False, "moved": True,
+                        "location": str(self.workspace / sub)}
+            return {"mode": "home", "in_place": False, "moved": True,
+                    "location": str(Path(dest))}
+        cfg = (self.store.get_site(site) or {}).get("config") or {}
+        facts = storage_facts(cfg)
+        durable = facts["durable"]
+        if durable is True:
+            return {"mode": "mark", "in_place": True, "moved": False,
+                    "location": adapter.path(jobdir_rel)}
+        if isinstance(durable, str):
+            return {"mode": "hop", "in_place": True, "moved": True,
+                    "location": f"{durable.rstrip('/')}/{sub}"}
+        raise WeftError(
+            "retain.no_durable",
+            f"site {site!r} declares no durable storage — say where "
+            f"these files should survive",
+            stage="staging",
+            hints={"options": {
+                       "ship_home": "run_retain(..., dest='@workspace') "
+                                    "— transfer to the controller's "
+                                    "workspace",
+                       "declare": "re-register the site with "
+                                  "durable=true (the root is safe) or "
+                                  "durable='/abs/path' (a separate safe "
+                                  "path on the node)"},
+                   **({"registration_hint": facts["hint"]}
+                      if facts.get("hint") else {})})
 
     def _is_finished(self, kind: str, row: dict) -> bool:
         return (kind == "job" and row["state"] in TERMINAL_JOB) or \
@@ -198,8 +265,11 @@ class RetainManager:
         if adapter is None:
             raise WeftError("site.unreachable",
                             f"site {site!r} not registered", stage="infra")
-        location, in_place = self._resolve_dest(target, site, dest,
-                                                label, layout)
+        # the placement decision is made NOW — a pin on a no-durable
+        # site must ask its question at retain time, not at settlement
+        place = self._placement(target, site, jobdir_rel, dest, label,
+                                layout, adapter)
+        location, in_place = place["location"], place["in_place"]
         selection = {"include": include, "exclude": exclude, "dest": dest,
                      "max_gb": max_gb, "headroom_gb": headroom_gb,
                      "layout": layout}
@@ -207,12 +277,12 @@ class RetainManager:
                                 include, exclude)
 
         if not self._is_finished(kind, row):
-            # LIVE target. Completed-block-only selections capture now
+            # LIVE target. Completed-block-only selections settle now
             # (immutable by protocol); anything else — INCLUDING files
             # that don't exist yet ("retain the eventual complete
-            # file") — becomes a PIN: mark now, capture at settlement.
+            # file") — becomes a PIN: decide now, settle at run end.
             immediate_ok = False
-            if selected:
+            if selected and place["mode"] != "mark":
                 try:
                     self._guard_finished(kind, row, selected, adapter)
                     immediate_ok = True
@@ -222,28 +292,53 @@ class RetainManager:
                 self.store.put_retained(target, site, label or None,
                                         location, in_place, 0, 0,
                                         state="pinned-pending",
-                                        selection=selection)
+                                        selection=selection,
+                                        moved=place["moved"])
                 self.store.emit("retain.pinned", target=target, site=site,
                                 matched_now=len(selected),
                                 **({"label": label} if label else {}))
                 return {"target": target, "state": "pinned-pending",
                         "matched_now": len(selected),
+                        "moved": place["moved"],
                         "location": {"site": site if in_place
                                      else "@workspace", "path": location},
-                        "note": "captured when the run settles (stop/"
-                                "death/completion); run_forget cancels "
-                                "the pin"}
+                        "note": "settled when the run ends (stop/death/"
+                                "completion); run_forget cancels the pin"}
 
         if not selected:
             raise WeftError("data.missing",
                             "selection matched no files", stage="staging",
                             hints={"include": include, "exclude": exclude})
         total = sum(e["bytes"] for e in selected)
+
+        if place["mode"] == "mark":
+            # retention2.md: the sandbox IS durable — pin, move nothing.
+            # No budgets (zero new bytes), no background (instant).
+            self.store.put_retained(target, site, label or None, location,
+                                    in_place, len(selected), total,
+                                    state="done", selection=selection,
+                                    moved=False)
+            self.store.update_retained(target, method="mark")
+            self._sidecar_into(adapter, jobdir_rel, target, site, selected)
+            self._link_keeps(target, kind, row, site, selected,
+                             location, True, False)
+            self.store.emit("retain.marked", target=target, site=site,
+                            files=len(selected), bytes=total,
+                            **({"label": label} if label else {}))
+            return {"target": target, "files": len(selected),
+                    "bytes": total, "moved": False, "in_place": True,
+                    "state": "done",
+                    "location": {"site": site, "path": location},
+                    "note": "durable root: marked in place — nothing "
+                            "moved; paths stay valid",
+                    **({"label": label} if label else {})}
+
         self._check_budgets(total, len(selected), max_gb, headroom_gb,
                             location, in_place)
         self.store.put_retained(target, site, label or None, location,
                                 in_place, len(selected), total,
-                                state="queued", selection=selection)
+                                state="queued", selection=selection,
+                                moved=True)
 
         def work():
             self._capture(target, kind, row, jobdir_rel, adapter, site,
@@ -256,6 +351,7 @@ class RetainManager:
             work()
             state = self.store.get_retained(target)["state"]
         return {"target": target, "files": len(selected), "bytes": total,
+                "moved": True,
                 "location": {"site": site if in_place else "@workspace",
                              "path": location},
                 "in_place": in_place, "state": state,
@@ -301,6 +397,8 @@ class RetainManager:
             self.store.update_retained(target, state="done",
                                        method=method, files=len(selected),
                                        nbytes=total)
+            self._link_keeps(target, kind, row, site, selected,
+                             location, in_place, True)
             self.store.emit("retain.done", target=target, site=site,
                             files=len(selected), bytes=total,
                             method=method, location=location,
@@ -354,6 +452,22 @@ class RetainManager:
                                       "detail": "no pinned file existed "
                                                 "at settlement",
                                       "missing": missing}))
+                return
+            if prow.get("moved") == 0:
+                # mark-mode pin (durable root): settle = validate + pin,
+                # no capture — the files already sit where they'll stay
+                total = sum(e["bytes"] for e in selected)
+                self.store.update_retained(target, state="done",
+                                           method="mark",
+                                           files=len(selected),
+                                           nbytes=total)
+                self._sidecar_into(adapter, jobdir_rel, target,
+                                   row["site"], selected)
+                self.store.emit("retain.marked", target=target,
+                                site=row["site"], files=len(selected),
+                                bytes=total,
+                                **({"label": prow["label"]}
+                                   if prow.get("label") else {}))
                 return
             self._check_budgets(sum(e["bytes"] for e in selected),
                                 len(selected), sel.get("max_gb"),
@@ -444,43 +558,85 @@ class RetainManager:
                             stage="infra")
         return adapter, joined
 
-    def file_stat(self, target: str, rel: str) -> dict:
-        adapter, path = self._sandbox_path(target, rel)
-        r = adapter.run_cmd(
+    def resolve_key(self, target: str, rel: str) -> list[dict]:
+        """(run, relpath) — retention2.md's durable handle — resolved to
+        every place the bytes might currently be, in precedence order:
+        the sandbox, then the keep (only once its row is `done`).
+        Each candidate: {at, adapter|None, path} (adapter None = a
+        local/workspace path read directly)."""
+        adapter, sandbox = self._sandbox_path(target, rel)
+        out = [{"at": "sandbox", "adapter": adapter, "path": sandbox}]
+        row = self.store.get_retained(target)
+        if row and row["state"] == "done" and row.get("moved") != 0:
+            # a MOVED keep adds a second address; a MARK's keep address
+            # IS the sandbox path (already listed)
+            norm = os.path.normpath(os.path.join(row["location"], rel))
+            if norm.startswith(os.path.normpath(row["location"])):
+                out.append({"at": "retained",
+                            "adapter": adapter if row["in_place"]
+                            else None,
+                            "path": norm})
+        return out
+
+    @staticmethod
+    def _stat_one(cand: dict) -> dict | None:
+        path = cand["path"]
+        if cand["adapter"] is None:
+            p = Path(path)
+            if not p.is_file():
+                return None
+            st = p.stat()
+            return {"bytes": st.st_size, "mtime": int(st.st_mtime)}
+        r = cand["adapter"].run_cmd(
             f'[ -f {shlex.quote(path)} ] && '
             f'(stat -c "%s %Y" {shlex.quote(path)} 2>/dev/null || '
             f'stat -f "%z %m" {shlex.quote(path)}) || echo ABSENT',
             timeout=60)
         out = (r.out or "").strip()
         if r.rc != 0 or out == "ABSENT" or not out:
-            return {"target": target, "path": rel, "exists": False}
+            return None
         parts = out.split()
-        return {"target": target, "path": rel, "exists": True,
-                "bytes": int(parts[0]), "mtime": int(parts[1])}
+        return {"bytes": int(parts[0]), "mtime": int(parts[1])}
+
+    def file_stat(self, target: str, rel: str) -> dict:
+        for cand in self.resolve_key(target, rel):
+            st = self._stat_one(cand)
+            if st is not None:
+                return {"target": target, "path": rel, "exists": True,
+                        "at": cand["at"], "abs_path": cand["path"], **st}
+        return {"target": target, "path": rel, "exists": False}
 
     def file_read(self, target: str, rel: str,
                   max_bytes: int = 1 << 20) -> dict:
         max_bytes = min(max_bytes, self._READ_HARD_CAP)
-        adapter, path = self._sandbox_path(target, rel)
-        st = self.file_stat(target, rel)
-        if not st["exists"]:
-            raise WeftError("data.missing",
-                            f"no such file in the run sandbox: {rel}",
-                            stage="infra",
-                            hints={"note": "run_inventory shows what the "
-                                           "run produced; the sandbox may "
-                                           "have been swept"})
-        r = adapter.run_cmd(
-            f"head -c {max_bytes} {shlex.quote(path)} | base64",
-            timeout=300)
-        if r.rc != 0:
-            raise WeftError("data.missing",
-                            f"read failed: {(r.err or '')[:200]}",
-                            stage="infra", retryable=True)
-        return {"target": target, "path": rel,
-                "bytes_b64": "".join(r.out.split()),
-                "bytes_total": st["bytes"],
-                "truncated": st["bytes"] > max_bytes}
+        for cand in self.resolve_key(target, rel):
+            st = self._stat_one(cand)
+            if st is None:
+                continue
+            if cand["adapter"] is None:
+                data = Path(cand["path"]).open("rb").read(max_bytes)
+                import base64 as _b64
+                b64 = _b64.b64encode(data).decode()
+            else:
+                r = cand["adapter"].run_cmd(
+                    f"head -c {max_bytes} {shlex.quote(cand['path'])} "
+                    f"| base64", timeout=300)
+                if r.rc != 0:
+                    raise WeftError("data.missing",
+                                    f"read failed: {(r.err or '')[:200]}",
+                                    stage="infra", retryable=True)
+                b64 = "".join(r.out.split())
+            return {"target": target, "path": rel, "at": cand["at"],
+                    "bytes_b64": b64, "bytes_total": st["bytes"],
+                    "truncated": st["bytes"] > max_bytes}
+        raise WeftError("data.missing",
+                        f"no such file in the run sandbox or its keep: "
+                        f"{rel}",
+                        stage="infra",
+                        hints={"note": "run_inventory shows what the "
+                                       "run produced; the sandbox may "
+                                       "have been swept and the keep "
+                                       "forgotten"})
 
     # -- GC: the other half ---------------------------------------------------
 
@@ -502,6 +658,34 @@ class RetainManager:
                             stage="infra", retryable=True)
         # a discard must never destroy what a pin promised: capture first
         self.settle_pins(target)
+        kept = self.store.get_retained(target)
+        if kept and kept.get("moved") == 0 and kept["state"] == "done":
+            # a MARKED keep lives IN this sandbox: selective discard —
+            # the junk goes, the keeps (and sidecar) stay, the pin holds
+            sel = json.loads(kept.get("selection") or "{}")
+            entries = self._scan(adapter, jobdir_rel)
+            keep_paths = {e["path"] for e in self._select(
+                entries, sel.get("include"), sel.get("exclude"))}
+            keep_paths.add(".weft-run.json")
+            doomed = [e["path"] for e in entries
+                      if e["path"] not in keep_paths]
+            if doomed:
+                root = adapter.path(jobdir_rel)
+                script = [f"cd {shlex.quote(root)} || exit 1"]
+                script += [f"rm -f {shlex.quote(p)}" for p in doomed]
+                # empty dirs left behind are litter, not keeps
+                script.append("find . -type d -empty -delete "
+                              "2>/dev/null; true")
+                adapter.run_cmd("\n".join(script), timeout=1800)
+            self.store.emit("run.discarded", target=target,
+                            site=row["site"], selective=True,
+                            removed=len(doomed))
+            return {"target": target, "state": "discarded",
+                    "selective": True, "removed": len(doomed),
+                    "kept": len(keep_paths) - 1,
+                    "note": "marked-in-place keep: unselected files "
+                            "deleted, the keeps stay at their paths; "
+                            "run_forget first for full deletion"}
         adapter.run_cmd(
             f"rm -rf {shlex.quote(adapter.path(jobdir_rel))}",
             timeout=1800)
@@ -542,6 +726,25 @@ class RetainManager:
                 pending.append({"target": row["target"],
                                 "why": "retain.in_flight",
                                 "retryable": True})
+                continue
+            if row.get("moved") == 0:
+                # retention2.md: forget is the INVERSE of retain, and a
+                # MARK created no copies — so forget deletes NOTHING.
+                # Drop the pin (+ sidecar); files revert to ordinary
+                # sandbox lifecycle (run_discard destroys bytes).
+                adapter = self.adapters.get(row["site"])
+                if adapter is not None:
+                    adapter.run_cmd(
+                        f"rm -f {shlex.quote(row['location'])}"
+                        f"/.weft-run.json", timeout=120)
+                self.store.delete_retained(row["target"])
+                self.store.emit("retain.forgotten", target=row["target"],
+                                bytes=0, unmarked=True)
+                forgotten.append({"target": row["target"], "bytes": 0,
+                                  "location": row["location"],
+                                  "note": "unmarked — files remain in "
+                                          "the sandbox (run_discard "
+                                          "deletes bytes)"})
                 continue
             try:
                 if row["in_place"]:
@@ -584,6 +787,46 @@ class RetainManager:
         return out
 
     # -- the receipt beside the files ----------------------------------------
+
+    def _link_keeps(self, target: str, kind: str, row: dict, site: str,
+                    selected, location: str, in_place: bool,
+                    moved: bool) -> None:
+        """retention2.md LINK: keeps of DECLARED outputs anchor their
+        refs — the manifest already paid for the hash, so recording
+        {keep address} on the dataref costs nothing and lets fetch and
+        staging re-obtain the bytes from the keep after cache eviction.
+        Undeclared files stay lazy (identity at first computational
+        use). Best-effort by contract: a LINK failure never fails a
+        retain."""
+        try:
+            if kind != "job":
+                return                     # kernels declare nothing
+            outputs = (row.get("manifest") or {}).get("outputs") or []
+            by_path = {o["path"]: o["ref"] for o in outputs
+                       if o.get("ref") and not o["path"].endswith("/")}
+            for e in selected:
+                ref = by_path.get(e["path"])
+                if not ref:
+                    continue
+                keep_path = f"{location.rstrip('/')}/{e['path']}" \
+                    if moved else f"{location.rstrip('/')}/{e['path']}"
+                self.store.update_dataref_meta(ref, {"keep": {
+                    "target": target, "rel": e["path"],
+                    "site": site if in_place else "@workspace",
+                    "path": keep_path,
+                    "bytes": e["bytes"], "mtime": e["mtime"]}})
+        except Exception:   # noqa: BLE001 — LINK is opportunistic
+            pass
+
+    def _sidecar_into(self, adapter, jobdir_rel, target, site,
+                      selected) -> None:
+        """Sidecar for a MARKED keep: written into the jobdir itself —
+        the directory self-describes without weft, at its own path."""
+        kind, row, _ = self._target_row(target)
+        retained = self.store.get_retained(target) or {}
+        self._sidecar(kind, row, target, site, retained.get("label"),
+                      selected, adapter.path(jobdir_rel), True, "mark",
+                      adapter)
 
     def _sidecar(self, kind, row, target, site, label, selected,
                  location, in_place, method, adapter) -> None:

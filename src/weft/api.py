@@ -193,6 +193,8 @@ class Weft:
         wizard's check-before-commit. Honest caveat: the real probe needs
         the shim, so ~100KB is written under the configured root even
         then (re-used by the eventual registration)."""
+        from .retain import storage_facts
+        storage = storage_facts(config)   # validates `durable` up front
         adapter = self._make_adapter(name, kind, config)
         if not probe_only:
             self.store.put_site(name, kind, config)
@@ -230,6 +232,19 @@ class Weft:
                                 error=str(e)[:200])
         self.store.audit_log("user", "site.register", site=name)
         self.store.emit("site.registered", site=name, site_kind=kind)
+        if isinstance(storage.get("durable"), str):
+            # a declared durable path must actually exist on the site —
+            # discovering it at first retain would be too late
+            r = adapter.run_cmd(
+                f"mkdir -p {shlex.quote(storage['durable'])} && "
+                f"test -w {shlex.quote(storage['durable'])} && echo ok")
+            if r.rc != 0 or "ok" not in r.out:
+                self.store.emit("site.storage_warning", site=name,
+                                detail=f"durable path "
+                                       f"{storage['durable']} is not "
+                                       f"writable: {(r.err or '')[:200]}")
+                storage["warning"] = (f"durable path {storage['durable']} "
+                                      f"could not be created/written")
         # discover byte routes to/from the other sites (best-effort: a
         # failed probe never fails a registration)
         if len(self.adapters) > 1:
@@ -243,7 +258,7 @@ class Weft:
                     self.site_route_probe(s, d)
                 except Exception:
                     pass
-        return {"site": name, "capabilities": caps}
+        return {"site": name, "capabilities": caps, "storage": storage}
 
     def sites_list(self) -> list[dict]:
         out = []
@@ -268,6 +283,8 @@ class Weft:
         if not row:
             raise WeftError("task.invalid", f"unknown site: {name}", stage="infra",
                             hints={"registered": [s["name"] for s in self.store.list_sites()]})
+        from .retain import storage_facts
+        row = {**row, "storage": storage_facts(row.get("config") or {})}
         notes = self.store.site_notes(name)
         if notes:
             row = {**row, "site_notebook": notes}
@@ -763,9 +780,78 @@ class Weft:
 
     # -- data -----------------------------------------------------------------
 
-    def data_register(self, path: str, site: str | None = None,
+    def resolve_run_file(self, run: str, rel: str,
+                         ingest: bool = True) -> dict:
+        """(run, relpath) → a usable DataRef, wherever the bytes are.
+        Declared outputs reuse the manifest's ref (hash already paid;
+        the copy re-enters the CAS hash-verified); undeclared files
+        register lazily with run: lineage. The key is retention2.md's
+        durable handle — it survives sweeps and moves."""
+        kind, row, jobdir_rel = self.retains._target_row(run)
+        outputs = ((row.get("manifest") or {}).get("outputs") or []) \
+            if kind == "job" else []
+        known = next((o["ref"] for o in outputs
+                      if o.get("ref") and o["path"] == rel), None)
+        cands = self.retains.resolve_key(run, rel)
+        live = None
+        for c in cands:
+            if self.retains._stat_one(c) is not None:
+                live = c
+                break
+        if live is None:
+            raise WeftError(
+                "data.missing",
+                f"({run}, {rel}) resolves to no existing file",
+                stage="staging",
+                hints={"note": "the sandbox may be swept and the keep "
+                               "forgotten; run_inventory shows what the "
+                               "run produced",
+                       "existed": rel in {e["path"] for e in
+                                          (self.store.get_run_inventory(
+                                              run) or {}).get("entries",
+                                                              [])}})
+        if known:
+            # re-enter by the KNOWN digest (no rehash; verified on link)
+            got = self.dataman.ensure_from_keep(known, self.adapters)
+            if not got:
+                # no LINK anchor (e.g. never retained): ingest directly
+                if live["adapter"] is None:
+                    info = self.cas.register_file(Path(live["path"]))
+                    if info.ref != known:
+                        raise WeftError("data.verify_failed",
+                                        f"({run}, {rel}) no longer "
+                                        f"matches its recorded output "
+                                        f"hash", stage="staging")
+                    self.store.set_location(known, "@workspace",
+                                            str(self.cas.root))
+                else:
+                    self.store.update_dataref_meta(known, {"keep": {
+                        "target": run, "rel": rel,
+                        "site": row["site"], "path": live["path"]}})
+                    if not self.dataman.ensure_from_keep(known,
+                                                         self.adapters):
+                        raise WeftError("data.verify_failed",
+                                        f"({run}, {rel}) no longer "
+                                        f"matches its recorded output "
+                                        f"hash", stage="staging")
+            d = self.store.get_dataref(known) or {}
+            return {"ref": known, "kind": d.get("kind", "file"),
+                    "bytes": d.get("bytes", 0),
+                    "resolved_from": live["at"],
+                    "note": "manifest ref reused — no rehash"}
+        # undeclared: lazy identity at first computational use
+        if live["adapter"] is None:
+            return self.dataman.register(
+                Path(live["path"]), origin=f"run:{run}/{rel}")
+        return self.dataman.register_site_path(
+            live["adapter"], row["site"], live["path"],
+            origin=f"run:{run}/{rel}", ingest=ingest)
+
+    def data_register(self, path: str | None = None,
+                      site: str | None = None,
                       expected_sha256: str | None = None,
-                      ingest: bool = True) -> dict:
+                      ingest: bool = True, run: str | None = None,
+                      rel: str | None = None) -> dict:
         """Hash a workspace path — or ingest a URL (http/s/s3/gs/azure) —
         into a DataRef. With site=, a URL is fetched straight into that
         site's CAS (hashed site-side; no controller detour), and a plain
@@ -783,7 +869,23 @@ class Weft:
         (drift → data.verify_failed naming the external source); bytes
         ingest lazily only when they must move off-site. Inputs are
         read-only by contract — through a symlink, a write damages the
-        HOME."""
+        HOME.
+
+        run=/rel= (instead of path): register BY THE (run, relpath)
+        KEY — "file X from run Y" — resolved wherever the bytes are
+        (sandbox or keep); declared outputs reuse the manifest's ref
+        with no rehash."""
+        if run is not None or rel is not None:
+            if not (run and rel) or path is not None:
+                raise WeftError(
+                    "task.invalid",
+                    "pass either path=... or run=...+rel=..., not a mix",
+                    stage="staging")
+            return self.resolve_run_file(run, rel, ingest=ingest)
+        if path is None:
+            raise WeftError("task.invalid",
+                            "path= (or run=+rel=) is required",
+                            stage="staging")
         if not ingest and (site is None or "://" in path):
             raise WeftError(
                 "task.invalid",
@@ -892,6 +994,21 @@ class Weft:
             if isinstance(task.get("env"), dict):
                 # inline spec: resolve to an EnvID first (doc 01 §2)
                 task["env"] = self.envman.ensure(task["env"])["env_id"]
+            if any(isinstance(i, dict) and "run" in i
+                   for i in task.get("inputs") or []):
+                # (run, relpath) inputs — "file X from run Y" — resolve
+                # to refs NOW so the task hash keys on content
+                # (retention2.md); mount_as defaults to the relpath
+                resolved = []
+                for i in task.get("inputs") or []:
+                    if isinstance(i, dict) and "run" in i:
+                        got = self.resolve_run_file(i["run"], i["rel"])
+                        resolved.append(
+                            {"ref": got["ref"],
+                             "mount_as": i.get("mount_as") or i["rel"]})
+                    else:
+                        resolved.append(i)
+                task["inputs"] = resolved
             t = Task.from_dict(task)
             r = self.runner.submit(t, force=force, dry_run=dry_run)
             self.store.audit_log(None, "task.submit",
@@ -1624,18 +1741,18 @@ class Weft:
                                    label, background, layout=layout)
 
     def run_file_stat(self, target: str, rel: str) -> dict:
-        """Existence + size + mtime of a file in a run's sandbox — the
-        in-sandbox vs swept distinction a Files panel needs (inventory
-        says what EXISTED; this says what's still on disk)."""
+        """Existence + size + mtime by the (run, relpath) KEY — resolved
+        against the sandbox, then the run's keep (retention2.md), with
+        `at` saying which answered. Inventory says what EXISTED; this
+        says what's still on disk, wherever it now is."""
         return self.retains.file_stat(target, rel)
 
     def run_file_read(self, target: str, rel: str,
                       max_bytes: int = 1 << 20) -> dict:
-        """Size-capped preview read from a run's sandbox (live or dead;
-        path confined to the jobdir). Returns base64 bytes + truncated
-        flag. A preview channel, not a transport — hard-capped at 8 MB;
-        big files travel via data_register(path, site=…) → data_fetch,
-        which also mints the lineage edge."""
+        """Size-capped preview read by the (run, relpath) key — sandbox
+        or keep, live or dead; `at` says which copy served it. A
+        preview channel, not a transport — hard-capped at 8 MB; big
+        files travel via data_register(run=…, rel=…) → data_fetch."""
         return self.retains.file_read(target, rel, max_bytes)
 
     def run_discard(self, target: str) -> dict:

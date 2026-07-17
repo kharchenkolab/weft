@@ -139,8 +139,15 @@ class Store:
             "target TEXT PRIMARY KEY, site TEXT, label TEXT,"
             "location TEXT, in_place INTEGER, files INTEGER, bytes INTEGER,"
             "method TEXT, state TEXT, error TEXT, retained_at REAL,"
-            "selection TEXT)"
+            "selection TEXT, moved INTEGER)"
         )
+        rrcols = {r[1] for r in
+                  self._conn.execute("PRAGMA table_info(retained_runs)")}
+        if rrcols and "moved" not in rrcols:
+            # v1 rows all moved (mark-in-place is a v2 concept); NULL
+            # reads as moved for forget semantics
+            self._conn.execute(
+                "ALTER TABLE retained_runs ADD COLUMN moved INTEGER")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS spec_aliases("
             "spec_hash TEXT PRIMARY KEY, env_id TEXT, created_at REAL)"
@@ -441,6 +448,14 @@ class Store:
             (ref, kind, nbytes, _j(chunks) if chunks else None, _j(meta or {})),
         )
 
+    def update_dataref_meta(self, ref: str, patch: dict) -> None:
+        row = self.get_dataref(ref)
+        if not row:
+            return
+        meta = {**(row.get("meta") or {}), **patch}
+        self._write("UPDATE datarefs SET meta=? WHERE ref=?",
+                    (_j(meta), ref))
+
     def get_dataref(self, ref: str) -> dict | None:
         r = self._row("SELECT * FROM datarefs WHERE ref=?", (ref,))
         if not r:
@@ -722,14 +737,16 @@ class Store:
     def put_retained(self, target: str, site: str, label: str | None,
                      location: str, in_place: bool, files: int,
                      nbytes: int, state: str,
-                     selection: dict | None = None) -> None:
+                     selection: dict | None = None,
+                     moved: bool = True) -> None:
         self._write(
             "INSERT OR REPLACE INTO retained_runs(target, site, label,"
             " location, in_place, files, bytes, method, state, error,"
-            " retained_at, selection) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            " retained_at, selection, moved)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (target, site, label, location, int(in_place), files, nbytes,
              None, state, None, time.time(),
-             json.dumps(selection) if selection else None),
+             json.dumps(selection) if selection else None, int(moved)),
         )
 
     def update_retained(self, target: str, *, state: str | None = None,

@@ -33,7 +33,7 @@ def test_local_retain_places_and_records(w, tmp_path):
                   "echo big > out.dat && echo junk > tmp/x")
     r = w.run_retain(jid, include=["figs/**", "out.dat"],
                      exclude=["tmp/**"], label="paper-1",
-                     background=False)
+                     background=False, dest="@workspace")
     assert r["state"] == "done" and r["files"] == 2
     dest = Path(r["location"]["path"])
     assert (dest / "figs/a.svg").read_text() == "svg\n"
@@ -54,14 +54,14 @@ def test_retain_on_running_job_pins_and_overcap_refused(w, tmp_path):
     r = w.task_submit({"command": "sleep 30", "site": "local"})
     time.sleep(1)
     # a live-run retain is a PIN now (pin-at-settlement addendum)
-    out = w.run_retain(r["job_id"], background=False)
+    out = w.run_retain(r["job_id"], background=False, dest="@workspace")
     assert out["state"] == "pinned-pending"
     w.run_forget(target=r["job_id"])       # cancel the pin
     w.task_cancel(r["job_id"])
 
     jid = _run(w, "dd if=/dev/zero of=big.bin bs=1024 count=64 2>/dev/null")
     out = w.run_retain(jid, include=["big.bin"], max_gb=0.00001,
-                       background=False)
+                       background=False, dest="@workspace")
     assert out["error"] == "task.invalid" and "GB" in out["detail"]
 
 
@@ -75,12 +75,12 @@ def test_live_kernel_retains_completed_blocks_only(w):
     assert r["rc"] == 0
     # completed block's artifacts: retainable while the kernel lives
     out = w.run_retain(k, include=["blocks/*.artifacts/**"],
-                       background=False)
+                       background=False, dest="@workspace")
     assert out["state"] == "done"
     dest = Path(out["location"]["path"])
     assert (dest / f"blocks/{r['block']:04d}.artifacts/t.csv").exists()
     # a loose cwd file mid-life becomes a PIN, captured at settlement
-    pin = w.run_retain(k, include=["loose.txt"], background=False)
+    pin = w.run_retain(k, include=["loose.txt"], background=False, dest="@workspace")
     assert pin["state"] == "pinned-pending"
     w.kernel_stop(k)
     row = w.store.get_retained(k)
@@ -91,7 +91,7 @@ def test_live_kernel_retains_completed_blocks_only(w):
 def test_background_retain_survives_process_death(w, tmp_path, pixi_bin):
     jid = _run(w, "echo keep > result.txt")
     # enqueue, then the process "dies" before the thread can be trusted
-    w.run_retain(jid, include=["result.txt"], background=True)
+    w.run_retain(jid, include=["result.txt"], background=True, dest="@workspace")
     del w
 
     w2 = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
@@ -121,7 +121,7 @@ def test_remote_retain_transfers_home(tmp_path, pixi_bin, sshd_site):
                        "site": "beam"})
     assert w.runner.wait(r["job_id"], 300)["state"] == "DONE"
     out = w.run_retain(r["job_id"], include=["figs/**"],
-                       background=False)
+                       background=False, dest="@workspace")
     assert out["state"] == "done", out
     assert out["location"]["site"] == "@workspace"
     dest = Path(out["location"]["path"])

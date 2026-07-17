@@ -35,50 +35,58 @@ table knows which sites hold what; staging is the set difference.
   insists on mutating its input, copy it inside the job sandbox first
   (`cp data/in.h5 work.h5 && tool work.h5`).
 
-## Retention: keeping run outputs as plain files
+## Retention: retain marks; storage moves only when storage demands it
 
 Runs leave files; most are never wanted, some become precious LATE.
-The retention tier (misc/retention.md) keeps chosen files as ORDINARY
-BROWSABLE FILES — no refs, no hashes — with run-level provenance in a
-`.weft-run.json` sidecar:
+A KEEP is a pinned selection at a durable address (misc/retention2.md)
+— ordinary browsable files, run-level provenance in a `.weft-run.json`
+sidecar. WHERE keeps live follows from the site's declared storage:
+
+- `durable: true` on the site → **mark in place**: zero bytes move,
+  the sandbox paths stay THE paths forever, the sandbox becomes
+  sweep-exempt (`moved: false` in the result).
+- `durable: "/abs/path"` → one site-side hop to
+  `<path>/runs/<label>/<target>/` — never crosses the wire.
+- neither → the site can keep nothing; say where per call
+  (`dest="@workspace"` ships home, background + transfer events) or
+  the call refuses with `retain.no_durable` naming all three levers.
 
 ```python
-w.run_inventory(job_or_kernel_id)      # what the run left (recorded at
-                                       # terminal state; survives EVERYTHING).
-                                       # Weft-written files carry
-                                       # scaffold: true — the CONTRACT for
-                                       # splitting "the run's products" from
-                                       # weft plumbing (blocks/*.artifacts/**
-                                       # is the user's; block protocol files
-                                       # are not)
-w.run_inventory(target, live=True)     # a RUNNING run's sandbox as it is
-                                       # NOW — same shape, {"live": true},
-                                       # never persisted; the receipt is
-                                       # still written at terminal state
-w.run_retain(target, include=["figs/**"], exclude=["tmp/**"],
-             label="proj-9")           # keep: free locally (reflink/link).
-                                       # With NO include, "retain all" means
-                                       # all MY files (scaffold stays out);
-                                       # an explicit include is sovereign,
-                                       # in place under a site's declared
-                                       # retain.dir, else background
-                                       # transfer home. On a LIVE run this
-                                       # becomes a PIN (pinned-pending):
-                                       # the decision is recorded now, the
-                                       # EVENTUAL files are captured when
-                                       # the run settles (stop/death/
-                                       # completion). Completed blocks'
-                                       # $WEFT_BLOCK_DIR dirs capture
-                                       # immediately (protocol-immutable).
-                                       # layout="label" nests the tree as
-                                       # runs/<label>/<target>/ so keeps
-                                       # mirror the host's run structure.
-w.retained_runs(label="proj-9")        # what's kept, where — one query
-w.run_discard(target)                  # sandbox GC now (policy
-                                       # run_remains_days sweeps the rest)
-w.run_forget(label="proj-9")           # reclaim retained bytes; the
-                                       # inventory (knowledge) survives
+w.run_inventory(job_or_kernel_id)      # what the run left (terminal
+                                       # receipt; survives EVERYTHING;
+                                       # scaffold: true flags weft's files)
+w.run_inventory(target, live=True)     # the sandbox NOW; never persisted
+w.run_retain(target, include=["figs/**"], label="proj-9")
+                                       # NO include = all MY files
+                                       # (scaffold stays out). LIVE run →
+                                       # PIN: decision now, settled at
+                                       # stop/death/completion.
+w.retained_runs(label="proj-9")        # the catalog: what's kept, WHERE
+w.run_file_stat(t, rel); w.run_file_read(t, rel)
+                                       # the (run, relpath) KEY — resolves
+                                       # sandbox → keep, answers at=...
+w.run_forget(target=...)               # the INVERSE of retain: removes
+                                       # what retain created — the pin
+                                       # always; copies only if a move
+                                       # made them. Unmarking deletes
+                                       # NOTHING.
+w.run_discard(target)                  # byte destruction (sandboxes
+                                       # only). On a still-marked target:
+                                       # SELECTIVE — junk goes, keeps stay.
+                                       # Full deletion = forget + discard.
 ```
+
+- TTL (`policy: {run_remains_days: N}`) is OPT-IN, default off — no
+  silent loss. Retained targets are exempt regardless.
+- Chaining on a kept result: task inputs take the key directly —
+  `{"run": jb_1, "rel": "results/out.b", "mount_as": "out.b"}` —
+  resolved to the output's ref (declared outputs: no rehash;
+  undeclared: lazy identity + `run:` lineage). Same key on
+  `data_register(run=, rel=)`.
+- LINK: keeps of declared outputs anchor their refs (`meta.keep`) —
+  after cache eviction, `data_fetch` and task staging RE-OBTAIN the
+  bytes from the keep, hash-verified (`data.reobtained_from_keep`);
+  a modified keep is refused (`data.verify_failed`, source "keep").
 
 - Retain-vs-surface: retention is DURABILITY; rendering an output in a
   UI right now is a foreground fetch — different operation. The
