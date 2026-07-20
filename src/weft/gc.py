@@ -240,10 +240,23 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
         adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(r['jobdir']))}",
                         timeout=1800)
         swept_remains += 1
+    # orphaned wipe-aside trash: realize/session teardown renames big
+    # trees to `.trash-*` siblings and unlinks them in the BACKGROUND —
+    # if that detached rm dies (node reboot, OOM), the carcass stays.
+    # Reap them here, off the critical path, with a patient timeout.
+    tr = adapter.run_cmd(
+        f"for d in {shlex.quote(adapter.path('envs'))}/*.trash-* "
+        f"{shlex.quote(adapter.path('sessions'))}/*.trash-*; do "
+        "[ -e \"$d\" ] && rm -rf \"$d\" && echo \"$d\"; done; true",
+        timeout=5400)
+    reaped_trash = len([ln for ln in tr.out.splitlines() if ln.strip()])
+    if reaped_trash:
+        weft.store.emit("gc.trash_reaped", site=site, dirs=reaped_trash)
     weft.store.audit_log(None, "gc.sweep", site=site,
                          result=f"envs={evicted_envs} bytes={evicted_bytes}"
                                 f" remains={swept_remains}"
-                                f" sessions={stopped_sessions}")
+                                f" sessions={stopped_sessions}"
+                                f" trash={reaped_trash}")
     weft.store.emit("gc.swept", site=site, realizations=evicted_envs,
                     bytes=evicted_bytes, run_remains=swept_remains,
                     idle_sessions=stopped_sessions)

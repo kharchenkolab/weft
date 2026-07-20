@@ -23,6 +23,17 @@ import traceback
 # detached launch chains leave SIGINT ignored; restore interruptibility
 signal.signal(signal.SIGINT, signal.default_int_handler)
 
+# Lazy-session forward hook: the controller sets WEFT_SESSION_PREFIX when
+# this kernel attached BEFORE the session's writable prefix existed. Put
+# the future site-packages FIRST (session installs must shadow the base)
+# — the dir may not exist yet; invalidate_caches() per block makes its
+# later appearance visible to imports, preserving the live-install
+# contract with no restart.
+_SESSION_PREFIX = os.environ.get("WEFT_SESSION_PREFIX")
+if _SESSION_PREFIX:
+    sys.path.insert(0, "%s/lib/python%d.%d/site-packages" % (
+        _SESSION_PREFIX, sys.version_info[0], sys.version_info[1]))
+
 
 class _LiveFile(io.TextIOBase):
     """Write-through capture: the file exists (empty) the moment the
@@ -88,6 +99,9 @@ def main():
         err = _LiveFile(f"blocks/{n:04d}.err")
         rc = 0
         try:
+            if _SESSION_PREFIX:
+                import importlib
+                importlib.invalidate_caches()
             code = open(code_f).read()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 exec(compile(code, f"<block-{n}>", "exec"), globals_ns)

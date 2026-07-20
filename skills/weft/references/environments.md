@@ -104,7 +104,16 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   variant forced: `pytorch-gpu` metapackage or `"pytorch 2.* *cuda*"`
   build selector. Apple Silicon needs nothing (MPS is in default builds).
 - **Sessions (interactive):** `session_start(spec_or_env_id, site)` → a
-  scratch prefix.
+  scratch env, cloned LAZILY: start attaches to the base realization in
+  place (including an adopted read-only squashfs pack — no per-session
+  prefix, which matters enormously on BeeGFS/Lustre); the writable
+  clone happens at the first `session_install`/`run_installer`. A
+  no-additions session's snapshot short-circuits to the base EnvID.
+  Python kernels attached before the first install still see installed
+  packages live on the next block (forward hook); R/julia kernels
+  attached pre-install need `kernel_restart` (the install result says
+  so). If you never plan to install, skip the session: `kernel_start(
+  site, env_id=...)` attaches straight to the realization.
   - pypi-only `session_install` is FAST by default: direct uv/pip into
     the prefix, no manifest re-solve (which dominates a one-leaf add on
     big bases). The dep is still recorded — the snapshot's full solve

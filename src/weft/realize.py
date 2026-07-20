@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import shlex
 import threading
+import uuid as _uuid
 from pathlib import Path
 
 from .adapters.base import SiteAdapter
@@ -184,6 +185,20 @@ def ensure_realization(
                                     "in the parent); rebuilding")
             # site-side deletion (e.g. scratch purge): demote and rebuild
             store.set_realization(env_id, adapter.name, strategy, rel, "missing")
+            # A BROKEN copy must not outrank an intact RO pack: the
+            # writable-first guard protects a DELIBERATE rebuild (ready +
+            # intact, returned above), not stale litter. If a read-only
+            # root carries a verified copy, adopt it and displace the
+            # carcass off the critical path (rename + background unlink)
+            # instead of paying a rebuild — and a parallel-FS rm — here.
+            adopted = _adopt_from_ro_roots(env_id, env_row, adapter, store,
+                                           site_config, caps=caps)
+            if adopted:
+                _wipe_aside(adapter, rel, recreate=False)
+                store.emit("realize.adopted", env_id=env_id,
+                           site=adapter.name, via="ro-over-stale",
+                           displaced=rel)
+                return adopted
         elif adapter.file_exists(f"{rel}/.weft-ready"):
             # site has it but store forgot (crash recovery, or another
             # workspace/user built it): re-adopt — with the strategy the
@@ -504,6 +519,35 @@ def _virtual_pkg_overrides(env_row: dict) -> str:
     return out
 
 
+def _wipe_aside(adapter: SiteAdapter, rel: str, *,
+                recreate: bool = True) -> str | None:
+    """Clear `rel` in O(1): rename(2) the tree to a `.trash-*` sibling
+    (same dir → same filesystem) and unlink it in the BACKGROUND.
+
+    A synchronous rm -rf of a ~10^5-file prefix takes minutes on a
+    parallel FS (BeeGFS/Lustre/GPFS) — at the 120s run_cmd default it
+    TimeoutExpired'd out of realize entirely (cbe field report), and
+    even with a long timeout it gates the critical path for something
+    the build never needed to wait on. The trash name is namespaced so
+    gc_sweep reaps orphans if the detached rm dies with the node.
+    Returns the trash rel, or None if nothing existed."""
+    trash = f"{rel}.trash-{_uuid.uuid4().hex[:8]}"
+    p, t = shlex.quote(adapter.path(rel)), shlex.quote(adapter.path(trash))
+    script = (f"if [ -e {p} ]; then mv -f {p} {t} && echo moved; "
+              f"else echo clean; fi"
+              + (f" && mkdir -p {p}" if recreate else "")
+              + f" && {{ [ ! -e {t} ] || (nohup rm -rf {t} >/dev/null 2>&1 &); }}")
+    r = adapter.run_cmd(script, timeout=60)
+    if r.rc != 0:
+        raise WeftError(
+            "env.realize_failed",
+            f"could not clear {rel} for a fresh build (rename-aside failed)",
+            stage="realize", retryable=True,
+            hints={"detail": (r.err or r.out)[-300:], "op": "wipe-aside",
+                   "path": rel})
+    return trash if "moved" in r.out else None
+
+
 def _build_prefix(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str = "", fresh: bool = True,
@@ -512,7 +556,7 @@ def _build_prefix(
     # (squashfs resume preserves partial content — this rm was silently
     # repaying resumed source builds until it learned to stand down)
     if fresh:
-        adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))}")
+        _wipe_aside(adapter, rel)
     adapter.write_file(f"{rel}/pixi.toml", env_row["manifest"].encode())
     adapter.write_file(f"{rel}/pixi.lock", env_row["native_lock"].encode())
     manifest_path = adapter.path(f"{rel}/pixi.toml")
@@ -832,8 +876,7 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     t0 = _t.time()
     store.emit("realize.overlay", env_id=env_id, site=adapter.name,
                parent=parent_env_id, delta=delta)
-    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
-                    f"mkdir -p {shlex.quote(adapter.path(rel))}")
+    _wipe_aside(adapter, rel)
 
     # a source-built delta needs a compiler that is NOT in the env; weft
     # brings its own, on PATH for the build only. Language layers (R,
@@ -1150,8 +1193,10 @@ def _build_packed(
     site_tar = f"{endpoint['cas_root']}/{digest[:2]}/{digest}"
     dest = adapter.path(rel)
     # fresh=False: wipe-or-resume was decided upstream (squashfs resume)
-    adapter.run_cmd((f"rm -rf {shlex.quote(dest)} && " if fresh else "")
-                    + f"mkdir -p {shlex.quote(dest)}")
+    if fresh:
+        _wipe_aside(adapter, rel)
+    else:
+        adapter.run_cmd(f"mkdir -p {shlex.quote(dest)}")
     unpack = adapter.run_cmd(
         f"cd {shlex.quote(dest)} && "
         f"{shlex.quote(adapter.path('bin/pixi-unpack'))} "
@@ -1276,18 +1321,13 @@ def _build_squashfs(
         emit("realize.resumed", env_id=env_id, site=adapter.name,
              location=content)
     else:
-        # big trees on parallel filesystems take minutes to unlink — a
-        # timeout mid-rm would leave a half-dead tree AND keep deleting
-        # behind our back
-        adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(rel))} && "
-                        f"mkdir -p {shlex.quote(adapter.path(rel))}",
-                        timeout=1800)
+        # big trees on parallel filesystems take minutes to unlink —
+        # rename them aside and let the delete run behind the build
+        _wipe_aside(adapter, rel)
         if staging_rel:
             # both sides start clean; mnt/ comes back as the mountpoint
-            adapter.run_cmd(
-                f"rm -rf {shlex.quote(adapter.path(staging_rel))} && "
-                f"mkdir -p {shlex.quote(adapter.path(staging_rel))} "
-                f"{shlex.quote(adapter.path(inner))}", timeout=1800)
+            _wipe_aside(adapter, staging_rel)
+            adapter.run_cmd(f"mkdir -p {shlex.quote(adapter.path(inner))}")
     # content: modules stay OUT of the image (module preludes are host
     # state, run before activation — the outer script carries them)
     if internet:
@@ -1324,11 +1364,10 @@ def _build_squashfs(
     image_sha256 = parts[0] if parts else ""
     image_bytes = int(parts[1]) if len(parts) > 1 else 0
     # the tree was scaffolding; the image is the realization (unlinking
-    # ~10^5 files on a parallel FS takes minutes — same lesson as the
-    # resume-path rm: a 120s default timeout abandons a half-running rm)
-    adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(content))} && "
-                    f"mkdir -p {shlex.quote(adapter.path(inner))}",
-                    timeout=1800)
+    # ~10^5 files on a parallel FS takes minutes — rename aside, delete
+    # in the background, keep the build moving)
+    _wipe_aside(adapter, content, recreate=False)
+    adapter.run_cmd(f"mkdir -p {shlex.quote(adapter.path(inner))}")
 
     _write_squashfs_activation(adapter, rel, modules, modules_init)
     emit("realize.squashfs.done", env_id=env_id, site=adapter.name,

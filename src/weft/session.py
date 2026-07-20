@@ -38,7 +38,16 @@ class SessionManager:
 
     def start(self, base: str | dict, adapter: SiteAdapter) -> dict:
         """Accepts an EnvID *or a spec* — exploration should not cost three
-        round trips (ensure → throwaway task to realize → start)."""
+        round trips (ensure → throwaway task to realize → start).
+
+        LAZY CLONE (parallel-FS round): a session buys mutability, and
+        the writable clone is its price — so the price is paid at the
+        first MUTATION (session_install / run_installer), not at start.
+        Until then, execution attaches to the base realization in place —
+        including an adopted read-only squashfs pack at its recorded
+        location — so a no-additions session lays down no per-session
+        prefix (a ~10^5-file hardlink forest that costs minutes on
+        BeeGFS/Lustre and defeats the mount it shadows)."""
         if isinstance(base, dict):
             base_env_id = self.envman.ensure(base)["env_id"]
         else:
@@ -49,16 +58,15 @@ class SessionManager:
         site_row = self.store.get_site(adapter.name)
         caps = (site_row or {}).get("capabilities") or {}
         from .capability import compute_view
-        if not compute_view(caps).get("internet", False):
-            raise WeftError(
-                "env.unsatisfiable_on_site",
-                f"session envs need package-index access from {adapter.name}",
-                stage="realize",
-                hints={"suggestion": "extend the spec instead and let weft "
-                                     "deliver a packed realization"},
-            )
-        base_rel = env_dir_rel(base_env_id)
-        if not adapter.file_exists(f"{base_rel}/.weft-ready"):
+        # index access is a fact to SURFACE at start and a requirement to
+        # ENFORCE at the first install — a no-additions session on an
+        # air-gapped site is perfectly serviceable
+        no_index = not compute_view(caps).get("internet", False)
+        # the RECORDED location: an adopted read-only realization lives
+        # outside the writable root (env_dir_rel is only the default)
+        real = self.store.get_realization(base_env_id, adapter.name)
+        base_loc = (real or {}).get("location") or env_dir_rel(base_env_id)
+        if not adapter.file_exists(f"{base_loc}/.weft-ready"):
             # realizing the base is weft's errand, not the agent's
             if self.runner is None:
                 raise WeftError(
@@ -79,10 +87,48 @@ class SessionManager:
                             "dataman": self.runner.dataman})
         session_id = "ses_" + uuid.uuid4().hex[:10]
         rel = f"sessions/{session_id}"
-        # clone the *project* (manifest + lock) from the STORE, not the
-        # realization dir — an overlay realization has no pixi files of its
-        # own. The install is a fresh hardlink forest from the shared
-        # package cache — cheap, and the base realization stays immutable
+        # a home for kernels/sidecars now, the prefix later (on demand)
+        adapter.run_cmd(f"mkdir -p {shlex.quote(adapter.path(rel))}",
+                        timeout=60)
+        self.store.put_session(session_id, base_env_id, adapter.name, rel,
+                               materialized=False)
+        self.store.emit("session.started", session=session_id,
+                        base=base_env_id, site=adapter.name, lazy=True)
+        out = {
+            "session_id": session_id, "site": adapter.name,
+            "base_env_id": base_env_id,
+            "materialized": False,
+            "note": "running from the base realization; a writable "
+                    "prefix is cloned at the first session_install",
+            "warning": "unhashed scratch environment — snapshot before "
+                       "recording any result",
+        }
+        if no_index:
+            out["warning"] += ("; no package-index access from "
+                               f"{adapter.name} — installs will refuse")
+        return out
+
+    def _materialize(self, s: dict, adapter: SiteAdapter) -> bool:
+        """Clone the writable per-session prefix (manifest + lock from
+        the STORE — an overlay realization has no pixi files of its own;
+        the install is a hardlink forest from the shared package cache).
+        Deferred to the first mutation. Returns True iff this call did
+        the clone."""
+        if s.get("materialized", True):
+            return False
+        site_row = self.store.get_site(adapter.name)
+        from .capability import compute_view
+        if not compute_view((site_row or {}).get("capabilities")
+                            or {}).get("internet", False):
+            raise WeftError(
+                "env.unsatisfiable_on_site",
+                f"session installs need package-index access from "
+                f"{adapter.name}",
+                stage="realize",
+                hints={"suggestion": "extend the spec instead and let weft "
+                                     "deliver a packed realization"})
+        env_row = self.store.get_env(s["base_env_id"])
+        rel = s["location"]
         adapter.write_file(f"{rel}/pixi.toml", env_row["manifest"].encode())
         adapter.write_file(f"{rel}/pixi.lock", env_row["native_lock"].encode())
         from .realize import _virtual_pkg_overrides
@@ -97,15 +143,23 @@ class SessionManager:
                 "env.realize_failed", "session clone failed", stage="realize",
                 hints={"log_tail": (r.err or r.out)[-1000:]},
             )
-        self.store.put_session(session_id, base_env_id, adapter.name, rel)
-        self.store.emit("session.started", session=session_id,
-                        base=base_env_id, site=adapter.name)
-        return {
-            "session_id": session_id, "site": adapter.name,
-            "base_env_id": base_env_id,
-            "warning": "unhashed scratch environment — snapshot before "
-                       "recording any result",
-        }
+        self.store.set_session_materialized(s["session_id"])
+        s["materialized"] = True
+        self.store.emit("session.materialized", session=s["session_id"],
+                        base=s["base_env_id"])
+        return True
+
+    def _base_activation(self, s: dict, adapter: SiteAdapter) -> tuple[str, bool]:
+        """Activation line for the base realization (pre-clone lane) and
+        whether the script must run inside a mount namespace (squashfs
+        bases mount lazily; the mount must die with the command)."""
+        real = self.store.get_realization(s["base_env_id"], adapter.name)
+        loc = (real or {}).get("location") or env_dir_rel(s["base_env_id"])
+        act = f". {shlex.quote(adapter.path(loc))}/activate.sh"
+        ns = bool(self.runner is not None
+                  and self.runner.ns_wrap_needed(s["base_env_id"],
+                                                 adapter.name))
+        return act, ns
 
     def _get(self, session_id: str, allow_stopped: bool = False) -> dict:
         s = self.store.get_session(session_id)
@@ -121,13 +175,21 @@ class SessionManager:
 
     def exec(self, session_id: str, adapter: SiteAdapter, cmd: str) -> dict:
         s = self._get(session_id)
-        manifest = adapter.path(f"{s['location']}/pixi.toml")
-        r = adapter.run_cmd(
-            f"cd {shlex.quote(adapter.path(s['location']))} && "
-            f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
-            f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )",
-            timeout=600,
-        )
+        sdir = shlex.quote(adapter.path(s["location"]))
+        if s.get("materialized", True):
+            manifest = adapter.path(f"{s['location']}/pixi.toml")
+            script = (f"cd {sdir} && "
+                      f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
+                      f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )")
+        else:
+            # pre-clone: the base realization IS the session env (content-
+            # identical by definition until the first install)
+            act, ns = self._base_activation(s, adapter)
+            script = f"cd {sdir} && {act} && ( {cmd} )"
+            if ns:
+                from .realize import _ns_wrap_cmd
+                script = _ns_wrap_cmd(script)
+        r = adapter.run_cmd(script, timeout=600)
         self.store.audit_log(None, "session.exec", site=adapter.name,
                              command=cmd, why=f"session {session_id}",
                              result=f"rc={r.rc}")
@@ -149,6 +211,13 @@ class SessionManager:
         conda, pypi = list(conda or []), list(pypi or [])
         if not conda and not pypi:
             raise WeftError("task.invalid", "nothing to install", stage="realize")
+        # first mutation pays for mutability: clone the prefix now
+        first_clone = self._materialize(s, adapter)
+        clone_note = ("writable prefix cloned on this first install; "
+                      "running python kernels see the new packages on "
+                      "their next block (forward hook); R/julia kernels "
+                      "attached before this need kernel_restart"
+                      ) if first_clone else None
         fallback_tail = None
         if fast and pypi and not conda:
             out = self._fast_pypi(s, adapter, pypi)
@@ -156,14 +225,17 @@ class SessionManager:
                 self.store.session_add_deps(session_id, [], pypi)
                 self.store.emit("session.installed", session=session_id,
                                 conda=[], pypi=pypi, fast=True)
-                return {"installed": {"conda": [], "pypi": pypi},
-                        "session_id": session_id, "solved": False,
-                        "method": out["method"],
-                        "verified_at": "snapshot",
-                        "note": "installed without a solve — the "
-                                "snapshot's full re-solve is the "
-                                "conflict check; pass fast=False to "
-                                "solve at add time"}
+                fast_out = {"installed": {"conda": [], "pypi": pypi},
+                            "session_id": session_id, "solved": False,
+                            "method": out["method"],
+                            "verified_at": "snapshot",
+                            "note": "installed without a solve — the "
+                                    "snapshot's full re-solve is the "
+                                    "conflict check; pass fast=False to "
+                                    "solve at add time"}
+                if clone_note:
+                    fast_out["materialized_note"] = clone_note
+                return fast_out
             fallback_tail = (out or {}).get("detail")
         manifest = adapter.path(f"{s['location']}/pixi.toml")
         parts = []
@@ -191,6 +263,8 @@ class SessionManager:
                         conda=conda, pypi=pypi)
         out = {"installed": {"conda": conda, "pypi": pypi},
                "session_id": session_id}
+        if clone_note:
+            out["materialized_note"] = clone_note
         if fallback_tail:
             out["fast_fallback"] = ("direct install failed; solved the "
                                     "full manifest instead: "
@@ -236,6 +310,8 @@ class SessionManager:
         rebuilds ANYWHERE. Without it, a step that reads local paths mints
         an env only this machine can build — the grade will say so."""
         s = self._get(session_id)
+        # an installer mutates the prefix: first mutation clones it
+        first_clone = self._materialize(s, adapter)
         captured = None
         if source:
             from pathlib import Path as _P
@@ -261,16 +337,23 @@ class SessionManager:
                                          input=captured)
         self.store.emit("session.installer", session=session_id, cmd=cmd[:200],
                         portable=bool(captured))
-        return {"session_id": session_id, "installed": cmd,
-                "captured": True, "portable": bool(captured),
-                "source_ref": (captured or {}).get("ref"),
-                "note": "snapshot will carry this as a post_install step "
-                        "(grade: escape-hatch) with your note attached"
-                        + ("; its source travels with the env, so it rebuilds "
-                           "anywhere" if captured else
-                           " — pass source=<path> if the command needs local "
-                           "files, or the env will only rebuild on this "
-                           "machine")}
+        out = {"session_id": session_id, "installed": cmd,
+               "captured": True, "portable": bool(captured),
+               "source_ref": (captured or {}).get("ref"),
+               "note": "snapshot will carry this as a post_install step "
+                       "(grade: escape-hatch) with your note attached"
+                       + ("; its source travels with the env, so it rebuilds "
+                          "anywhere" if captured else
+                          " — pass source=<path> if the command needs local "
+                          "files, or the env will only rebuild on this "
+                          "machine")}
+        if first_clone:
+            out["materialized_note"] = (
+                "writable prefix cloned on this first installer; running "
+                "python kernels see its packages on their next block "
+                "(forward hook); R/julia kernels attached before this "
+                "need kernel_restart")
+        return out
 
     def snapshot(self, session_id: str, name: str | None = None,
                  notes: list[str] | None = None, verify: bool = True) -> dict:
@@ -287,6 +370,17 @@ class SessionManager:
         # session still snapshots (late saves from session kernels;
         # retention.md R6)
         s = self._get(session_id, allow_stopped=True)
+        if not (s["added_conda"] or s["added_pypi"]
+                or s.get("installers")):
+            # nothing was added: the citable env IS the base. Re-solving
+            # a zero-delta spec at snapshot time could pick newer builds
+            # and mint a DIFFERENT EnvID for identical intent — identity
+            # must not drift with the date the user pressed snapshot.
+            self.store.emit("session.snapshot", session=session_id,
+                            env_id=s["base_env_id"])
+            return {"env_id": s["base_env_id"], "session_id": session_id,
+                    "note": "session added nothing — the base env is "
+                            "the snapshot"}
         env_row = self.store.get_env(s["base_env_id"])
         installers = s.get("installers") or []
         spec = {
@@ -377,10 +471,9 @@ class SessionManager:
         """Realize the minted env from scratch — the only honest proof."""
         if adapter is None or self.runner is None:
             return
-        from .realize import ensure_realization, env_dir_rel
-        import shlex as _sh
+        from .realize import ensure_realization, env_dir_rel, _wipe_aside
         rel = env_dir_rel(env_id)
-        adapter.run_cmd(f"rm -rf {_sh.quote(adapter.path(rel))}")
+        _wipe_aside(adapter, rel, recreate=False)
         self.store.set_realization(env_id, adapter.name, "prefix", rel,
                                    "missing")
         site_row = self.store.get_site(adapter.name) or {}
@@ -398,7 +491,11 @@ class SessionManager:
 
     def stop(self, session_id: str, adapter: SiteAdapter) -> dict:
         s = self._get(session_id)
-        adapter.run_cmd(f"rm -rf {shlex.quote(adapter.path(s['location']))}")
+        # rename-aside + background unlink: a materialized prefix is a
+        # ~10^5-file tree — synchronous rm gated stop for minutes on
+        # parallel filesystems
+        from .realize import _wipe_aside
+        _wipe_aside(adapter, s["location"], recreate=False)
         self.store.set_session_state(session_id, "stopped")
         self.store.emit("session.stopped", session=session_id)
         return {"session_id": session_id, "state": "stopped"}

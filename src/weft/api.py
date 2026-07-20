@@ -1094,7 +1094,12 @@ class Weft:
     def session_start(self, env_id, site: str) -> dict:
         """Start a mutable scratch environment for iteration. Accepts an
         EnvID *or an inline spec* — and realizes the base itself if needed,
-        so exploration costs one call, not three."""
+        so exploration costs one call, not three.
+
+        The writable clone is LAZY: start attaches to the base
+        realization in place (a no-additions session lays down no
+        per-session prefix); the first session_install/run_installer
+        pays for mutability by cloning then."""
         return self.sessions.start(env_id, self._adapter(site))
 
     def _session_adapter(self, session_id: str):

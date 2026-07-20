@@ -197,9 +197,14 @@ def test_staged_build_command_stream():
     sq = next(c for c in a.commands if "mksquashfs" in c)
     assert f"mksquashfs {staging_abs} {REL}/image.sqfs" in sq
     assert "unshare" not in sq
-    # scaffolding cleanup hits staging; the tree keeps its mountpoint
+    # scaffolding cleanup hits staging via WIPE-ASIDE: renamed to a
+    # trash sibling, deleted in the background — a parallel-FS rm never
+    # gates the build. The tree keeps its mountpoint via its own mkdir.
     tail = next(c for c in reversed(a.commands) if "rm -rf" in c)
-    assert staging_abs in tail and f"mkdir -p {mount_abs}" in tail
+    assert staging_abs in tail and "mv -f" in tail
+    assert "nohup rm -rf" in tail        # background, not synchronous
+    assert any(f"mkdir -p {mount_abs}" in c and staging_abs not in c
+               for c in a.commands)
     # outer activation sidecar still bakes the TREE path
     assert b'__weft_sq="' + REL.encode() in a.files[f"{REL}/activate.sh"]
     assert meta["staging"] == {"used": True, "dir": staging_abs}

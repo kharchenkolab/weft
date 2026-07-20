@@ -94,6 +94,7 @@ class KernelManager:
         driver_file, interp = LANGUAGES[lang]
 
         activate = "true"
+        ns_env_id = None   # set by the pre-clone session lane (base env)
         if env_id:
             # the RECORDED location: an adopted read-only realization
             # (institutional tree) lives OUTSIDE the writable root
@@ -119,17 +120,37 @@ class KernelManager:
                     f"session {session_id} lives on {s['site']!r}, "
                     f"not {site!r} — kernels attach where the session "
                     "prefix is", stage="infra")
-            manifest = adapter.path(f"{s['location']}/pixi.toml")
-            if not adapter.file_exists(f"{s['location']}/pixi.toml"):
-                raise WeftError(
-                    "task.invalid",
-                    f"session {session_id} has no prefix on {site}",
-                    stage="infra")
-            # the same activation session_exec uses: the LIVE prefix —
-            # a session_install is visible to the kernel's next block
-            activate = (f"eval \"$({shlex.quote(adapter.pixi_bin)} "
-                        f"shell-hook --manifest-path "
-                        f"{shlex.quote(manifest)})\"")
+            if s.get("materialized", True):
+                manifest = adapter.path(f"{s['location']}/pixi.toml")
+                if not adapter.file_exists(f"{s['location']}/pixi.toml"):
+                    raise WeftError(
+                        "task.invalid",
+                        f"session {session_id} has no prefix on {site}",
+                        stage="infra")
+                # the same activation session_exec uses: the LIVE prefix —
+                # a session_install is visible to the kernel's next block
+                activate = (f"eval \"$({shlex.quote(adapter.pixi_bin)} "
+                            f"shell-hook --manifest-path "
+                            f"{shlex.quote(manifest)})\"")
+            else:
+                # lazy session, pre-clone: the base realization IS the
+                # session env. The FORWARD HOOK keeps the live-install
+                # contract: the future prefix's bin goes on PATH now and
+                # WEFT_SESSION_PREFIX tells the python driver to put the
+                # future site-packages at sys.path[0] + invalidate import
+                # caches per block — when a later session_install
+                # materializes the prefix, this RUNNING kernel sees the
+                # new packages on its next block, no restart. (R/julia
+                # drivers don't implement the hook yet: there,
+                # kernel_restart adopts the prefix.)
+                ns_env_id = s["base_env_id"]
+                real = self.store.get_realization(ns_env_id, site)
+                rel0 = (real or {}).get("location") or env_dir_rel(ns_env_id)
+                prefix = adapter.path(f"{s['location']}/.pixi/envs/default")
+                activate = (
+                    f". {shlex.quote(adapter.path(rel0))}/activate.sh && "
+                    f"export WEFT_SESSION_PREFIX={shlex.quote(prefix)} && "
+                    f"export PATH={shlex.quote(prefix + '/bin')}:\"$PATH\"")
 
         kernel_id = "krn_" + uuid.uuid4().hex[:10]
         jobdir_rel = f"kernels/{kernel_id}"
@@ -141,7 +162,8 @@ class KernelManager:
         adapter.write_file(
             f"{jobdir_rel}/cmd.sh",
             f"mkdir -p blocks\nexec {interp} {driver_file}\n".encode())
-        if env_id and self.runner.ns_wrap_needed(env_id, site):
+        if (env_id or ns_env_id) \
+                and self.runner.ns_wrap_needed(env_id or ns_env_id, site):
             # the kernel's whole life runs inside one mount namespace;
             # its env mount dies with the driver
             adapter.write_file(f"{jobdir_rel}/ns", b"1\n")

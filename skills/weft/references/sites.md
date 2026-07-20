@@ -233,8 +233,12 @@ w.register_site("hpc", "slurm", {..., "root": "/scratch/me/.weft",
 - An EnvID already realized under a read-only root is **adopted in
   place** — verified (marker, digest, activation), never written or
   leased. Zero user disk; `realize.adopted via=ro-root`.
-- **Writable-first precedence**: your own healthy copy always wins over
-  a read-only one (so a broken base never traps you).
+- **Writable-first precedence**: your own HEALTHY copy always wins over
+  a read-only one (so a broken base never traps you). A STALE writable
+  copy (failed integrity fence, site-side purge) does NOT outrank an
+  intact RO pack: weft adopts the pack (`realize.adopted
+  via=ro-over-stale`), renames the carcass aside, and deletes it in the
+  background — no rebuild, no parallel-FS `rm` in the critical path.
 - Your `extends_env` deltas **overlay over read-only parents** — the
   overlay only ever reads the parent.
 - Lifecycle honesty: adopted bases are `read_only` in `env_status` /

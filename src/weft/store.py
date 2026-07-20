@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS sessions(
 _SESSION_MIGRATIONS = [
     ("installers", "ALTER TABLE sessions ADD COLUMN installers TEXT"),
     ("last_used", "ALTER TABLE sessions ADD COLUMN last_used REAL"),
+    # lazy clone (parallel-FS round): NULL reads as materialized — every
+    # pre-migration session was cloned eagerly at start
+    ("materialized", "ALTER TABLE sessions ADD COLUMN materialized INTEGER"),
 ]
 
 
@@ -787,17 +790,22 @@ class Store:
         self._write("DELETE FROM retained_runs WHERE target=?", (target,))
 
     def put_session(self, session_id: str, base_env_id: str, site: str,
-                    location: str) -> None:
+                    location: str, materialized: bool = True) -> None:
         now = time.time()
         self._write(
             # column-explicit: migrations add columns, and a positional
             # INSERT would break the moment one lands
             "INSERT INTO sessions(session_id, base_env_id, site, location,"
-            " added_conda, added_pypi, state, created_at, last_used)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
+            " added_conda, added_pypi, state, created_at, last_used,"
+            " materialized)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?)",
             (session_id, base_env_id, site, location, "[]", "[]",
-             "active", now, now),
+             "active", now, now, 1 if materialized else 0),
         )
+
+    def set_session_materialized(self, session_id: str) -> None:
+        self._write("UPDATE sessions SET materialized=1 WHERE session_id=?",
+                    (session_id,))
 
     def get_session(self, session_id: str) -> dict | None:
         r = self._row("SELECT * FROM sessions WHERE session_id=?", (session_id,))
@@ -817,6 +825,10 @@ class Store:
             # activity fact on record — never invent a fresher one
             "last_used": (r["last_used"] if "last_used" in keys
                           and r["last_used"] else r["created_at"]),
+            # NULL = pre-lazy row = was cloned eagerly at start
+            "materialized": bool(r["materialized"]
+                                 if "materialized" in keys
+                                 and r["materialized"] is not None else 1),
         }
 
     def touch_session(self, session_id: str) -> None:

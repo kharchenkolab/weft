@@ -313,12 +313,28 @@ w.site_teardown("cloud-gpu")  # explicit; watchdog also tears down on overrun
 Session environments (interactive exploration, doc 03 §7):
 
 ```python
-s = w.session_start(env_id, "beamlab")           # scratch clone, unhashed
+s = w.session_start(env_id, "beamlab")           # LAZY: no clone yet —
+                                                 # runs from the base
+                                                 # realization in place
 w.session_exec(s["session_id"], "python -c 'import emcee'")   # probe
-w.session_install(s["session_id"], conda=["emcee"])           # seconds (cache)
+w.session_install(s["session_id"], conda=["emcee"])           # FIRST mutation
+                                                 # clones the prefix (seconds
+                                                 # against a warm cache)
 snap = w.session_snapshot(s["session_id"])       # minimal delta → real EnvID
 # re-run the final computation under snap["env_id"] → enters provenance
 ```
+
+A session buys mutability, and the writable clone is its price — paid at
+the first `session_install`/`run_installer`, not at start. A no-additions
+session never lays down a per-session prefix (on BeeGFS/Lustre that's a
+~10^5-file hardlink forest defeating the very squashfs mount it shadows);
+its snapshot short-circuits to the base EnvID. Python kernels attached
+before the first install still see installed packages live on their next
+block (the driver holds the future prefix on `sys.path` — the forward
+hook); R/julia kernels attached pre-install need `kernel_restart`, and
+the install result says so. If you never intend to install,
+`kernel_start(site, env_id=...)` attaches to the realization directly
+and needs no session at all.
 
 ### Monitoring, arrays, load
 
