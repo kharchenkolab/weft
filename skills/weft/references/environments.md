@@ -114,6 +114,14 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   attached pre-install need `kernel_restart` (the install result says
   so). If you never plan to install, skip the session: `kernel_start(
   site, env_id=...)` attaches straight to the realization.
+  - COLD base (adopted pack / archive-unpacked: empty package cache):
+    pypi adds become a **pylib overlay** over the mount — only the
+    missing dep closure is fetched (two-phase pip: dry-run-resolve with
+    the base visible, then `--no-deps --target`); conda adds and
+    `run_installer` refuse with `session.cold_base` + levers
+    (`extends_env` / warm-cache site / `full_clone=true`). The base is
+    NEVER silently re-downloaded. `runtime` gains a `pylib` field; the
+    snapshot still mints the citable extends env.
   - Exec-ing interpreters yourself? Consume `session_runtime(id)`
     (echoed on start/install results and `list_sessions` rows):
     `{source, env_id (null once mutated), prefix, activation, ns_wrap,

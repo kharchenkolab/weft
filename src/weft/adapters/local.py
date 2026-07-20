@@ -76,11 +76,23 @@ class LocalAdapter(SiteAdapter):
         return ShimResult(proc.returncode, proc.stdout, proc.stderr)
 
     def run_cmd(self, script: str, *, timeout: float = 120.0) -> ShimResult:
-        proc = subprocess.run(
-            ["sh", "-c", script],
-            capture_output=True, text=True, timeout=timeout, env=self._env(),
-            preexec_fn=self._preexec,
-        )
+        try:
+            proc = subprocess.run(
+                ["sh", "-c", script],
+                capture_output=True, text=True, timeout=timeout,
+                env=self._env(), preexec_fn=self._preexec,
+            )
+        except subprocess.TimeoutExpired as e:
+            # classified, like the ssh adapter — a raw TimeoutExpired
+            # surfaces as an internal.error traceback (a stalled pixi
+            # transfer wedged a session materialize for 15 minutes and
+            # then died illegibly — cbe field report)
+            raise WeftError(
+                "site.unreachable",
+                f"local command on {self.name} timed out after {timeout}s",
+                stage="infra", retryable=True,
+                hints={"command": script[:120]},
+            ) from e
         return ShimResult(proc.returncode, proc.stdout, proc.stderr)
 
     def write_file(self, rel: str, data: bytes, mode: int = 0o644) -> None:

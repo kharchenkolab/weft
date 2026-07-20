@@ -22,6 +22,7 @@ CODES = {
     "env.platform_mismatch": "environment locked for platforms that do not include this site's; hints name both and the spec fix",
     "env.evict_blocked": "overlay environments stack on this prefix; hints name them and the cascade lever",
     "retain.no_durable": "the site declares no durable storage; hints carry the levers (dest='@workspace', durable=true, durable='/path')",
+    "session.cold_base": "the session's base was adopted/unpacked here (cold package cache): cloning it would re-download the whole base; hints carry the levers (extends_env, warm-cache site, full_clone=true)",
     "data.transfer_failed": "bulk transfer failed; hints say whether resumable",
     "data.verify_failed": "content hash mismatch after transfer or at use",
     "data.missing": "referenced DataRef unknown or content unavailable",

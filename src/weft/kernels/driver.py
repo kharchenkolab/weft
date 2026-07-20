@@ -33,6 +33,12 @@ _SESSION_PREFIX = os.environ.get("WEFT_SESSION_PREFIX")
 if _SESSION_PREFIX:
     sys.path.insert(0, "%s/lib/python%d.%d/site-packages" % (
         _SESSION_PREFIX, sys.version_info[0], sys.version_info[1]))
+# pylib variant (cold-base sessions): the layer dir itself IS the site
+# dir (pip --target layout) — inserted verbatim
+_SESSION_PYLIB = os.environ.get("WEFT_SESSION_PYLIB")
+if _SESSION_PYLIB:
+    sys.path.insert(0, _SESSION_PYLIB)
+    _SESSION_PREFIX = _SESSION_PREFIX or _SESSION_PYLIB  # cache-invalidate flag
 
 
 class _LiveFile(io.TextIOBase):

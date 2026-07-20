@@ -173,7 +173,9 @@ class SessionManager:
                 raise WeftError("task.invalid", f"no active session {s}",
                                 stage="infra")
             s = row
-        if s.get("materialized", True):
+        mode = s.get("materialize_mode",
+                     "clone" if s.get("materialized", True) else "none")
+        if mode == "clone":
             manifest = adapter.path(f"{s['location']}/pixi.toml")
             return {
                 "source": "session",
@@ -199,7 +201,7 @@ class SessionManager:
             # packed/overlay/modules layouts vary — activation is the
             # contract; never hand out a path we cannot vouch for
             prefix = None
-        return {
+        out = {
             "source": "base",
             "env_id": s["base_env_id"],
             "prefix": prefix,
@@ -207,6 +209,17 @@ class SessionManager:
             "ns_wrap": ns,
             "direct_exec": strategy == "prefix" and not ns,
         }
+        if mode == "pylib":
+            # the session's own layer rides the base: activation composes
+            # it, the content is mutated (no identity), and direct exec
+            # cannot see the layer (env-var composition)
+            overlay = adapter.path(f"{s['location']}/overlay.sh")
+            out.update(
+                env_id=None,
+                activation=f"{act} && . {shlex.quote(overlay)}",
+                direct_exec=False,
+                pylib=adapter.path(f"{s['location']}/pylib"))
+        return out
 
     def _base_activation(self, s: dict, adapter: SiteAdapter) -> tuple[str, bool]:
         """Activation line for the base realization (pre-clone lane) and
@@ -219,6 +232,159 @@ class SessionManager:
                   and self.runner.ns_wrap_needed(s["base_env_id"],
                                                  adapter.name))
         return act, ns
+
+    def _base_cold(self, s: dict, adapter: SiteAdapter) -> bool:
+        """Is the base's package cache COLD on this site? An adopted
+        (read-only) or archive-unpacked (packed) realization was never
+        BUILT here, so the site's pixi cache holds none of its packages —
+        cloning the manifest would re-download the entire base from the
+        index (1.6 GB in the field report; impossible on an
+        egress-restricted node). A locally built env — including a
+        locally built squashfs — populated the cache and clones cheap."""
+        real = self.store.get_realization(s["base_env_id"], adapter.name)
+        if not real:
+            return False
+        return bool(real.get("read_only")) \
+            or "packed" in (real.get("strategy") or "")
+
+    def _cold_refusal(self, s: dict, what: str) -> WeftError:
+        env_row = self.store.get_env(s["base_env_id"]) or {}
+        return WeftError(
+            "session.cold_base",
+            f"{what} needs a writable clone of the base, but the base was "
+            "adopted/unpacked on this site (cold package cache) — cloning "
+            "re-downloads the ENTIRE base from the index",
+            stage="realize",
+            hints={"options": {
+                "extends": "mint a real delta env instead: env_ensure("
+                           f"{{'extends': '{env_row.get('spec_hash', '?')}',"
+                           " 'deps': {...}}) realizes as an overlay fetching "
+                           "only the delta",
+                "warm_site": "run this where the base was BUILT (warm pixi "
+                             "cache): the clone is a local hardlink forest "
+                             "there",
+                "full_clone": "pass full_clone=true to fetch the whole base "
+                              "from the index here (needs egress and time)",
+            }})
+
+    def _materialize_pylib(self, s: dict, adapter: SiteAdapter,
+                           pypi: list[str]) -> dict:
+        """The cold-base pypi lane: install ONLY what the base lacks into
+        a session-owned pylib layer, composed over the mounted base via
+        PYTHONPATH/PATH — no clone, no base re-download.
+
+        pip's --target resolution IGNORES the running env (verified: a
+        satisfied dep is re-downloaded into the target), so this is
+        two-phase: (A) `pip install --dry-run --report` UNDER base
+        activation (+ the existing pylib layer) — dry-run respects the
+        active env, so the report is exactly the missing closure at
+        resolved pins; (B) `pip install --no-deps --target` for that
+        set. Old pip without --report falls back to the full-closure
+        --target install — correct, fatter, and SAID."""
+        import json as _json
+        act, ns = self._base_activation(s, adapter)
+        sdir = adapter.path(s["location"])
+        pylib = f"{sdir}/pylib"
+        overlay_rel = f"{s['location']}/overlay.sh"
+        overlay = f"{sdir}/overlay.sh"
+        from .realize import _ns_wrap_cmd
+        wrap = _ns_wrap_cmd if ns else (lambda x: x)
+        specs = " ".join(shlex.quote(_pixi_spec(p)) for p in pypi)
+        report_rel = f"{s['location']}/pip-report.json"
+        pre = (f"{act} && "
+               f"{{ [ -f {shlex.quote(overlay)} ] && "
+               f". {shlex.quote(overlay)}; true; }} && ")
+        note = None
+        try:
+            ra = adapter.run_activated(wrap(
+                pre + f"python -m pip install --dry-run --quiet --report "
+                      f"{shlex.quote(adapter.path(report_rel))} {specs}"),
+                timeout=600)
+        except WeftError as e:
+            raise WeftError(
+                "env.realize_failed",
+                "resolving the pypi delta stalled or timed out",
+                stage="realize", retryable=True,
+                hints={"likely": "stalled index/CDN transfer from this "
+                                 "node", "detail": e.detail}) from e
+        missing: list[str] = []
+        if ra.rc != 0 and ("no such option" in (ra.err + ra.out)
+                           or "unrecognized arguments" in (ra.err + ra.out)):
+            r = adapter.run_activated(wrap(
+                f"{act} && mkdir -p {shlex.quote(pylib)} && "
+                f"python -m pip install --no-input --quiet "
+                f"--target {shlex.quote(pylib)} {specs}"), timeout=1800)
+            if r.rc != 0:
+                raise WeftError(
+                    "env.solve_conflict", "pypi install into the session "
+                    "layer failed", stage="realize",
+                    hints={"log_tail": (r.err or r.out)[-1500:]})
+            note = ("this site's pip predates --dry-run/--report: the "
+                    "full dependency closure was installed into the "
+                    "session layer (base-satisfied deps duplicated)")
+        elif ra.rc != 0:
+            raise WeftError(
+                "env.solve_conflict",
+                "pypi delta resolution failed against the base",
+                stage="realize",
+                hints={"requested": pypi,
+                       "log_tail": (ra.err or ra.out)[-1500:]})
+        else:
+            data = _json.loads(adapter.read_file(report_rel).decode())
+            missing = [f'{i["metadata"]["name"]}=={i["metadata"]["version"]}'
+                       for i in data.get("install", [])]
+            if missing:
+                try:
+                    rb = adapter.run_activated(wrap(
+                        f"{act} && mkdir -p {shlex.quote(pylib)} && "
+                        f"python -m pip install --no-deps --no-input "
+                        f"--quiet --target {shlex.quote(pylib)} "
+                        + " ".join(shlex.quote(m) for m in missing)),
+                        timeout=1800)
+                except WeftError as e:
+                    raise WeftError(
+                        "env.realize_failed",
+                        "fetching the pypi delta stalled or timed out",
+                        stage="realize", retryable=True,
+                        hints={"missing": missing,
+                               "detail": e.detail}) from e
+                if rb.rc != 0:
+                    raise WeftError(
+                        "env.solve_conflict",
+                        "installing the pypi delta failed",
+                        stage="realize",
+                        hints={"missing": missing,
+                               "log_tail": (rb.err or rb.out)[-1500:]})
+            else:
+                note = "already satisfied by the base — nothing fetched"
+        adapter.write_file(
+            overlay_rel,
+            (f'export PYTHONPATH="{pylib}${{PYTHONPATH:+:$PYTHONPATH}}"\n'
+             f'export PATH="{pylib}/bin:$PATH"\n').encode())
+        first = s.get("materialize_mode", "clone") != "pylib"
+        if first:
+            self.store.set_session_materialized(s["session_id"],
+                                                mode="pylib")
+            s["materialized"], s["materialize_mode"] = True, "pylib"
+            self.store.emit("session.materialized",
+                            session=s["session_id"],
+                            base=s["base_env_id"], mode="pylib")
+        # shadowing is tolerable in scratch, but SAY it: a pylib copy of
+        # a base-held name wins on sys.path
+        env_row = self.store.get_env(s["base_env_id"]) or {}
+        base_pypi = {p["name"].lower().replace("_", "-")
+                     for plat in (env_row.get("canonical") or {})
+                     .get("platforms", {}).values()
+                     for p in plat if p["kind"] == "pypi"}
+        shadows = [m.split("==")[0] for m in missing
+                   if m.split("==")[0].lower().replace("_", "-")
+                   in base_pypi]
+        out = {"mode": "pylib", "fetched": missing, "first": first}
+        if note:
+            out["note"] = note
+        if shadows:
+            out["shadows_base"] = shadows
+        return out
 
     def _get(self, session_id: str, allow_stopped: bool = False) -> dict:
         s = self.store.get_session(session_id)
@@ -235,16 +401,22 @@ class SessionManager:
     def exec(self, session_id: str, adapter: SiteAdapter, cmd: str) -> dict:
         s = self._get(session_id)
         sdir = shlex.quote(adapter.path(s["location"]))
-        if s.get("materialized", True):
+        mode = s.get("materialize_mode",
+                     "clone" if s.get("materialized", True) else "none")
+        if mode == "clone":
             manifest = adapter.path(f"{s['location']}/pixi.toml")
             script = (f"cd {sdir} && "
                       f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
                       f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )")
         else:
-            # pre-clone: the base realization IS the session env (content-
-            # identical by definition until the first install)
+            # base lanes: pre-clone the base realization IS the session
+            # env; pylib composes the session's own layer over it
             act, ns = self._base_activation(s, adapter)
-            script = f"cd {sdir} && {act} && ( {cmd} )"
+            script = f"cd {sdir} && {act} && "
+            if mode == "pylib":
+                overlay = adapter.path(f"{s['location']}/overlay.sh")
+                script += f". {shlex.quote(overlay)} && "
+            script += f"( {cmd} )"
             if ns:
                 from .realize import _ns_wrap_cmd
                 script = _ns_wrap_cmd(script)
@@ -256,7 +428,8 @@ class SessionManager:
 
     def install(self, session_id: str, adapter: SiteAdapter,
                 conda: list[str] | None = None,
-                pypi: list[str] | None = None, fast: bool = True) -> dict:
+                pypi: list[str] | None = None, fast: bool = True,
+                full_clone: bool = False) -> dict:
         """Add packages to the session. pypi-only requests take a FAST
         PATH by default: a direct pip/uv install into the session prefix
         — no re-solve of the whole manifest (which dominates a one-leaf
@@ -270,6 +443,41 @@ class SessionManager:
         conda, pypi = list(conda or []), list(pypi or [])
         if not conda and not pypi:
             raise WeftError("task.invalid", "nothing to install", stage="realize")
+        # COLD base (adopted/unpacked here — empty package cache): a full
+        # clone re-downloads the entire base, so pypi adds go into a
+        # pylib overlay over the mount and conda adds refuse with levers.
+        mode = s.get("materialize_mode",
+                     "clone" if s.get("materialized", True) else "none")
+        if mode != "clone" and not full_clone \
+                and self._base_cold(s, adapter):
+            if conda:
+                raise self._cold_refusal(
+                    s, f"adding conda package(s) {conda}")
+            got = self._materialize_pylib(s, adapter, pypi)
+            self.store.session_add_deps(session_id, [], pypi)
+            self.store.emit("session.installed", session=session_id,
+                            conda=[], pypi=pypi, mode="pylib")
+            out = {"installed": {"conda": [], "pypi": pypi},
+                   "session_id": session_id, "mode": "pylib",
+                   "fetched": got["fetched"],
+                   "runtime": self.runtime(s, adapter),
+                   "note": got.get("note") or
+                           "only the missing closure was fetched; the "
+                           "base stays on its mount — the snapshot's "
+                           "full re-solve remains the conflict check"}
+            if got.get("shadows_base"):
+                out["shadows_base"] = got["shadows_base"]
+            if got.get("first"):
+                out["materialized_note"] = (
+                    "pylib overlay created over the base; running python "
+                    "kernels see the new packages on their next block")
+            return out
+        if mode == "pylib" and full_clone:
+            raise WeftError(
+                "task.invalid",
+                "this session already materialized as a pylib overlay — "
+                "snapshot it to mint a real env instead of mixing modes",
+                stage="realize")
         # first mutation pays for mutability: clone the prefix now
         first_clone = self._materialize(s, adapter)
         clone_note = ("writable prefix cloned on this first install; "
@@ -363,7 +571,8 @@ class SessionManager:
         return {"method": method}
 
     def run_installer(self, session_id: str, adapter: SiteAdapter, cmd: str,
-                      note: str = "", source: str | None = None) -> dict:
+                      note: str = "", source: str | None = None,
+                      full_clone: bool = False) -> dict:
         """The bespoke install that no index can express — an R
         install.packages, a pip install -e, a vendored make install. A
         normal, supported move: it runs in the session AND is captured, so
@@ -374,6 +583,12 @@ class SessionManager:
         rebuilds ANYWHERE. Without it, a step that reads local paths mints
         an env only this machine can build — the grade will say so."""
         s = self._get(session_id)
+        # an installer mutates the prefix arbitrarily — it NEEDS a real
+        # writable clone; on a cold base that means re-downloading the
+        # base, so refuse with the levers unless explicitly overridden
+        if not full_clone and self._base_cold(s, adapter) \
+                and s.get("materialize_mode", "clone") != "clone":
+            raise self._cold_refusal(s, "a bespoke installer")
         # an installer mutates the prefix: first mutation clones it
         first_clone = self._materialize(s, adapter)
         captured = None

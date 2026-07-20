@@ -803,9 +803,11 @@ class Store:
              "active", now, now, 1 if materialized else 0),
         )
 
-    def set_session_materialized(self, session_id: str) -> None:
-        self._write("UPDATE sessions SET materialized=1 WHERE session_id=?",
-                    (session_id,))
+    def set_session_materialized(self, session_id: str,
+                                 mode: str = "clone") -> None:
+        # 1 = full writable clone; 2 = pylib overlay over a cold base
+        self._write("UPDATE sessions SET materialized=? WHERE session_id=?",
+                    (2 if mode == "pylib" else 1, session_id))
 
     def get_session(self, session_id: str) -> dict | None:
         r = self._row("SELECT * FROM sessions WHERE session_id=?", (session_id,))
@@ -829,6 +831,11 @@ class Store:
             "materialized": bool(r["materialized"]
                                  if "materialized" in keys
                                  and r["materialized"] is not None else 1),
+            # 0/none: runs from the base; 1/clone: full writable prefix;
+            # 2/pylib: pypi overlay layer over a cold (adopted) base
+            "materialize_mode": {0: "none", 1: "clone", 2: "pylib"}.get(
+                r["materialized"] if "materialized" in keys
+                and r["materialized"] is not None else 1, "clone"),
         }
 
     def touch_session(self, session_id: str) -> None:

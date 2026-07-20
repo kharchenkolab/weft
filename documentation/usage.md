@@ -336,6 +336,26 @@ the install result says so. If you never intend to install,
 `kernel_start(site, env_id=...)` attaches to the realization directly
 and needs no session at all.
 
+On an **adopted/imported base** — one that arrived as a read-only pack
+or an unpacked archive rather than being *built* on this site (the
+record calls this a cold base: the site's package cache holds none of
+its packages, a fact fixed at adoption and never re-probed) — cloning
+the manifest would re-download the entire base from the index (1.6 GB
+in the field case; impossible on an egress-restricted node). So there,
+pypi adds materialize a **pylib overlay** instead: the delta is
+resolved *with the base visible* (`pip --dry-run --report`), only the
+missing closure is fetched (`--no-deps --target`), and the layer
+composes over the mount via `PYTHONPATH` (persisted in the session's
+`overlay.sh`; `runtime` carries `pylib` and the composed activation).
+conda adds and bespoke installers there refuse with `session.cold_base`
+and three levers: `extends_env` (mint a real delta env — the citable
+twin of the same composition), run it where the base was *built* (warm
+cache), or `full_clone=true` (fetch the whole base; needs egress). The
+mode is decided once from the base's provenance and recorded on the
+session — every later install takes the SAME lane (each resolve sees
+base + the existing layer), and mode mixing is refused, so mechanisms
+never switch or clash mid-session. On built-here bases nothing changes.
+
 Callers that exec interpreters themselves consume the **runtime
 contract** instead of rederiving prefix layouts: `session_runtime(id)`
 (also on `session_start`/`session_install` results — the install echo

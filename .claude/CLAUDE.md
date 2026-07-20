@@ -52,5 +52,16 @@ remotes, removable in one command.
   writer + a conformance case.
 - Flakes are evidence: before retrying/quarantining a flaky distributed
   test, write a one-line hypothesis in the ledger (percent-level races
-  look exactly like flakes).
+  look exactly like flakes) — and READ the captured failure output
+  before writing the hypothesis.
+- Reality runs sweep VERBS, not just the demo path: validating feature
+  F on topology T drives every mutation verb of F (a session reality =
+  start+exec+INSTALL+snapshot+stop). "Read works" says nothing about
+  the extend path (cold-base session finding).
+- Every "cheap because X" design premise names what happens when NOT-X,
+  and either a test pins the not-X behavior or a runtime guard detects
+  it (session clone was "cheap because warm cache" — adopted packs are
+  never warm).
+- Reality scripts assert COST budgets (bytes moved, seconds), not just
+  correctness — a 1.6 GB re-download looks green without them.
 - No biological examples in specs, tests, or docs.

@@ -1126,28 +1126,38 @@ class Weft:
 
     def session_install(self, session_id: str, conda: list[str] | None = None,
                         pypi: list[str] | None = None,
-                        fast: bool = True) -> dict:
+                        fast: bool = True, full_clone: bool = False) -> dict:
         """Add packages to the session. Captured, so a snapshot carries
         them into the spec. pypi-only adds skip the full manifest
         re-solve by default (direct uv/pip into the scratch prefix —
         the solve dominates a one-leaf add on big bases); the snapshot's
         re-solve stays the identity mint and conflict check. fast=False
         (or any conda dep) solves at add time; a failed direct install
-        falls through to the solve automatically."""
+        falls through to the solve automatically.
+
+        On a COLD base (adopted/unpacked pack — empty package cache),
+        pypi adds go into a pylib overlay over the mount (only the
+        missing closure is fetched); conda adds refuse with levers
+        (session.cold_base). full_clone=True overrides: fetch the whole
+        base from the index into a writable clone (needs egress)."""
         return self.sessions.install(
             session_id, self._session_adapter(session_id), conda, pypi,
-            fast=fast)
+            fast=fast, full_clone=full_clone)
 
     def session_run_installer(self, session_id: str, cmd: str,
-                              note: str = "", source: str | None = None) -> dict:
+                              note: str = "", source: str | None = None,
+                              full_clone: bool = False) -> dict:
         """Run a bespoke install that no index expresses (R
         install.packages, pip install -e, a vendored make install). A normal
         move — it is captured and a snapshot carries it as a labeled
         post_install step (grade: escape-hatch). Pass `source=<local path>`
         if the command needs local files: weft content-addresses them so the
-        step travels with the env and rebuilds ANYWHERE. `note` records why."""
+        step travels with the env and rebuilds ANYWHERE. `note` records why.
+        On a COLD base this needs a real writable clone: refuses with
+        levers unless full_clone=True."""
         return self.sessions.run_installer(
-            session_id, self._session_adapter(session_id), cmd, note, source)
+            session_id, self._session_adapter(session_id), cmd, note, source,
+            full_clone=full_clone)
 
     def session_snapshot(self, session_id: str, name: str | None = None,
                          notes: list[str] | None = None,

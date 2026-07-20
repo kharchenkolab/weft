@@ -305,3 +305,193 @@ def test_runtime_unknown_or_stopped_refused(tmp_path, pixi_bin):
     w.session_stop(r["session_id"])
     out = w.session_runtime(r["session_id"])
     assert out["error"] == "task.invalid"
+
+
+# ── cold-base sessions: pylib overlay, refusals, no base re-download ───────
+
+from weft.adapters.base import ShimResult
+
+
+def _cold_session(tmp_path, pixi_bin, base_pypi=("plotpkg",)):
+    w = _weft(tmp_path, pixi_bin)
+    w.store.put_env(ENV, "spec_" + ENV[-12:], {
+        "extras": {},
+        "platforms": {"any": [
+            {"kind": "pypi", "name": n, "version": "1.0"}
+            for n in base_pypi]},
+    }, "lock: {}", "[project]", ["any"])
+    rel = env_dir_rel(ENV)
+    _lay_realization(tmp_path / "site", rel, "BASE")
+    # read_only == adopted here == COLD package cache
+    w.store.set_realization(ENV, "local", "prefix", rel, "ready",
+                            read_only=True)
+    r = w.session_start(ENV, "local")
+    return w, r["session_id"]
+
+
+def test_cold_base_conda_add_refused_with_levers(tmp_path, pixi_bin):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    out = w.session_install(sid, conda=["somepkg"])
+    assert out["error"] == "session.cold_base"
+    opts = out["hints"]["options"]
+    assert "extends" in opts and "full_clone" in opts and "warm_site" in opts
+
+
+def test_cold_base_installer_refused(tmp_path, pixi_bin):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    out = w.session_run_installer(sid, "make install")
+    assert out["error"] == "session.cold_base"
+
+
+def test_cold_detection_packed_strategy(tmp_path, pixi_bin):
+    """Archive-unpacked bases never populated the cache either."""
+    w = _weft(tmp_path, pixi_bin)
+    _fake_env(w)
+    rel = env_dir_rel(ENV)
+    _lay_realization(tmp_path / "site", rel, "BASE")
+    w.store.set_realization(ENV, "local", "packed", rel, "ready")
+    sid = w.session_start(ENV, "local")["session_id"]
+    out = w.session_install(sid, conda=["somepkg"])
+    assert out["error"] == "session.cold_base"
+
+
+def test_cold_base_pypi_goes_pylib_two_phase(tmp_path, pixi_bin, monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin, base_pypi=("plotpkg",))
+    ad = w.adapters["local"]
+    calls = []
+    report = tmp_path / "site" / "sessions" / sid / "pip-report.json"
+
+    def fake_run_activated(script, *, timeout=120.0):
+        calls.append(script)
+        if "--dry-run" in script:
+            report.write_text(json.dumps({"install": [
+                {"metadata": {"name": "newpkg", "version": "2.1"}},
+                {"metadata": {"name": "plotpkg", "version": "1.5"}},
+            ]}))
+        return ShimResult(0, "", "")
+
+    monkeypatch.setattr(ad, "run_activated", fake_run_activated)
+    out = w.session_install(sid, pypi=["newpkg"])
+
+    # phase A resolves WITH the base visible — no --target there
+    assert "--dry-run" in calls[0] and "--report" in calls[0]
+    assert "activate.sh" in calls[0] and "--target" not in calls[0]
+    # phase B installs ONLY the missing closure, no dep resolution
+    assert "--no-deps" in calls[1] and "--target" in calls[1]
+    assert "newpkg==2.1" in calls[1] and "plotpkg==1.5" in calls[1]
+
+    assert out["mode"] == "pylib"
+    assert out["fetched"] == ["newpkg==2.1", "plotpkg==1.5"]
+    assert out["shadows_base"] == ["plotpkg"]      # base holds plotpkg
+    rt = out["runtime"]
+    assert rt["source"] == "base" and rt["env_id"] is None
+    assert rt["direct_exec"] is False
+    assert rt["pylib"].endswith(f"sessions/{sid}/pylib")
+    assert "overlay.sh" in rt["activation"]
+    # the composition artifact exists and prepends the layer
+    ov = (tmp_path / "site" / "sessions" / sid / "overlay.sh").read_text()
+    assert "PYTHONPATH" in ov and "pylib" in ov
+    assert w.store.get_session(sid)["materialize_mode"] == "pylib"
+    # NO clone happened — the whole point
+    assert not (tmp_path / "site" / "sessions" / sid / ".pixi").exists()
+    assert not (tmp_path / "site" / "sessions" / sid / "pixi.toml").exists()
+
+    # a second install resolves against base + existing pylib layer
+    w.session_install(sid, pypi=["another"])
+    assert "overlay.sh" in calls[2] and "--dry-run" in calls[2]
+
+
+def test_cold_base_pypi_already_satisfied(tmp_path, pixi_bin, monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    ad = w.adapters["local"]
+    calls = []
+    report = tmp_path / "site" / "sessions" / sid / "pip-report.json"
+
+    def fake_run_activated(script, *, timeout=120.0):
+        calls.append(script)
+        if "--dry-run" in script:
+            report.write_text(json.dumps({"install": []}))
+        return ShimResult(0, "", "")
+
+    monkeypatch.setattr(ad, "run_activated", fake_run_activated)
+    out = w.session_install(sid, pypi=["plotpkg"])
+    assert len(calls) == 1                       # no phase B
+    assert out["fetched"] == []
+    assert "already satisfied" in out["note"]
+
+
+def test_cold_base_full_clone_override_routes_to_clone(tmp_path, pixi_bin,
+                                                       monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    seen = {}
+    monkeypatch.setattr(w.sessions, "_materialize",
+                        lambda s, a: seen.setdefault("clone", True))
+    monkeypatch.setattr(w.sessions, "_fast_pypi",
+                        lambda s, a, p: {"method": "stub"})
+    out = w.session_install(sid, pypi=["newpkg"], full_clone=True)
+    assert seen.get("clone") and out["method"] == "stub"
+
+
+def test_kernel_on_cold_session_gets_pylib_hook(tmp_path, pixi_bin):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    k = w.kernel_start("local", "python", session_id=sid)["kernel_id"]
+    try:
+        act = (tmp_path / "site" / "kernels" / k / "activate.sh").read_text()
+        assert "WEFT_SESSION_PYLIB" in act and "overlay.sh" in act
+        assert "WEFT_SESSION_PREFIX" not in act
+    finally:
+        w.kernel_stop(k)
+
+
+def test_local_run_cmd_timeout_is_classified(tmp_path):
+    ad = LocalAdapter("l", tmp_path)
+    with pytest.raises(WeftError) as ei:
+        ad.run_cmd("sleep 3", timeout=0.3)
+    assert ei.value.code == "site.unreachable" and ei.value.retryable
+
+
+@pytest.mark.solver
+@pytest.mark.slow
+def test_cold_base_pylib_end_to_end(tmp_path, pixi_bin):
+    """The field scenario with real packages: a REAL base env marked
+    adopted (cold cache), a pypi add through the pylib lane — only the
+    delta is fetched, the base prefix is untouched, and the RUNNING
+    kernel sees the package on its next block (forward hook)."""
+    w = _weft(tmp_path, pixi_bin)
+    env = w.env_ensure({"name": "cold-base",
+                        "deps": {"conda": ["python =3.12", "pip"]}})
+    env_id = env["env_id"]
+    r0 = w.task_submit({"command": "true", "env": env_id, "site": "local"})
+    assert w.runner.wait(r0["job_id"], 900)["state"] == "DONE"
+    # simulate adoption: same files, but the record says read_only —
+    # exactly what _adopt_from_ro_roots writes
+    real = w.store.get_realization(env_id, "local")
+    w.store.set_realization(env_id, "local", real["strategy"],
+                            real["location"], "ready", read_only=True)
+
+    sid = w.session_start(env_id, "local")["session_id"]
+    k = w.kernel_start("local", "python", session_id=sid)["kernel_id"]
+    try:
+        blk = w.kernel_exec(k, "import six", timeout=60)
+        assert blk["rc"] == 1                    # not there yet
+
+        out = w.session_install(sid, pypi=["six"])
+        assert out["mode"] == "pylib", out
+        assert any(m.startswith("six==") for m in out["fetched"]), out
+        # NO clone: the session dir holds only the layer
+        sdir = tmp_path / "site" / "sessions" / sid
+        assert not (sdir / ".pixi").exists()
+        assert (sdir / "pylib" / "six.py").exists()
+
+        # live-install contract holds in pylib mode
+        blk = w.kernel_exec(k, "import six; print(six.__name__)",
+                            timeout=60)
+        assert blk["rc"] == 0 and "six" in blk["out"], blk
+        # and session_exec composes the layer too
+        ex = w.session_exec(sid, "python -c 'import six; print(42)'")
+        assert ex["rc"] == 0 and "42" in ex["stdout"]
+    finally:
+        w.kernel_stop(k)
+    # snapshot mints the citable extends env from the record
+    snap = w.session_snapshot(sid, verify=False)
+    assert snap["env_id"].startswith("env:") and snap["env_id"] != env_id
