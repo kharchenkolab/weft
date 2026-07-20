@@ -86,10 +86,20 @@ class LocalAdapter(SiteAdapter):
     def write_file(self, rel: str, data: bytes, mode: int = 0o644) -> None:
         p = self._root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_bytes(data)
         if self.shared:
             mode |= 0o020  # group-writable on shared roots
-        p.chmod(mode)
+        # Atomic publish: tmp sibling + rename, so a concurrent poller (the
+        # kernel driver's exists→read loop) never observes a half-written
+        # file (bug2 — write_bytes truncates then fills, same shape as the
+        # ssh adapter's old `cat > dest`).
+        tmp = p.with_name(f"{p.name}.wtmp.{os.urandom(4).hex()}")
+        try:
+            tmp.write_bytes(data)
+            tmp.chmod(mode)
+            tmp.replace(p)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def read_file(self, rel: str, max_bytes: int | None = None) -> bytes:
         p = self._root / rel

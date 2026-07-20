@@ -353,9 +353,21 @@ class SSHAdapter(SiteAdapter):
         if self.shared:
             mode |= 0o020  # group-writable on shared roots
         dest = self.path(rel)
+        # Atomic publish: stage to a tmp sibling, verify the bytes survived
+        # the pipe, then rename into place. `cat > dest` truncates the file at
+        # redirect-open — long before the payload arrives over ssh — and the
+        # kernel driver's exists→read loop can observe that window, exec an
+        # empty/partial block, and report rc=0 (bug2). rename(2) within one
+        # dir is the same contract the driver already keeps for its .rc.
+        tmp = f"{dest}.wtmp.{os.urandom(4).hex()}"
+        digest = hashlib.sha256(data).hexdigest()
+        qt, qd = shlex.quote(tmp), shlex.quote(dest)
         r = self._run(
             f"mkdir -p {shlex.quote(os.path.dirname(dest))} && "
-            f"cat > {shlex.quote(dest)} && chmod {mode:o} {shlex.quote(dest)}",
+            f"cat > {qt} && "
+            # busybox sha256sum has no --quiet; discard the OK lines instead
+            f"echo {digest}  {qt} | sha256sum -c - >/dev/null && "
+            f"chmod {mode:o} {qt} && mv -f {qt} {qd} || {{ rm -f {qt}; exit 1; }}",
             input_bytes=data, timeout=120,
         )
         if r.rc != 0:
