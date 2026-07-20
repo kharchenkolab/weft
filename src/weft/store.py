@@ -57,6 +57,9 @@ _SESSION_MIGRATIONS = [
     # lazy clone (parallel-FS round): NULL reads as materialized — every
     # pre-migration session was cloned eagerly at start
     ("materialized", "ALTER TABLE sessions ADD COLUMN materialized INTEGER"),
+    # cran layer (R-parity round): R adds compose via R_LIBS, recorded
+    # like conda/pypi so the snapshot carries them
+    ("added_cran", "ALTER TABLE sessions ADD COLUMN added_cran TEXT"),
 ]
 
 
@@ -796,10 +799,10 @@ class Store:
             # column-explicit: migrations add columns, and a positional
             # INSERT would break the moment one lands
             "INSERT INTO sessions(session_id, base_env_id, site, location,"
-            " added_conda, added_pypi, state, created_at, last_used,"
-            " materialized)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (session_id, base_env_id, site, location, "[]", "[]",
+            " added_conda, added_pypi, added_cran, state, created_at,"
+            " last_used, materialized)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, base_env_id, site, location, "[]", "[]", "[]",
              "active", now, now, 1 if materialized else 0),
         )
 
@@ -819,6 +822,9 @@ class Store:
             "site": r["site"], "location": r["location"],
             "added_conda": json.loads(r["added_conda"]),
             "added_pypi": json.loads(r["added_pypi"]),
+            "added_cran": (json.loads(r["added_cran"])
+                           if "added_cran" in keys and r["added_cran"]
+                           else []),
             "installers": json.loads(r["installers"]) if "installers" in keys
             and r["installers"] else [],
             "state": r["state"],
@@ -858,11 +864,15 @@ class Store:
             "UPDATE sessions SET installers=? WHERE session_id=?",
             (_j(s["installers"] + [entry]), session_id))
 
-    def session_add_deps(self, session_id: str, conda: list[str], pypi: list[str]) -> None:
+    def session_add_deps(self, session_id: str, conda: list[str],
+                         pypi: list[str],
+                         cran: list[str] | None = None) -> None:
         s = self.get_session(session_id)
         self._write(
-            "UPDATE sessions SET added_conda=?, added_pypi=? WHERE session_id=?",
-            (_j(s["added_conda"] + conda), _j(s["added_pypi"] + pypi), session_id),
+            "UPDATE sessions SET added_conda=?, added_pypi=?, added_cran=?"
+            " WHERE session_id=?",
+            (_j(s["added_conda"] + conda), _j(s["added_pypi"] + pypi),
+             _j(s["added_cran"] + list(cran or [])), session_id),
         )
 
     def set_session_state(self, session_id: str, state: str) -> None:

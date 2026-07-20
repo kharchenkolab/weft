@@ -143,8 +143,8 @@ class KernelManager:
                 # session_install is visible to THIS running kernel's
                 # next block, no restart. On a COLD base the future layer
                 # is the pylib overlay; on a warm one it's the clone's
-                # site-packages. (R/julia drivers don't implement the
-                # hook: there, kernel_restart adopts the layer.)
+                # site-packages. driver.R has its own hook (rlib on
+                # .libPaths); julia kernels need kernel_restart.
                 ns_env_id = s["base_env_id"]
                 real = self.store.get_realization(ns_env_id, site)
                 rel0 = (real or {}).get("location") or env_dir_rel(ns_env_id)
@@ -154,11 +154,9 @@ class KernelManager:
                     and self.sessions._base_cold(s, adapter))
                 if pylib_lane:
                     pylib = adapter.path(f"{s['location']}/pylib")
-                    overlay = adapter.path(f"{s['location']}/overlay.sh")
                     activate += (
-                        f" && {{ [ -f {shlex.quote(overlay)} ] && "
-                        f". {shlex.quote(overlay)}; true; }} && "
-                        f"export WEFT_SESSION_PYLIB={shlex.quote(pylib)}")
+                        f" && export WEFT_SESSION_PYLIB="
+                        f"{shlex.quote(pylib)}")
                 else:
                     prefix = adapter.path(
                         f"{s['location']}/.pixi/envs/default")
@@ -167,6 +165,12 @@ class KernelManager:
                         f"{shlex.quote(prefix)} && "
                         f"export PATH={shlex.quote(prefix + '/bin')}:"
                         f"\"$PATH\"")
+            overlay = adapter.path(f"{s['location']}/overlay.sh")
+            rlib = adapter.path(f"{s['location']}/rlib")
+            activate += (
+                f" && {{ [ -f {shlex.quote(overlay)} ] && "
+                f". {shlex.quote(overlay)}; true; }} && "
+                f"export WEFT_SESSION_RLIB={shlex.quote(rlib)}")
 
         kernel_id = "krn_" + uuid.uuid4().hex[:10]
         jobdir_rel = f"kernels/{kernel_id}"

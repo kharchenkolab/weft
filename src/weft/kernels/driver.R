@@ -1,4 +1,13 @@
 # Weft R kernel driver — same file protocol as driver.py.
+# Lazy-session forward hook: WEFT_SESSION_RLIB names the session's rlib
+# layer (may not exist yet). Create + front-load it on .libPaths so a
+# later session_install(cran=...) is visible to THIS kernel's next
+# library() call — R scans lib dirs live, no cache to invalidate.
+rlib <- Sys.getenv("WEFT_SESSION_RLIB")
+if (nzchar(rlib)) {
+  dir.create(rlib, showWarnings = FALSE, recursive = TRUE)
+  .libPaths(c(rlib, .libPaths()))
+}
 env <- new.env(parent = globalenv())
 n <- 0L
 repeat {

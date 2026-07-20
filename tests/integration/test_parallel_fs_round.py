@@ -495,3 +495,172 @@ def test_cold_base_pylib_end_to_end(tmp_path, pixi_bin):
     # snapshot mints the citable extends env from the record
     snap = w.session_snapshot(sid, verify=False)
     assert snap["env_id"].startswith("env:") and snap["env_id"] != env_id
+
+
+# ── the R (cran) layer: rlib composition on ANY base ───────────────────────
+
+def _no_toolchain(monkeypatch):
+    import weft.toolchain
+    monkeypatch.setattr(weft.toolchain, "ensure_toolchain",
+                        lambda *a, **k: None)
+
+
+def test_cran_add_composes_rlib_on_frozen_base(tmp_path, pixi_bin,
+                                               monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    _no_toolchain(monkeypatch)
+    ad = w.adapters["local"]
+    calls = []
+    monkeypatch.setattr(ad, "run_activated",
+                        lambda script, timeout=120.0:
+                        (calls.append(script), ShimResult(0, "", ""))[1])
+    out = w.session_install(sid, cran=["praise"])
+
+    ins = calls[0]
+    assert "install.packages" in ins and 'lib="' in ins
+    assert f"sessions/{sid}/rlib" in ins
+    assert "repos=" in ins and "R_LIBS" in ins
+    assert "activate.sh" in ins                 # under base activation
+    assert "MISSING" in calls[1]                # presence verification
+    assert out["mode"] == "rlib"
+    assert out["installed"]["cran"] == ["praise"]
+    ov = (tmp_path / "site" / "sessions" / sid / "overlay.sh").read_text()
+    assert "R_LIBS" in ov
+    s = w.store.get_session(sid)
+    assert s["added_cran"] == ["praise"]
+    assert s["materialize_mode"] == "none"      # cran never flips the mode
+    rt = out["runtime"]
+    assert rt["rlib"].endswith(f"sessions/{sid}/rlib")
+    assert rt["env_id"] is None and rt["direct_exec"] is False
+    assert "overlay.sh" in rt["activation"]
+
+
+def test_cran_same_mechanism_on_warm_base(tmp_path, pixi_bin, monkeypatch):
+    """Orthogonality: built-here bases get the SAME rlib lane — no
+    refusal, no clone, one mechanism everywhere."""
+    w, r = _lazy_session(tmp_path, pixi_bin)     # warm (not read_only)
+    sid = r["session_id"]
+    _no_toolchain(monkeypatch)
+    ad = w.adapters["local"]
+    monkeypatch.setattr(ad, "run_activated",
+                        lambda script, timeout=120.0: ShimResult(0, "", ""))
+    out = w.session_install(sid, cran=["praise"])
+    assert out["mode"] == "rlib"
+    assert not (tmp_path / "site" / "sessions" / sid / ".pixi").exists()
+    assert w.store.get_session(sid)["materialize_mode"] == "none"
+
+
+def test_cran_and_pypi_layers_coexist(tmp_path, pixi_bin, monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    _no_toolchain(monkeypatch)
+    ad = w.adapters["local"]
+    report = tmp_path / "site" / "sessions" / sid / "pip-report.json"
+
+    def fake(script, timeout=120.0):
+        if "--dry-run" in script:
+            report.write_text(json.dumps({"install": [
+                {"metadata": {"name": "newpkg", "version": "2.1"}}]}))
+        return ShimResult(0, "", "")
+
+    monkeypatch.setattr(ad, "run_activated", fake)
+    out = w.session_install(sid, pypi=["newpkg"], cran=["praise"])
+    assert out["installed"]["cran"] == ["praise"]
+    assert out["fetched"] == ["newpkg==2.1"]
+    ov = (tmp_path / "site" / "sessions" / sid / "overlay.sh").read_text()
+    assert "PYTHONPATH" in ov and "R_LIBS" in ov
+    rt = w.session_runtime(sid)
+    assert rt["pylib"] and rt["rlib"]
+
+
+def test_cran_verification_catches_silent_r_failure(tmp_path, pixi_bin,
+                                                    monkeypatch):
+    """install.packages exits 0 on failure — the presence check must
+    turn that into an honest error."""
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    _no_toolchain(monkeypatch)
+    ad = w.adapters["local"]
+    monkeypatch.setattr(
+        ad, "run_activated",
+        lambda script, timeout=120.0:
+        ShimResult(1 if "MISSING" in script else 0,
+                   "MISSING: praise", ""))
+    out = w.session_install(sid, cran=["praise"])
+    assert out["error"] == "env.solve_conflict"
+    assert w.store.get_session(sid)["added_cran"] == []   # not recorded
+
+
+def test_kernel_session_gets_rlib_hook(tmp_path, pixi_bin):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    k = w.kernel_start("local", "python", session_id=sid)["kernel_id"]
+    try:
+        act = (tmp_path / "site" / "kernels" / k / "activate.sh").read_text()
+        assert "WEFT_SESSION_RLIB" in act and "overlay.sh" in act
+    finally:
+        w.kernel_stop(k)
+
+
+def test_snapshot_carries_cran_layer(tmp_path, pixi_bin, monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    w.store.session_add_deps(sid, [], [], ["praise", "jsonlite ==2.0.1"])
+    seen = {}
+
+    def fake_ensure(spec, **kw):
+        seen["spec"] = spec
+        return {"env_id": "env:v1:" + "f" * 12}
+
+    monkeypatch.setattr(w.sessions.envman, "ensure", fake_ensure)
+    snap = w.session_snapshot(sid, verify=False)
+    assert seen["spec"]["deps"]["cran"] == ["praise", "jsonlite ==2.0.1"]
+    assert snap["env_id"] == "env:v1:" + "f" * 12
+    # and a cran-only session does NOT short-circuit to the base
+    assert snap["env_id"] != ENV
+
+
+def test_cold_refusal_names_the_delta_lanes(tmp_path, pixi_bin):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    out = w.session_install(sid, conda=["somepkg"])
+    lanes = out["hints"]["delta_lanes"]
+    assert "pypi" in lanes and "cran" in lanes and "conda" in lanes
+    assert "rlib" in lanes["cran"]
+
+
+@pytest.mark.solver
+@pytest.mark.slow
+def test_cran_rlib_end_to_end_on_adopted_base(tmp_path, pixi_bin):
+    """The R frozen-base scenario with real packages: adopted R base,
+    cran add via rlib — delta-only, base untouched, and the RUNNING R
+    kernel sees the package on its next library() call (driver.R hook)."""
+    w = _weft(tmp_path, pixi_bin)
+    env = w.env_ensure({"name": "r-frozen",
+                        "deps": {"conda": ["r-base =4.4"]}})
+    env_id = env["env_id"]
+    r0 = w.task_submit({"command": "true", "env": env_id, "site": "local"})
+    assert w.runner.wait(r0["job_id"], 900)["state"] == "DONE"
+    real = w.store.get_realization(env_id, "local")
+    w.store.set_realization(env_id, "local", real["strategy"],
+                            real["location"], "ready", read_only=True)
+
+    sid = w.session_start(env_id, "local")["session_id"]
+    k = w.kernel_start("local", "r", session_id=sid)["kernel_id"]
+    try:
+        blk = w.kernel_exec(k, "library(praise)", timeout=120)
+        assert blk["rc"] == 1                    # not there yet
+
+        out = w.session_install(sid, cran=["praise"])
+        assert out["mode"] == "rlib", out
+        sdir = tmp_path / "site" / "sessions" / sid
+        assert (sdir / "rlib" / "praise").is_dir()
+        assert not (sdir / ".pixi").exists()     # no clone
+
+        # live-install contract for R: next block, no restart
+        blk = w.kernel_exec(
+            k, "library(praise)\ncat(class(praise()))", timeout=120)
+        assert blk["rc"] == 0 and "character" in blk["out"], blk
+        # session_exec composes the layer too
+        ex = w.session_exec(
+            sid, "Rscript -e 'library(praise); cat(\"OK\")'")
+        assert ex["rc"] == 0 and "OK" in ex["stdout"]
+    finally:
+        w.kernel_stop(k)
+    snap = w.session_snapshot(sid, verify=False)
+    assert snap["env_id"].startswith("env:") and snap["env_id"] != env_id

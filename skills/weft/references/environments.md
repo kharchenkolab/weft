@@ -122,6 +122,13 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     (`extends_env` / warm-cache site / `full_clone=true`). The base is
     NEVER silently re-downloaded. `runtime` gains a `pylib` field; the
     snapshot still mints the citable extends env.
+  - **R adds**: `session_install(cran=[...])` → a session **rlib**
+    composed via `R_LIBS`, delta-only on ANY base (R skips
+    base-satisfied deps natively; no clone, mode never flips). Running
+    R kernels see it on the next `library()` call. Snapshot carries
+    `deps.cran` → the minted env overlay-realizes on the frozen base.
+    Cost map on a frozen base: pypi=delta (pylib), cran=delta (rlib),
+    conda=refusal with the map in `hints.delta_lanes`.
   - Exec-ing interpreters yourself? Consume `session_runtime(id)`
     (echoed on start/install results and `list_sessions` rows):
     `{source, env_id (null once mutated), prefix, activation, ns_wrap,

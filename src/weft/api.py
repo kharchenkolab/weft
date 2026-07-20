@@ -1126,7 +1126,8 @@ class Weft:
 
     def session_install(self, session_id: str, conda: list[str] | None = None,
                         pypi: list[str] | None = None,
-                        fast: bool = True, full_clone: bool = False) -> dict:
+                        fast: bool = True, full_clone: bool = False,
+                        cran: list[str] | None = None) -> dict:
         """Add packages to the session. Captured, so a snapshot carries
         them into the spec. pypi-only adds skip the full manifest
         re-solve by default (direct uv/pip into the scratch prefix —
@@ -1135,6 +1136,9 @@ class Weft:
         (or any conda dep) solves at add time; a failed direct install
         falls through to the solve automatically.
 
+        cran adds ALWAYS compose via a session rlib layer (R checks
+        every .libPaths() entry and skips base-satisfied deps natively) —
+        delta-only on any base, frozen or built-here, never cloning.
         On a COLD base (adopted/unpacked pack — empty package cache),
         pypi adds go into a pylib overlay over the mount (only the
         missing closure is fetched); conda adds refuse with levers
@@ -1142,7 +1146,7 @@ class Weft:
         base from the index into a writable clone (needs egress)."""
         return self.sessions.install(
             session_id, self._session_adapter(session_id), conda, pypi,
-            fast=fast, full_clone=full_clone)
+            fast=fast, full_clone=full_clone, cran=cran)
 
     def session_run_installer(self, session_id: str, cmd: str,
                               note: str = "", source: str | None = None,

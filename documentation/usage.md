@@ -356,6 +356,23 @@ session — every later install takes the SAME lane (each resolve sees
 base + the existing layer), and mode mixing is refused, so mechanisms
 never switch or clash mid-session. On built-here bases nothing changes.
 
+**R is first-class**: `session_install(cran=[...])` composes a session
+`rlib` over the base via `R_LIBS` on ANY base, frozen or built-here —
+R's installer checks every `.libPaths()` entry and skips base-satisfied
+deps natively, so it is delta-only with no clone and no two-phase dance.
+Running R kernels see the package on their next `library()` call
+(driver hook). The session-on-a-frozen-base cost map:
+
+| add    | frozen (adopted) base | mechanism |
+|--------|----------------------|-----------|
+| `pypi` | delta-only           | pylib layer, `PYTHONPATH` |
+| `cran` | delta-only           | rlib layer, `R_LIBS` |
+| `conda`| refuse + levers      | cannot layer (embedded prefixes) |
+
+The snapshot carries all three (`deps.cran` in the minted spec), and
+because `classify_delta` layers cran, the citable env ALSO realizes as
+a delta overlay on the frozen base — scratch and snapshot agree.
+
 Callers that exec interpreters themselves consume the **runtime
 contract** instead of rederiving prefix layouts: `session_runtime(id)`
 (also on `session_start`/`session_install` results — the install echo

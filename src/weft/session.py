@@ -177,7 +177,7 @@ class SessionManager:
                      "clone" if s.get("materialized", True) else "none")
         if mode == "clone":
             manifest = adapter.path(f"{s['location']}/pixi.toml")
-            return {
+            out = {
                 "source": "session",
                 "env_id": None,
                 "prefix": adapter.path(
@@ -188,6 +188,14 @@ class SessionManager:
                 "ns_wrap": False,
                 "direct_exec": True,
             }
+            if s.get("added_cran"):
+                overlay = adapter.path(f"{s['location']}/overlay.sh")
+                out.update(
+                    activation=out["activation"]
+                    + f" && . {shlex.quote(overlay)}",
+                    direct_exec=False,
+                    rlib=adapter.path(f"{s['location']}/rlib"))
+            return out
         act, ns = self._base_activation(s, adapter)
         real = self.store.get_realization(s["base_env_id"],
                                           adapter.name) or {}
@@ -209,16 +217,20 @@ class SessionManager:
             "ns_wrap": ns,
             "direct_exec": strategy == "prefix" and not ns,
         }
-        if mode == "pylib":
-            # the session's own layer rides the base: activation composes
-            # it, the content is mutated (no identity), and direct exec
-            # cannot see the layer (env-var composition)
+        has_cran = bool(s.get("added_cran"))
+        if mode == "pylib" or has_cran:
+            # the session's own layer(s) ride the base: activation
+            # composes them, the content is mutated (no identity), and
+            # direct exec cannot see env-var composition
             overlay = adapter.path(f"{s['location']}/overlay.sh")
             out.update(
                 env_id=None,
                 activation=f"{act} && . {shlex.quote(overlay)}",
-                direct_exec=False,
-                pylib=adapter.path(f"{s['location']}/pylib"))
+                direct_exec=False)
+            if mode == "pylib":
+                out["pylib"] = adapter.path(f"{s['location']}/pylib")
+            if has_cran:
+                out["rlib"] = adapter.path(f"{s['location']}/rlib")
         return out
 
     def _base_activation(self, s: dict, adapter: SiteAdapter) -> tuple[str, bool]:
@@ -232,6 +244,98 @@ class SessionManager:
                   and self.runner.ns_wrap_needed(s["base_env_id"],
                                                  adapter.name))
         return act, ns
+
+    def _stack_activation(self, s: dict,
+                          adapter: SiteAdapter) -> tuple[str, bool]:
+        """Activation of the session's interpreter stack per mode —
+        clone: the live prefix; none/pylib: the base realization."""
+        mode = s.get("materialize_mode",
+                     "clone" if s.get("materialized", True) else "none")
+        if mode == "clone":
+            manifest = adapter.path(f"{s['location']}/pixi.toml")
+            return (f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
+                    f"--manifest-path {shlex.quote(manifest)})\""), False
+        return self._base_activation(s, adapter)
+
+    def _ensure_overlay_line(self, s: dict, adapter: SiteAdapter,
+                             line: str) -> None:
+        """overlay.sh is the ONE composition artifact (PYTHONPATH for
+        pylib, R_LIBS for rlib — layers coexist): append the line if it
+        is not already there."""
+        rel = f"{s['location']}/overlay.sh"
+        try:
+            current = adapter.read_file(rel).decode()
+        except WeftError:
+            current = ""
+        if line not in current:
+            adapter.write_file(rel, (current + line + "\n").encode())
+
+    def _materialize_rlib(self, s: dict, adapter: SiteAdapter,
+                          cran: list[str]) -> dict:
+        """The R layer: install into a session-owned rlib composed via
+        R_LIBS — R's installer checks every .libPaths() entry and skips
+        base-satisfied dependencies natively, so this is delta-only on
+        ANY base (frozen or built-here) with no clone and no two-phase
+        dance. The same mechanism the citable overlay path uses
+        (solvers.CranSolver.realize_overlay); the snapshot's solve pins
+        versions — session installs are unpinned scratch by doctrine."""
+        act, ns = self._stack_activation(s, adapter)
+        sdir = adapter.path(s["location"])
+        rlib = f"{sdir}/rlib"
+        from .realize import _ns_wrap_cmd
+        wrap = _ns_wrap_cmd if ns else (lambda x: x)
+        site_row = self.store.get_site(adapter.name) or {}
+        repos = (site_row.get("config") or {}).get(
+            "cran_repos", "https://cloud.r-project.org")
+        # names only: install.packages cannot pin; pins/refs land at the
+        # snapshot's proper solve
+        names = [c.split("==")[0].split()[0] for c in cran]
+        vec = ", ".join(f'"{n}"' for n in names)
+        # CRAN routinely compiles: bring weft's toolchain like the
+        # overlay build does (best-effort — pure-R needs none)
+        prelude = ""
+        try:
+            from .toolchain import build_env_prelude, ensure_toolchain
+            tc = ensure_toolchain(adapter, adapter.pixi_bin)
+            if tc:
+                prelude = build_env_prelude(adapter, tc, sdir)
+        except WeftError:
+            pass
+        rcmd = (f"install.packages(c({vec}), lib=\"{rlib}\", "
+                f"repos=\"{repos}\")")
+        script = (prelude + act + " && "
+                  f"mkdir -p {shlex.quote(rlib)} && "
+                  f"export R_LIBS={shlex.quote(rlib)}\"${{R_LIBS:+:$R_LIBS}}\" && "
+                  f"Rscript -e {shlex.quote(rcmd)} 2>&1")
+        try:
+            r = adapter.run_activated(wrap(script), timeout=3600)
+        except WeftError as e:
+            raise WeftError(
+                "env.realize_failed",
+                "fetching/compiling the R delta stalled or timed out",
+                stage="realize", retryable=True,
+                hints={"requested": names, "detail": e.detail}) from e
+        # install.packages WARNS but exits 0 on failure — verify by
+        # presence, or a broken add would report success (R's trap)
+        vcmd = (f'missing <- setdiff(c({vec}), '
+                f'basename(list.dirs("{rlib}", recursive=FALSE))); '
+                f'if (length(missing)) {{ '
+                f'cat("MISSING:", missing, "\\n"); quit(status=1) }}')
+        v = adapter.run_activated(wrap(
+            f"{act} && Rscript -e {shlex.quote(vcmd)}"), timeout=120)
+        if r.rc != 0 or v.rc != 0:
+            raise WeftError(
+                "env.solve_conflict",
+                "installing the R delta into the session layer failed",
+                stage="realize",
+                hints={"requested": names,
+                       "log_tail": (r.err or r.out)[-1500:]})
+        self._ensure_overlay_line(
+            s, adapter,
+            f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"')
+        self.store.emit("session.installed", session=s["session_id"],
+                        cran=names, mode="rlib")
+        return {"rlib": rlib, "installed": names}
 
     def _base_cold(self, s: dict, adapter: SiteAdapter) -> bool:
         """Is the base's package cache COLD on this site? An adopted
@@ -255,11 +359,20 @@ class SessionManager:
             "adopted/unpacked on this site (cold package cache) — cloning "
             "re-downloads the ENTIRE base from the index",
             stage="realize",
-            hints={"options": {
+            hints={"delta_lanes": {
+                "pypi": "session_install(pypi=[...]) layers delta-only "
+                        "over this base (pylib)",
+                "cran": "session_install(cran=[...]) layers delta-only "
+                        "over this base (rlib)",
+                "conda": "cannot layer (embedded prefixes) — use a lever "
+                         "below",
+                "julia": "not yet wired for sessions; extends_env works",
+            }, "options": {
                 "extends": "mint a real delta env instead: env_ensure("
                            f"{{'extends': '{env_row.get('spec_hash', '?')}',"
-                           " 'deps': {...}}) realizes as an overlay fetching "
-                           "only the delta",
+                           " 'deps': {...}}) — pypi/cran/julia deltas "
+                           "realize as overlays; a conda delta is a full "
+                           "realize",
                 "warm_site": "run this where the base was BUILT (warm pixi "
                              "cache): the clone is a local hardlink forest "
                              "there",
@@ -357,10 +470,12 @@ class SessionManager:
                                "log_tail": (rb.err or rb.out)[-1500:]})
             else:
                 note = "already satisfied by the base — nothing fetched"
-        adapter.write_file(
-            overlay_rel,
-            (f'export PYTHONPATH="{pylib}${{PYTHONPATH:+:$PYTHONPATH}}"\n'
-             f'export PATH="{pylib}/bin:$PATH"\n').encode())
+        # ADDITIVE: overlay.sh is shared with the rlib layer — never clobber
+        self._ensure_overlay_line(
+            s, adapter,
+            f'export PYTHONPATH="{pylib}' + '${PYTHONPATH:+:$PYTHONPATH}"')
+        self._ensure_overlay_line(
+            s, adapter, f'export PATH="{pylib}/bin:$PATH"')
         first = s.get("materialize_mode", "clone") != "pylib"
         if first:
             self.store.set_session_materialized(s["session_id"],
@@ -401,25 +516,17 @@ class SessionManager:
     def exec(self, session_id: str, adapter: SiteAdapter, cmd: str) -> dict:
         s = self._get(session_id)
         sdir = shlex.quote(adapter.path(s["location"]))
-        mode = s.get("materialize_mode",
-                     "clone" if s.get("materialized", True) else "none")
-        if mode == "clone":
-            manifest = adapter.path(f"{s['location']}/pixi.toml")
-            script = (f"cd {sdir} && "
-                      f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
-                      f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )")
-        else:
-            # base lanes: pre-clone the base realization IS the session
-            # env; pylib composes the session's own layer over it
-            act, ns = self._base_activation(s, adapter)
-            script = f"cd {sdir} && {act} && "
-            if mode == "pylib":
-                overlay = adapter.path(f"{s['location']}/overlay.sh")
-                script += f". {shlex.quote(overlay)} && "
-            script += f"( {cmd} )"
-            if ns:
-                from .realize import _ns_wrap_cmd
-                script = _ns_wrap_cmd(script)
+        # ONE composition rule for every mode: interpreter-stack
+        # activation (clone prefix or base realization), then overlay.sh
+        # when any layer exists (pylib PYTHONPATH, rlib R_LIBS)
+        main, ns = self._stack_activation(s, adapter)
+        overlay = adapter.path(f"{s['location']}/overlay.sh")
+        script = (f"cd {sdir} && {main} && "
+                  f"{{ [ -f {shlex.quote(overlay)} ] && "
+                  f". {shlex.quote(overlay)}; true; }} && ( {cmd} )")
+        if ns:
+            from .realize import _ns_wrap_cmd
+            script = _ns_wrap_cmd(script)
         r = adapter.run_cmd(script, timeout=600)
         self.store.audit_log(None, "session.exec", site=adapter.name,
                              command=cmd, why=f"session {session_id}",
@@ -429,7 +536,8 @@ class SessionManager:
     def install(self, session_id: str, adapter: SiteAdapter,
                 conda: list[str] | None = None,
                 pypi: list[str] | None = None, fast: bool = True,
-                full_clone: bool = False) -> dict:
+                full_clone: bool = False,
+                cran: list[str] | None = None) -> dict:
         """Add packages to the session. pypi-only requests take a FAST
         PATH by default: a direct pip/uv install into the session prefix
         — no re-solve of the whole manifest (which dominates a one-leaf
@@ -441,8 +549,28 @@ class SessionManager:
         install falls through to the full path automatically."""
         s = self._get(session_id)
         conda, pypi = list(conda or []), list(pypi or [])
-        if not conda and not pypi:
+        cran = list(cran or [])
+        if not conda and not pypi and not cran:
             raise WeftError("task.invalid", "nothing to install", stage="realize")
+        # cran is ORTHOGONAL to the prefix modes: R composes via
+        # R_LIBS on any base (frozen or built-here), so it never clones,
+        # never flips the session's mode, and works the same everywhere
+        rlib_out = None
+        if cran:
+            rlib_out = self._materialize_rlib(s, adapter, cran)
+            self.store.session_add_deps(session_id, [], [], cran)
+            # keep the in-memory row honest: runtime() below reads it
+            s["added_cran"] = s.get("added_cran", []) + cran
+            if not conda and not pypi:
+                return {"installed": {"conda": [], "pypi": [],
+                                      "cran": rlib_out["installed"]},
+                        "session_id": session_id, "mode": "rlib",
+                        "rlib": rlib_out["rlib"],
+                        "runtime": self.runtime(s, adapter),
+                        "note": "R delta composed over the base via "
+                                "R_LIBS — dependencies the base holds "
+                                "were skipped natively; the snapshot's "
+                                "solve pins versions"}
         # COLD base (adopted/unpacked here — empty package cache): a full
         # clone re-downloads the entire base, so pypi adds go into a
         # pylib overlay over the mount and conda adds refuse with levers.
@@ -471,6 +599,9 @@ class SessionManager:
                 out["materialized_note"] = (
                     "pylib overlay created over the base; running python "
                     "kernels see the new packages on their next block")
+            if rlib_out:
+                out["installed"]["cran"] = rlib_out["installed"]
+                out["rlib"] = rlib_out["rlib"]
             return out
         if mode == "pylib" and full_clone:
             raise WeftError(
@@ -503,6 +634,9 @@ class SessionManager:
                                     "solve at add time"}
                 if clone_note:
                     fast_out["materialized_note"] = clone_note
+                if rlib_out:
+                    fast_out["installed"]["cran"] = rlib_out["installed"]
+                    fast_out["rlib"] = rlib_out["rlib"]
                 return fast_out
             fallback_tail = (out or {}).get("detail")
         manifest = adapter.path(f"{s['location']}/pixi.toml")
@@ -535,6 +669,9 @@ class SessionManager:
                # would exec the wrong thing from here on — hand it the
                # fresh contract at exactly the call that changed it
                "runtime": self.runtime(s, adapter)}
+        if rlib_out:
+            out["installed"]["cran"] = rlib_out["installed"]
+            out["rlib"] = rlib_out["rlib"]
         if clone_note:
             out["materialized_note"] = clone_note
         if fallback_tail:
@@ -651,7 +788,7 @@ class SessionManager:
         # retention.md R6)
         s = self._get(session_id, allow_stopped=True)
         if not (s["added_conda"] or s["added_pypi"]
-                or s.get("installers")):
+                or s.get("added_cran") or s.get("installers")):
             # nothing was added: the citable env IS the base. Re-solving
             # a zero-delta spec at snapshot time could pick newer builds
             # and mint a DIFFERENT EnvID for identical intent — identity
@@ -668,6 +805,11 @@ class SessionManager:
             "extends": env_row["spec_hash"],
             "deps": {"conda": s["added_conda"], "pypi": s["added_pypi"]},
         }
+        if s.get("added_cran"):
+            # the spec's native cran layer: the solve pins versions the
+            # scratch install left floating; classify_delta layers cran,
+            # so this realizes as a delta overlay on the frozen base
+            spec["deps"]["cran"] = s["added_cran"]
         if installers:
             spec["post_install"] = [i["cmd"] for i in installers]
             spec["step_notes"] = {str(i): inst["note"]
