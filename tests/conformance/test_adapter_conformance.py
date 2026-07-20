@@ -123,3 +123,63 @@ def test_sandbox_layout_contract(site):
     lines = vars_out["preview"]["lines"]
     assert lines[0].endswith("|2|1") and lines[0].startswith("jb_")
     assert "tmpdir" in lines and "cwd-in-jobdir" in lines
+
+
+# ── file-protocol invariant (bug2): atomic publish, per adapter ────────────
+# Any file a concurrent reader consumes on first sight must be complete the
+# moment it exists (documentation/architecture.md, Kernels;
+# misc/polled_files_audit.md). Both fast-lane adapters execute their REAL
+# write path here: LocalAdapter its python path, SSHAdapter its actual shell
+# string via transport="local" (what ssh would hand the remote shell, sh
+# gets locally — no docker needed). The remote-ssh reader side is pinned by
+# tests/integration/test_kernel_block_race.py.
+
+import threading
+
+from weft.adapters.local import LocalAdapter
+from weft.adapters.ssh import SSHAdapter
+
+
+@pytest.fixture(params=["local", "ssh-shell"])
+def raw_adapter(request, tmp_path):
+    root = tmp_path / "araw"
+    if request.param == "local":
+        return LocalAdapter("l", root), root
+    return SSHAdapter("s", "unused-host", str(root), transport="local"), root
+
+
+def test_write_file_existence_is_completeness(raw_adapter):
+    ad, root = raw_adapter
+    payload = b"y" * (1 << 20)
+    p = root / "blocks" / "0000.code"
+    caught = []
+    for _ in range(10):
+        p.unlink(missing_ok=True)
+        stop = threading.Event()
+
+        def watch():
+            while True:
+                if p.exists():
+                    caught.append(p.read_bytes())
+                    return
+                if stop.is_set():
+                    return
+
+        t = threading.Thread(target=watch)
+        t.start()
+        ad.write_file("blocks/0000.code", payload)
+        stop.set()
+        t.join(10)
+    assert len(caught) == 10 and all(c == payload for c in caught)
+    assert list((root / "blocks").glob("*.wtmp.*")) == []
+
+
+def test_write_file_identical_result_everywhere(tmp_path):
+    """Conformance spirit: same bytes, same mode, from both write paths."""
+    la, sa = (LocalAdapter("l", tmp_path / "A"),
+              SSHAdapter("s", "unused", str(tmp_path / "B"), transport="local"))
+    for ad in (la, sa):
+        ad.write_file("d/f.bin", b"\x00\x01payload", mode=0o640)
+    a, b = (tmp_path / "A/d/f.bin"), (tmp_path / "B/d/f.bin")
+    assert a.read_bytes() == b.read_bytes() == b"\x00\x01payload"
+    assert (a.stat().st_mode & 0o777) == (b.stat().st_mode & 0o777) == 0o640

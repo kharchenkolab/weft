@@ -412,7 +412,19 @@ A kernel is a tracked, detached job running a small per-language driver
 blocks against persistent interpreter state, through a file protocol
 (blocks/NNNN.{code,out,err,rc} + artifacts dir + heartbeat) — Jupyter-like
 statefulness with no sockets, working over any control channel and
-surviving disconnects. Async-first: `kernel_exec(wait=False)` →
+surviving disconnects.
+
+**File-protocol invariant (bug2): any file a concurrent reader consumes
+on first sight MUST be published atomically** — write a tmp sibling,
+rename into place; existence == completeness. Both directions honor it:
+the drivers publish `.rc` via rename (all three languages), and the
+controller's `adapter.write_file` stages + verifies + renames (`.code`
+is consume-once: the driver reads it the instant it exists and never
+re-reads). Readers that RETRY until content parses (job `exit_code`,
+pid probes) are self-healing and merely benefit; consume-once readers
+are correctness-critical. The classification of every polled file lives
+in misc/polled_files_audit.md; the conformance suite pins the writer
+side per adapter. Async-first: `kernel_exec(wait=False)` →
 `kernel_poll`; long blocks are watchable. The site poller watches kernel
 jobs with kernel semantics: death (native crash, OOM) emits `kernel.died`
 naming the **killing block** with the log tail; `kernel_restart(replay=

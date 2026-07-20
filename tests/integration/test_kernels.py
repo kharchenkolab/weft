@@ -8,6 +8,8 @@ import pytest
 
 from weft.api import Weft
 
+from test_kernel_block_race import assert_no_silent_blocks
+
 
 @pytest.fixture
 def wk(tmp_path, pixi_bin):
@@ -33,6 +35,7 @@ def test_state_persists_across_blocks(wk):
     assert st["state"] == "running" and st["blocks_run"] == 4
     tr = wk.kernel_transcript(k)
     assert [e["rc"] for e in tr] == [0, 0, 1, 0]
+    assert_no_silent_blocks(wk, k)
     wk.kernel_stop(k)
 
 
@@ -113,6 +116,7 @@ def test_kernel_survives_disconnect(tmp_path, pixi_bin, sshd_site):
     r = w.kernel_exec(k, "print(acc)", timeout=60)
     assert r["rc"] == 0 and r["out"].strip() == "123"
     assert w.kernel_status(k)["state"] == "running"
+    assert_no_silent_blocks(w, k)
     w.kernel_stop(k)
 
 

@@ -39,4 +39,18 @@ remotes, removable in one command.
 - Test lanes: fast `pixi run pytest -q -m "not solver and not docker"`;
   docker lane needs a container runtime; solver lane hits real indexes.
   (On the current mac: PYTHONNOUSERSITE=1, docker = OrbStack.)
+- Reality matrix is per-PROTOCOL, not per-site: validating a site (or
+  changing a protocol) covers every job kind — env, task, kernel
+  cadence, array, service. Kernels shipped 5 rounds without one real
+  remote block (bug2); transport quirks are per-protocol.
+- Machine-cadence rule: any surface an agent drives gets one test that
+  drives it as fast as the API allows (test_kernel_block_race.py,
+  test_agent_cadence.py). Timing-dependent ssh tests use the
+  sshd_site_wan (50ms netem) fixture — loopback timing hides races.
+- Polled files: adding one to any protocol requires a row in
+  misc/polled_files_audit.md; consume-once readers require an atomic
+  writer + a conformance case.
+- Flakes are evidence: before retrying/quarantining a flaky distributed
+  test, write a one-line hypothesis in the ledger (percent-level races
+  look exactly like flakes).
 - No biological examples in specs, tests, or docs.

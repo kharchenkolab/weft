@@ -45,6 +45,8 @@ def test_kernel_peek_streams_deltas(w):
     assert [f"chunk {i}" for i in range(6)] == \
         [ln for ln in got.splitlines() if ln]
     # and it genuinely streamed: more than one delta-carrying poll
+    from test_kernel_block_race import assert_no_silent_blocks
+    assert_no_silent_blocks(w, k)
     w.kernel_stop(k)
 
 
