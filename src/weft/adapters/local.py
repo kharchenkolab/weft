@@ -40,6 +40,9 @@ class LocalAdapter(SiteAdapter):
         env["PIXI_CACHE_DIR"] = getattr(self, "pixi_cache", None) \
             or self.path("cache/pixi")
         env["PIXI_HOME"] = self.path("pixi-home")
+        # pip/uv caches ride the site root too (see ssh._env_prefix)
+        env["PIP_CACHE_DIR"] = self.path("cache/pip")
+        env["UV_CACHE_DIR"] = self.path("cache/uv")
         return env
 
     def ensure_bootstrap(self) -> None:

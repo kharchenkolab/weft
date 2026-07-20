@@ -395,6 +395,8 @@ class SessionManager:
         set. Old pip without --report falls back to the full-closure
         --target install — correct, fatter, and SAID."""
         import json as _json
+        import time as _t
+        t_start = _t.monotonic()
         act, ns = self._base_activation(s, adapter)
         sdir = adapter.path(s["location"])
         pylib = f"{sdir}/pylib"
@@ -408,6 +410,9 @@ class SessionManager:
                f"{{ [ -f {shlex.quote(overlay)} ] && "
                f". {shlex.quote(overlay)}; true; }} && ")
         note = None
+        resolve_s = fetch_s = 0.0
+        fetch_method = None
+        t0 = _t.monotonic()
         try:
             ra = adapter.run_activated(wrap(
                 pre + f"python -m pip install --dry-run --quiet --report "
@@ -420,6 +425,7 @@ class SessionManager:
                 stage="realize", retryable=True,
                 hints={"likely": "stalled index/CDN transfer from this "
                                  "node", "detail": e.detail}) from e
+        resolve_s = round(_t.monotonic() - t0, 2)
         missing: list[str] = []
         if ra.rc != 0 and ("no such option" in (ra.err + ra.out)
                            or "unrecognized arguments" in (ra.err + ra.out)):
@@ -447,13 +453,23 @@ class SessionManager:
             missing = [f'{i["metadata"]["name"]}=={i["metadata"]["version"]}'
                        for i in data.get("install", [])]
             if missing:
+                pins = " ".join(shlex.quote(m) for m in missing)
+                # phase B is --no-deps at exact pins: uv (when the site
+                # has it) is much faster at wheel fetch/extract; pip is
+                # the always-there fallback — the marker says which ran
+                fetch_cmd = (
+                    f"{act} && mkdir -p {shlex.quote(pylib)} && "
+                    f"if command -v uv >/dev/null 2>&1 && "
+                    f"uv pip install --no-deps --target {shlex.quote(pylib)} "
+                    f"--python \"$(command -v python)\" {pins} "
+                    f">/dev/null 2>&1; then echo '#fetch uv'; "
+                    f"else python -m pip install --no-deps --no-input "
+                    f"--quiet --target {shlex.quote(pylib)} {pins} "
+                    f"&& echo '#fetch pip'; fi")
+                t1 = _t.monotonic()
                 try:
-                    rb = adapter.run_activated(wrap(
-                        f"{act} && mkdir -p {shlex.quote(pylib)} && "
-                        f"python -m pip install --no-deps --no-input "
-                        f"--quiet --target {shlex.quote(pylib)} "
-                        + " ".join(shlex.quote(m) for m in missing)),
-                        timeout=1800)
+                    rb = adapter.run_activated(wrap(fetch_cmd),
+                                               timeout=1800)
                 except WeftError as e:
                     raise WeftError(
                         "env.realize_failed",
@@ -468,6 +484,8 @@ class SessionManager:
                         stage="realize",
                         hints={"missing": missing,
                                "log_tail": (rb.err or rb.out)[-1500:]})
+                fetch_s = round(_t.monotonic() - t1, 2)
+                fetch_method = "uv" if "#fetch uv" in rb.out else "pip"
             else:
                 note = "already satisfied by the base — nothing fetched"
         # ADDITIVE: overlay.sh is shared with the rlib layer — never clobber
@@ -494,7 +512,11 @@ class SessionManager:
         shadows = [m.split("==")[0] for m in missing
                    if m.split("==")[0].lower().replace("_", "-")
                    in base_pypi]
-        out = {"mode": "pylib", "fetched": missing, "first": first}
+        out = {"mode": "pylib", "fetched": missing, "first": first,
+               "timings": {"resolve_s": resolve_s, "fetch_s": fetch_s,
+                           "total_s": round(_t.monotonic() - t_start, 2)}}
+        if fetch_method:
+            out["fetch_method"] = fetch_method
         if note:
             out["note"] = note
         if shadows:
@@ -584,10 +606,13 @@ class SessionManager:
             got = self._materialize_pylib(s, adapter, pypi)
             self.store.session_add_deps(session_id, [], pypi)
             self.store.emit("session.installed", session=session_id,
-                            conda=[], pypi=pypi, mode="pylib")
+                            conda=[], pypi=pypi, mode="pylib",
+                            **got.get("timings", {}))
             out = {"installed": {"conda": [], "pypi": pypi},
                    "session_id": session_id, "mode": "pylib",
                    "fetched": got["fetched"],
+                   "timings": got.get("timings"),
+                   "fetch_method": got.get("fetch_method"),
                    "runtime": self.runtime(s, adapter),
                    "note": got.get("note") or
                            "only the missing closure was fetched; the "

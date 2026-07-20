@@ -376,9 +376,14 @@ def test_cold_base_pypi_goes_pylib_two_phase(tmp_path, pixi_bin, monkeypatch):
     # phase A resolves WITH the base visible — no --target there
     assert "--dry-run" in calls[0] and "--report" in calls[0]
     assert "activate.sh" in calls[0] and "--target" not in calls[0]
-    # phase B installs ONLY the missing closure, no dep resolution
+    # phase B installs ONLY the missing closure, no dep resolution —
+    # uv-preferred (fast wheel path) with pip as the always-there fallback
     assert "--no-deps" in calls[1] and "--target" in calls[1]
     assert "newpkg==2.1" in calls[1] and "plotpkg==1.5" in calls[1]
+    assert "command -v uv" in calls[1]
+    t = out["timings"]
+    assert t["resolve_s"] >= 0 and t["fetch_s"] >= 0
+    assert t["total_s"] >= t["resolve_s"]
 
     assert out["mode"] == "pylib"
     assert out["fetched"] == ["newpkg==2.1", "plotpkg==1.5"]
@@ -418,6 +423,7 @@ def test_cold_base_pypi_already_satisfied(tmp_path, pixi_bin, monkeypatch):
     assert len(calls) == 1                       # no phase B
     assert out["fetched"] == []
     assert "already satisfied" in out["note"]
+    assert out["timings"]["fetch_s"] == 0        # nothing was fetched
 
 
 def test_cold_base_full_clone_override_routes_to_clone(tmp_path, pixi_bin,
@@ -664,3 +670,18 @@ def test_cran_rlib_end_to_end_on_adopted_base(tmp_path, pixi_bin):
         w.kernel_stop(k)
     snap = w.session_snapshot(sid, verify=False)
     assert snap["env_id"].startswith("env:") and snap["env_id"] != env_id
+
+
+
+# ── perf plumbing: pip/uv caches are a property of the SITE ROOT ───────────
+
+def test_pip_uv_caches_ride_the_site_root(tmp_path):
+    from weft.adapters.ssh import SSHAdapter
+    la = LocalAdapter("l", tmp_path)
+    env = la._env()
+    assert env["PIP_CACHE_DIR"] == f"{tmp_path}/cache/pip"
+    assert env["UV_CACHE_DIR"] == f"{tmp_path}/cache/uv"
+    sa = SSHAdapter("s", "host", "/site/root")
+    pre = sa._env_prefix()
+    assert "PIP_CACHE_DIR=/site/root/cache/pip" in pre
+    assert "UV_CACHE_DIR=/site/root/cache/uv" in pre

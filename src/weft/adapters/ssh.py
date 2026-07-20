@@ -278,6 +278,12 @@ class SSHAdapter(SiteAdapter):
             f"PIXI_CACHE_DIR="
             f"{shlex.quote(self.pixi_cache or self.path('cache/pixi'))} "
             f"PIXI_HOME={shlex.quote(self.path('pixi-home'))} "
+            # pip/uv HTTP+wheel caches: a property of the SITE ROOT, not
+            # of whatever HOME the deployment has — warm once, warm for
+            # every session (and every user, on shared roots). Safe to
+            # rm -rf anytime; the first cold add repays it.
+            f"PIP_CACHE_DIR={shlex.quote(self.path('cache/pip'))} "
+            f"UV_CACHE_DIR={shlex.quote(self.path('cache/uv'))} "
             + ca +
             f"PATH={shlex.quote(self.path('bin'))}:$PATH "
         )
