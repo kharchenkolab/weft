@@ -1269,6 +1269,7 @@ def _build_squashfs(
     build = adapter          # what the content stages talk to
     content = inner          # where the bytes actually are
     staging_note = None
+    ns_probed_ok = None      # live unshare probe result (staging block)
     if staging_rel:
         mount_abs, staging_abs = adapter.path(inner), \
             adapter.path(staging_rel)
@@ -1278,6 +1279,7 @@ def _build_squashfs(
         # the gate is a live probe of the exact harness, not a belief
         probe = adapter.run_cmd(
             _bind_wrap_cmd("true", staging_abs, mount_abs), timeout=120)
+        ns_probed_ok = probe.rc == 0
         if probe.rc == 0:
             build = _StagedBuild(adapter, mount_abs, staging_abs)
             content = staging_rel
@@ -1370,6 +1372,36 @@ def _build_squashfs(
     adapter.run_cmd(f"mkdir -p {shlex.quote(adapter.path(inner))}")
 
     _write_squashfs_activation(adapter, rel, modules, modules_init)
+    # tombstones in the mountpoint, then PROVE the mount still works
+    # over them (fuse3 allows non-empty mountpoints; old fuse2 refuses —
+    # there, strip and keep the env working, and say so)
+    _write_mount_tombstones(adapter, rel)
+    from .capability import squashfs_mode
+    need_ns = squashfs_mode(caps or {}) == "userns"
+    if need_ns and ns_probed_ok is False:
+        # unshare demonstrably fails in THIS harness (the staging probe
+        # said so) — the mount cannot be verified here. Keep the shims:
+        # the activation's nonempty-first chain covers both fuse
+        # generations (validated fuse2+fuse3); say what was not proven.
+        emit("realize.tombstones_unverified", env_id=env_id,
+             site=adapter.name,
+             note="no usable namespace to probe the mount over the "
+                  "legibility shims; kept on the strength of the "
+                  "nonempty-first mount chain")
+    else:
+        check = (f". {shlex.quote(adapter.path(rel))}/activate.sh "
+                 f">/dev/null 2>&1 && "
+                 f"test -f {shlex.quote(adapter.path(inner))}/activate.sh")
+        if need_ns:
+            check = _ns_wrap_cmd(check)
+        probe = adapter.run_activated(check, timeout=180)
+        if probe.rc != 0:
+            _strip_mount_tombstones(adapter, rel)
+            emit("realize.tombstones_stripped", env_id=env_id,
+                 site=adapter.name,
+                 note="this site's FUSE refuses non-empty mountpoints "
+                      "even with the fallback chain; bare-exec "
+                      "legibility shims removed")
     emit("realize.squashfs.done", env_id=env_id, site=adapter.name,
          image_bytes=image_bytes,
          elapsed_s=round(__import__("time").time() - t0, 1))
@@ -1379,6 +1411,35 @@ def _build_squashfs(
     elif staging_note:
         out["staging"] = {"used": False, "why": staging_note}
     return out
+
+
+_TOMBSTONE = """#!/bin/sh
+echo "weft: $(basename "$0") lives inside this env's mount namespace and is not directly executable from outside." >&2
+echo "weft: activation mounts the image first — use session_runtime()['exec_template'], session_exec, kernel_start, or task_submit." >&2
+exit 127
+"""
+
+
+def _write_mount_tombstones(adapter: SiteAdapter, rel: str) -> None:
+    """Legibility for the UNMOUNTED mountpoint: a bare exec of the
+    in-mount interpreter path from outside the namespace hits ENOENT
+    three directories deep, and consumers fall back to the wrong
+    interpreter (field report). These shims sit AT those paths, name
+    the lever, and exit 127; the mounted image shadows them completely.
+    Callers must verify-and-strip: an old fuse2 refuses non-empty
+    mountpoints, and a working env beats a legible corpse."""
+    bin_rel = f"{rel}/mnt/.pixi/envs/default/bin"
+    adapter.run_cmd(f"mkdir -p {shlex.quote(adapter.path(bin_rel))}",
+                    timeout=60)
+    for name in ("python", "python3", "R", "Rscript", "julia"):
+        adapter.write_file(f"{bin_rel}/{name}", _TOMBSTONE.encode(),
+                           mode=0o755)
+
+
+def _strip_mount_tombstones(adapter: SiteAdapter, rel: str) -> None:
+    adapter.run_cmd(
+        f"rm -rf {shlex.quote(adapter.path(rel + '/mnt/.pixi'))} "
+        f"2>/dev/null; true", timeout=60)
 
 
 def _write_squashfs_activation(adapter: SiteAdapter, rel: str,
@@ -1402,8 +1463,12 @@ def _write_squashfs_activation(adapter: SiteAdapter, rel: str,
         "        for __p in \"$(command -v \"$__c\" 2>/dev/null)\" \\\n"
         "                   \"/usr/libexec/apptainer/bin/$__c\" \\\n"
         "                   \"/usr/bin/$__c\" \"/usr/sbin/$__c\"; do\n"
-        "            [ -n \"$__p\" ] && [ -x \"$__p\" ] && \\\n"
-        "                \"$__p\" \"$1\" \"$2\" 2>/dev/null && return 0\n"
+        "            [ -n \"$__p\" ] && [ -x \"$__p\" ] || continue\n"
+        # -o nonempty FIRST: fuse2 refuses non-empty mountpoints (the
+        # legibility tombstones live there) without it; fuse3 rejects
+        # the option but allows non-empty by default — so try both ways
+        "            \"$__p\" -o nonempty \"$1\" \"$2\" 2>/dev/null && return 0\n"
+        "            \"$__p\" \"$1\" \"$2\" 2>/dev/null && return 0\n"
         "        done\n"
         "    done\n"
         "    return 1\n"

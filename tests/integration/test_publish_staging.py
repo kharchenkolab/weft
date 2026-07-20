@@ -188,7 +188,11 @@ def test_staged_build_command_stream():
     wrapped = [c for c in a.commands if "unshare -rm" in c]
     assert any("pixi" in c and f"{mount_abs}/pixi.toml" in c
                for c in wrapped)
-    assert all(staging_abs in c for c in wrapped)  # bind in every wrap
+    # bind in every BUILD wrap (the post-build tombstone-verify probe is
+    # ns-wrapped too but staging is already torn down by then — exclude)
+    build_wrapped = [c for c in wrapped
+                     if f"{mount_abs}/activate.sh" not in c]
+    assert build_wrapped and all(staging_abs in c for c in build_wrapped)
     # manifest/lock bytes landed in staging, not on the tree
     assert f"{staging_abs}/pixi.toml" in a.files
     assert f"{mount_abs}/pixi.toml" not in a.files

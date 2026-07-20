@@ -98,3 +98,44 @@ def test_claim_is_atomic_and_nonce_scoped(tmp_path, pixi_bin):
     st.release_job_drive(jid, "n1")
     assert st.job_drive_claim(jid) is None
     assert st.claim_job_drive(jid, "n2") is True      # free again
+
+
+# (co-located docker fixture user) ─ tombstone shadowing under a REAL mount
+
+import pytest
+
+
+@pytest.mark.docker
+def test_tombstones_shadowed_by_real_mount(tmp_path, pixi_bin, sshd_site):
+    from weft.api import Weft
+    from weft.realize import _write_mount_tombstones
+    w = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
+    w.register_site("beamlab", "ssh", {
+        "host": sshd_site["host"], "port": sshd_site["port"],
+        "user": sshd_site["user"], "ssh_opts": sshd_site["ssh_opts"],
+        "root": sshd_site["root"], "pixi_source": pixi_bin})
+    ad = w.adapters["beamlab"]
+    rel = "envs/tombtest"
+    root = ad.path(rel)
+    from weft.realize import _write_squashfs_activation
+    r = ad.run_cmd(
+        f"mkdir -p {root}/content/.pixi/envs/default/bin && "
+        f"echo '#real-python' > {root}/content/.pixi/envs/default/bin/python && "
+        f"echo true > {root}/content/activate.sh && "
+        f"mksquashfs {root}/content {root}/image.sqfs -no-progress -quiet && "
+        f"rm -rf {root}/content && mkdir -p {root}/mnt", timeout=120)
+    assert r.rc == 0, r.err
+    _write_mount_tombstones(ad, rel)
+    _write_squashfs_activation(ad, rel, [])
+    # unmounted: the bare exec dies LEGIBLY, naming the lever
+    bare = ad.run_cmd(f"{root}/mnt/.pixi/envs/default/bin/python")
+    assert bare.rc == 127 and "exec_template" in bare.err
+    # the REAL activation mounts over the tombstones (nonempty-first
+    # fallback chain: fuse2 needs -o nonempty, fuse3 rejects it but
+    # allows non-empty by default) and the image shadows them
+    m = ad.run_cmd(
+        f". {root}/activate.sh && "
+        f"cat {root}/mnt/.pixi/envs/default/bin/python; rc=$?; "
+        f"fusermount -u {root}/mnt 2>/dev/null || "
+        f"fusermount3 -u {root}/mnt 2>/dev/null; exit $rc", timeout=60)
+    assert m.rc == 0 and "#real-python" in m.out, (m.out, m.err)

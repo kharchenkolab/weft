@@ -381,8 +381,12 @@ session|base, env_id (null once mutated — scratch has no identity),
 prefix, activation, ns_wrap, direct_exec}`. `activation` is always
 correct; `direct_exec` says when `prefix/bin/*` may be exec'd without
 it — a squashfs base's prefix is mount-scoped and only exists under
-activation (`ns_wrap` ⇒ inside `unshare -rm`). Runtime queries are
-observation, not activity: they don't touch `last_used`.
+activation (`ns_wrap` ⇒ inside `unshare -rm`). For out-of-band helper
+processes, `exec_template` is the ready-made form: execute
+`shlex.split(template) + argv` ON the session's site and argv runs
+inside the activated env, every mode, quoting and namespace handled.
+Runtime queries are observation, not activity: they don't touch
+`last_used`.
 
 ### Monitoring, arrays, load
 

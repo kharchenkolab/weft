@@ -151,6 +151,23 @@ class SessionManager:
                         base=s["base_env_id"])
         return True
 
+    @staticmethod
+    def _exec_template(activation: str, ns_wrap: bool) -> str:
+        """A ready-to-exec prefix: `shlex.split(template) + argv` runs
+        argv INSIDE the session's activated env, on the session's SITE.
+        Closes the trap a consumer hit: prefix paths on mount-adopted
+        bases exist only inside the activation's namespace, so a bare
+        exec dies illegibly — this string is the thing you CAN exec.
+        bash is preferred for the activation (conda activate.d carries
+        bashisms el7's sh refuses); the unshare layer rides along when
+        the mount lives in a namespace."""
+        inner = f"{activation} && exec \"$@\""
+        dispatch = ('if command -v bash >/dev/null 2>&1; '
+                    'then exec bash -c "$0" bash "$@"; '
+                    'else exec sh -c "$0" sh "$@"; fi')
+        t = f"sh -c {shlex.quote(dispatch)} {shlex.quote(inner)}"
+        return f"unshare -rm {t}" if ns_wrap else t
+
     def runtime(self, s: dict | str, adapter: SiteAdapter) -> dict:
         """What does this session RUN FROM right now — the authoritative
         contract for callers that exec interpreters themselves (aba's
@@ -195,6 +212,8 @@ class SessionManager:
                     + f" && . {shlex.quote(overlay)}",
                     direct_exec=False,
                     rlib=adapter.path(f"{s['location']}/rlib"))
+            out["exec_template"] = self._exec_template(
+                out["activation"], False)
             return out
         act, ns = self._base_activation(s, adapter)
         real = self.store.get_realization(s["base_env_id"],
@@ -231,6 +250,7 @@ class SessionManager:
                 out["pylib"] = adapter.path(f"{s['location']}/pylib")
             if has_cran:
                 out["rlib"] = adapter.path(f"{s['location']}/rlib")
+        out["exec_template"] = self._exec_template(out["activation"], ns)
         return out
 
     def _base_activation(self, s: dict, adapter: SiteAdapter) -> tuple[str, bool]:

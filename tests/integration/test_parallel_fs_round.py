@@ -685,3 +685,72 @@ def test_pip_uv_caches_ride_the_site_root(tmp_path):
     pre = sa._env_prefix()
     assert "PIP_CACHE_DIR=/site/root/cache/pip" in pre
     assert "UV_CACHE_DIR=/site/root/cache/uv" in pre
+
+
+# ── exec_template: the thing out-of-band consumers CAN exec ────────────────
+
+import shlex as _shlex
+import subprocess as _subprocess
+
+
+def test_exec_template_runs_argv_in_base_env(tmp_path, pixi_bin):
+    w, r = _lazy_session(tmp_path, pixi_bin)
+    t = r["runtime"]["exec_template"]
+    # the consumer contract: shlex.split(template) + argv, exec'd on site
+    out = _subprocess.run(_shlex.split(t) + ["weft-probe"],
+                          capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0 and out.stdout.strip() == "BASE", out
+
+
+def test_exec_template_composes_session_layers(tmp_path, pixi_bin,
+                                               monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    _no_toolchain(monkeypatch)
+    ad = w.adapters["local"]
+    report = tmp_path / "site" / "sessions" / sid / "pip-report.json"
+
+    def fake(script, timeout=120.0):
+        if "--dry-run" in script:
+            report.write_text(json.dumps({"install": [
+                {"metadata": {"name": "newpkg", "version": "1.0"}}]}))
+        return ShimResult(0, "", "")
+
+    monkeypatch.setattr(ad, "run_activated", fake)
+    w.session_install(sid, pypi=["newpkg"])
+    t = w.session_runtime(sid)["exec_template"]
+    out = _subprocess.run(
+        _shlex.split(t) + ["sh", "-c", "echo $PYTHONPATH"],
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0
+    assert f"sessions/{sid}/pylib" in out.stdout
+
+
+def test_exec_template_carries_ns_layer(tmp_path, pixi_bin, monkeypatch):
+    w, r = _lazy_session(tmp_path, pixi_bin)
+    monkeypatch.setattr(w.runner, "ns_wrap_needed", lambda *a: True)
+    t = w.session_runtime(r["session_id"])["exec_template"]
+    assert t.startswith("unshare -rm ")
+    # and the clone-mode template composes shell-hook activation
+    w.store.set_session_materialized(r["session_id"])
+    t2 = w.session_runtime(r["session_id"])["exec_template"]
+    assert "shell-hook" in t2 and 'exec "$@"' in t2
+    assert not t2.startswith("unshare")        # clone: plain prefix
+
+
+# ── mountpoint tombstones: bare execs die legibly ──────────────────────────
+
+def test_tombstones_write_exec_and_strip(tmp_path):
+    from weft.realize import (_strip_mount_tombstones,
+                              _write_mount_tombstones)
+    ad = LocalAdapter("l", tmp_path)
+    _write_mount_tombstones(ad, "envs/e1")
+    shim = tmp_path / "envs/e1/mnt/.pixi/envs/default/bin/python"
+    assert shim.exists()
+    r = _subprocess.run([str(shim)], capture_output=True, text=True)
+    assert r.returncode == 127
+    assert "exec_template" in r.stderr and "namespace" in r.stderr
+    for name in ("python3", "R", "Rscript", "julia"):
+        assert (shim.parent / name).exists()
+    _strip_mount_tombstones(ad, "envs/e1")
+    assert not (tmp_path / "envs/e1/mnt/.pixi").exists()
+    assert (tmp_path / "envs/e1/mnt").exists()   # the mountpoint stays

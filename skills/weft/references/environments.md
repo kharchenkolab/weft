@@ -129,6 +129,10 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     `deps.cran` → the minted env overlay-realizes on the frozen base.
     Cost map on a frozen base: pypi=delta (pylib), cran=delta (rlib),
     conda=refusal with the map in `hints.delta_lanes`.
+  - Out-of-band helper process? `exec_template` from
+    `session_runtime(id)`: run `shlex.split(t) + argv` on the session's
+    site — activation, layers, and the mount namespace are all inside
+    the template. Never bare-exec `prefix` when `direct_exec` is false.
   - Exec-ing interpreters yourself? Consume `session_runtime(id)`
     (echoed on start/install results and `list_sessions` rows):
     `{source, env_id (null once mutated), prefix, activation, ns_wrap,

@@ -1112,9 +1112,12 @@ class Weft:
         """What the session RUNS FROM right now: {source: session|base,
         env_id (null once mutated — scratch has no identity), prefix
         (informational; mount-scoped for squashfs bases), activation
-        (the authoritative way in), ns_wrap, direct_exec}. For callers
-        that exec interpreters directly instead of session_exec —
-        consume this, never rederive prefix layout from materialized."""
+        (the authoritative way in), ns_wrap, direct_exec,
+        exec_template}. For callers that exec interpreters directly
+        instead of session_exec — run shlex.split(exec_template) + argv
+        on the session's site; never rederive prefix layout from
+        materialized, never bare-exec prefix when direct_exec is
+        false."""
         try:
             return self.sessions.runtime(session_id,
                                          self._session_adapter(session_id))
