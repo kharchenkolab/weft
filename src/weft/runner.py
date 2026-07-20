@@ -503,6 +503,28 @@ class JobRunner:
 
     def _drive(self, job_id: str) -> None:
         with self._slots:
+            # Double-driver guard (#71): staging is NOT idempotent under
+            # concurrency — _prepare_sandbox wipes the jobdir, so a live
+            # peer's wipe lands between OUR cmd.sh write and submit
+            # ("run: need --dir with cmd.sh", field flake). Claim the
+            # drive in the store (shared truth across threads, Weft
+            # instances, and processes); heartbeat so a DEAD driver's
+            # claim goes stale and reconcile can honestly re-drive.
+            import os as _os
+            import uuid as _uuid
+            nonce = f"{_os.getpid()}-{_uuid.uuid4().hex[:6]}"
+            if not self.store.claim_job_drive(job_id, nonce):
+                self.store.emit("job.drive_skipped", job_id=job_id,
+                                note="another live driver holds the claim")
+                return
+            hb_stop = threading.Event()
+
+            def _hb():
+                while not hb_stop.wait(20.0):
+                    self.store.heartbeat_job_drive(job_id, nonce)
+
+            hb = threading.Thread(target=_hb, daemon=True)
+            hb.start()
             try:
                 self._drive_inner(job_id)
             except WeftError as e:
@@ -519,6 +541,9 @@ class JobRunner:
                     hints={"traceback_tail": traceback.format_exc()[-1200:]})
                 self.store.update_job(job_id, state="FAILED", error=err.to_dict())
                 self._emit_failed(job_id, err)
+            finally:
+                hb_stop.set()
+                self.store.release_job_drive(job_id, nonce)
 
     def _emit_failed(self, job_id: str, err: WeftError) -> None:
         job = self.store.get_job(job_id)
@@ -566,6 +591,8 @@ class JobRunner:
 
     def _drive_inner(self, job_id: str) -> None:
         job = self.store.get_job(job_id)
+        if job["state"] in TERMINAL:
+            return          # the previous driver finished before we claimed
         task = Task.from_dict(job["task"])
         if task.after:
             self._await_deps(job_id, task.after)
@@ -996,7 +1023,16 @@ class JobRunner:
                 ))
                 actions.append({"job": job_id, "action": "resume-poll"})
             else:
-                # never reached submission: stages are idempotent, re-drive
+                # never reached submission. Re-drive — UNLESS a live peer
+                # (another Weft instance/process on this workspace) holds
+                # a fresh drive claim: its thread is mid-staging and our
+                # wipe would race it (#71). Stale claims (dead driver)
+                # fall through: _drive's conditional claim breaks them.
+                claim = self.store.job_drive_claim(job_id)
+                if claim and time.time() - (claim.get("hb") or 0) < 90.0:
+                    actions.append({"job": job_id,
+                                    "action": "driving-elsewhere"})
+                    continue
                 actions.append({"job": job_id, "action": "re-drive"})
                 t = threading.Thread(target=self._drive, args=(job_id,), daemon=True)
                 self._threads[job_id] = t

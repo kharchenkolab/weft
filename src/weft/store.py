@@ -93,6 +93,13 @@ class Store:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN queue_reason TEXT")
         if "superseded_by" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN superseded_by TEXT")
+        if "driver_nonce" not in cols:
+            # double-driver guard (#71): who is DRIVING this job right
+            # now (staging is not idempotent under concurrency — the
+            # sandbox wipe races a live peer), plus a heartbeat so a
+            # dead driver's claim goes stale and reconcile can re-drive
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN driver_nonce TEXT")
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN driver_hb REAL")
         kcols = {r[1] for r in self._conn.execute("PRAGMA table_info(kernels)")}
         if kcols and "label" not in kcols:
             self._conn.execute("ALTER TABLE kernels ADD COLUMN label TEXT")
@@ -199,6 +206,39 @@ class Store:
     def _write(self, sql: str, params: tuple = ()) -> int:
         with self._lock, self._conn:
             return self._conn.execute(sql, params).lastrowid
+
+    def claim_job_drive(self, job_id: str, nonce: str,
+                        stale_s: float = 90.0) -> bool:
+        """Atomically claim the right to DRIVE a job (stage + submit).
+        Wins iff no claim exists or the holder's heartbeat is stale
+        (its process died mid-drive — the crash-recovery case reconcile
+        exists for). sqlite's single-writer semantics make the
+        conditional update the arbiter across threads AND processes."""
+        now = time.time()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE jobs SET driver_nonce=?, driver_hb=? "
+                "WHERE job_id=? AND (driver_nonce IS NULL "
+                "OR driver_hb IS NULL OR driver_hb < ?)",
+                (nonce, now, job_id, now - stale_s))
+            return cur.rowcount > 0
+
+    def heartbeat_job_drive(self, job_id: str, nonce: str) -> None:
+        self._write(
+            "UPDATE jobs SET driver_hb=? WHERE job_id=? AND driver_nonce=?",
+            (time.time(), job_id, nonce))
+
+    def release_job_drive(self, job_id: str, nonce: str) -> None:
+        self._write(
+            "UPDATE jobs SET driver_nonce=NULL, driver_hb=NULL "
+            "WHERE job_id=? AND driver_nonce=?", (job_id, nonce))
+
+    def job_drive_claim(self, job_id: str) -> dict | None:
+        r = self._row("SELECT driver_nonce, driver_hb FROM jobs "
+                      "WHERE job_id=?", (job_id,))
+        if not r or not r["driver_nonce"]:
+            return None
+        return {"nonce": r["driver_nonce"], "hb": r["driver_hb"]}
 
     def _rows(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         with self._lock:
