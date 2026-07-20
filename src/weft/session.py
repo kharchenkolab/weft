@@ -98,6 +98,8 @@ class SessionManager:
             "session_id": session_id, "site": adapter.name,
             "base_env_id": base_env_id,
             "materialized": False,
+            "runtime": self.runtime(self.store.get_session(session_id),
+                                    adapter),
             "note": "running from the base realization; a writable "
                     "prefix is cloned at the first session_install",
             "warning": "unhashed scratch environment — snapshot before "
@@ -148,6 +150,63 @@ class SessionManager:
         self.store.emit("session.materialized", session=s["session_id"],
                         base=s["base_env_id"])
         return True
+
+    def runtime(self, s: dict | str, adapter: SiteAdapter) -> dict:
+        """What does this session RUN FROM right now — the authoritative
+        contract for callers that exec interpreters themselves (aba's
+        launcher lanes), so nobody rederives substrate internals.
+
+        `activation` is ALWAYS correct: source it, then exec (inside
+        `unshare -rm` when ns_wrap — squashfs mounts live only in the
+        activation's namespace). `prefix` is informational; for squashfs
+        bases it is MOUNT-SCOPED and does not exist outside activation.
+        `direct_exec` says when prefix/bin/* may be exec'd without
+        activation (plain on-disk prefixes only). `env_id` is the
+        identity of what's active: the base env pre-clone, and NULL once
+        mutated — unhashed scratch has no identity until snapshot."""
+        if isinstance(s, str):
+            # observation, NOT activity: bypass _get's touch_session —
+            # a monitoring loop polling runtime must not keep an idle
+            # session looking active to session_idle_days
+            row = self.store.get_session(s)
+            if not row or row["state"] != "active":
+                raise WeftError("task.invalid", f"no active session {s}",
+                                stage="infra")
+            s = row
+        if s.get("materialized", True):
+            manifest = adapter.path(f"{s['location']}/pixi.toml")
+            return {
+                "source": "session",
+                "env_id": None,
+                "prefix": adapter.path(
+                    f"{s['location']}/.pixi/envs/default"),
+                "activation": (
+                    f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
+                    f"--manifest-path {shlex.quote(manifest)})\""),
+                "ns_wrap": False,
+                "direct_exec": True,
+            }
+        act, ns = self._base_activation(s, adapter)
+        real = self.store.get_realization(s["base_env_id"],
+                                          adapter.name) or {}
+        loc = real.get("location") or env_dir_rel(s["base_env_id"])
+        strategy = real.get("strategy") or "prefix"
+        if "squashfs" in strategy:
+            prefix = adapter.path(f"{loc}/mnt/.pixi/envs/default")
+        elif strategy == "prefix":
+            prefix = adapter.path(f"{loc}/.pixi/envs/default")
+        else:
+            # packed/overlay/modules layouts vary — activation is the
+            # contract; never hand out a path we cannot vouch for
+            prefix = None
+        return {
+            "source": "base",
+            "env_id": s["base_env_id"],
+            "prefix": prefix,
+            "activation": act,
+            "ns_wrap": ns,
+            "direct_exec": strategy == "prefix" and not ns,
+        }
 
     def _base_activation(self, s: dict, adapter: SiteAdapter) -> tuple[str, bool]:
         """Activation line for the base realization (pre-clone lane) and
@@ -229,6 +288,7 @@ class SessionManager:
                             "session_id": session_id, "solved": False,
                             "method": out["method"],
                             "verified_at": "snapshot",
+                            "runtime": self.runtime(s, adapter),
                             "note": "installed without a solve — the "
                                     "snapshot's full re-solve is the "
                                     "conflict check; pass fast=False to "
@@ -262,7 +322,11 @@ class SessionManager:
         self.store.emit("session.installed", session=session_id,
                         conda=conda, pypi=pypi)
         out = {"installed": {"conda": conda, "pypi": pypi},
-               "session_id": session_id}
+               "session_id": session_id,
+               # the flip moment: a caller holding start-time runtime
+               # would exec the wrong thing from here on — hand it the
+               # fresh contract at exactly the call that changed it
+               "runtime": self.runtime(s, adapter)}
         if clone_note:
             out["materialized_note"] = clone_note
         if fallback_tail:
@@ -347,6 +411,7 @@ class SessionManager:
                           " — pass source=<path> if the command needs local "
                           "files, or the env will only rebuild on this "
                           "machine")}
+        out["runtime"] = self.runtime(s, adapter)
         if first_clone:
             out["materialized_note"] = (
                 "writable prefix cloned on this first installer; running "

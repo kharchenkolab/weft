@@ -1108,6 +1108,19 @@ class Weft:
             raise WeftError("task.invalid", f"unknown session {session_id}", stage="infra")
         return self._adapter(s["site"])
 
+    def session_runtime(self, session_id: str) -> dict:
+        """What the session RUNS FROM right now: {source: session|base,
+        env_id (null once mutated — scratch has no identity), prefix
+        (informational; mount-scoped for squashfs bases), activation
+        (the authoritative way in), ns_wrap, direct_exec}. For callers
+        that exec interpreters directly instead of session_exec —
+        consume this, never rederive prefix layout from materialized."""
+        try:
+            return self.sessions.runtime(session_id,
+                                         self._session_adapter(session_id))
+        except WeftError as e:
+            return e.to_dict()
+
     def session_exec(self, session_id: str, cmd: str) -> dict:
         return self.sessions.exec(session_id, self._session_adapter(session_id), cmd)
 
@@ -1165,7 +1178,7 @@ class Weft:
         for s in self.store.list_sessions(site):
             if state and s["state"] != state:
                 continue
-            out.append({
+            row = {
                 "session_id": s["session_id"], "site": s["site"],
                 "base_env_id": s.get("base_env_id"),
                 "state": s["state"],
@@ -1176,7 +1189,13 @@ class Weft:
                 "idle_s": round(now - (s.get("last_used")
                                        or s["created_at"])),
                 "has_kernel": s["session_id"] in running,
-            })
+                "materialized": s.get("materialized", True),
+            }
+            if s["state"] == "active":
+                # pure-local computation (store rows + path strings)
+                row["runtime"] = self.sessions.runtime(
+                    s, self._adapter(s["site"]))
+            out.append(row)
         return sorted(out, key=lambda r: r["idle_s"])
 
     # -- kernels (persistent interactive interpreters) --------------------------
@@ -1981,7 +2000,8 @@ PUBLIC_TOOLS = [
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",
     "env_evict", "site_footprint",
     "session_start", "session_exec", "session_install", "session_snapshot",
-    "session_run_installer", "session_stop", "list_sessions",
+    "session_run_installer", "session_stop", "session_runtime",
+    "list_sessions",
     "kernel_start", "kernel_exec", "kernel_poll", "kernel_peek",
     "kernel_status",
     "kernel_transcript", "kernel_interrupt", "kernel_restart", "kernel_stop",

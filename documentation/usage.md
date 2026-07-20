@@ -336,6 +336,17 @@ the install result says so. If you never intend to install,
 `kernel_start(site, env_id=...)` attaches to the realization directly
 and needs no session at all.
 
+Callers that exec interpreters themselves consume the **runtime
+contract** instead of rederiving prefix layouts: `session_runtime(id)`
+(also on `session_start`/`session_install` results — the install echo
+is the flip moment — and on `list_sessions` rows) returns `{source:
+session|base, env_id (null once mutated — scratch has no identity),
+prefix, activation, ns_wrap, direct_exec}`. `activation` is always
+correct; `direct_exec` says when `prefix/bin/*` may be exec'd without
+it — a squashfs base's prefix is mount-scoped and only exists under
+activation (`ns_wrap` ⇒ inside `unshare -rm`). Runtime queries are
+observation, not activity: they don't touch `last_used`.
+
 ### Monitoring, arrays, load
 
 ```python

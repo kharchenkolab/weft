@@ -114,6 +114,13 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   attached pre-install need `kernel_restart` (the install result says
   so). If you never plan to install, skip the session: `kernel_start(
   site, env_id=...)` attaches straight to the realization.
+  - Exec-ing interpreters yourself? Consume `session_runtime(id)`
+    (echoed on start/install results and `list_sessions` rows):
+    `{source, env_id (null once mutated), prefix, activation, ns_wrap,
+    direct_exec}`. Source `activation` then exec — always correct;
+    only `direct_exec: true` prefixes may skip it (squashfs prefixes
+    are mount-scoped and vanish outside activation). Never rederive
+    the layout from `materialized`.
   - pypi-only `session_install` is FAST by default: direct uv/pip into
     the prefix, no manifest re-solve (which dominates a one-leaf add on
     big bases). The dep is still recorded — the snapshot's full solve

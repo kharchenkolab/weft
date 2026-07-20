@@ -237,3 +237,71 @@ def test_gc_sweep_reaps_orphan_trash(tmp_path, pixi_bin):
     assert not orphan.exists()
     kinds = [e["kind"] for e in w.events_poll(0, 500)["events"]]
     assert "gc.trash_reaped" in kinds
+
+
+# ── the runtime contract (aba ask: no rederiving substrate internals) ──────
+
+def test_runtime_base_prefix_strategy(tmp_path, pixi_bin):
+    w, r = _lazy_session(tmp_path, pixi_bin)
+    rt = r["runtime"]                       # present on start
+    assert rt == w.session_runtime(r["session_id"])   # and via the verb
+    assert rt["source"] == "base" and rt["env_id"] == ENV
+    loc = str(tmp_path / "site" / env_dir_rel(ENV))
+    assert rt["prefix"] == f"{loc}/.pixi/envs/default"
+    assert rt["activation"].startswith(f". {loc}/activate.sh")
+    assert rt["ns_wrap"] is False and rt["direct_exec"] is True
+
+
+def test_runtime_squashfs_base_is_not_direct_exec(tmp_path, pixi_bin):
+    """The foot-gun the contract exists to prevent: a squashfs base's
+    prefix is MOUNT-SCOPED — callers must go through activation."""
+    w = _weft(tmp_path, pixi_bin)
+    _fake_env(w)
+    ro = tmp_path / "ro-tree"
+    loc = _lay_realization(ro, f"envs/{ENV.rsplit(':', 1)[-1]}", "SQ",
+                           marker={"strategy": "squashfs"})
+    w.store.set_realization(ENV, "local", "squashfs", str(loc), "ready",
+                            read_only=True)
+    r = w.session_start(ENV, "local")
+    rt = r["runtime"]
+    assert rt["source"] == "base" and rt["env_id"] == ENV
+    assert rt["prefix"] == f"{loc}/mnt/.pixi/envs/default"
+    assert rt["direct_exec"] is False       # regardless of ns_wrap
+    assert rt["activation"].startswith(f". {loc}/activate.sh")
+
+
+def test_runtime_flips_to_session_on_materialize(tmp_path, pixi_bin):
+    w, r = _lazy_session(tmp_path, pixi_bin)
+    sid = r["session_id"]
+    # simulate the first install's clone (the real one needs a solver)
+    w.store.set_session_materialized(sid)
+    rt = w.session_runtime(sid)
+    sdir = str(tmp_path / "site" / "sessions" / sid)
+    assert rt["source"] == "session"
+    assert rt["env_id"] is None             # mutated scratch: no identity
+    assert rt["prefix"] == f"{sdir}/.pixi/envs/default"
+    assert "shell-hook" in rt["activation"]
+    assert rt["direct_exec"] is True and rt["ns_wrap"] is False
+
+
+def test_runtime_query_is_not_activity(tmp_path, pixi_bin):
+    """Observation must not feed session_idle_days: polling runtime
+    leaves last_used untouched."""
+    w, r = _lazy_session(tmp_path, pixi_bin)
+    sid = r["session_id"]
+    before = w.store.get_session(sid)["last_used"]
+    time.sleep(0.05)
+    w.session_runtime(sid)
+    assert w.store.get_session(sid)["last_used"] == before
+    rows = w.list_sessions("local")
+    assert rows and rows[0]["runtime"]["source"] == "base"
+    assert w.store.get_session(sid)["last_used"] == before
+
+
+def test_runtime_unknown_or_stopped_refused(tmp_path, pixi_bin):
+    w, r = _lazy_session(tmp_path, pixi_bin)
+    out = w.session_runtime("ses_nonexistent")
+    assert out["error"] == "task.invalid"
+    w.session_stop(r["session_id"])
+    out = w.session_runtime(r["session_id"])
+    assert out["error"] == "task.invalid"
