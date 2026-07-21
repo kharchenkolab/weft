@@ -124,9 +124,16 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     snapshot still mints the citable extends env.
   - **R adds**: `session_install(cran=[...])` → a session **rlib**
     composed via `R_LIBS`, delta-only on ANY base (R skips
-    base-satisfied deps natively; no clone, mode never flips). Running
-    R kernels see it on the next `library()` call. Snapshot carries
+    base-satisfied deps natively; no clone, mode never flips). Takes
+    the SPEC's vocabulary: names, `"name ==X.Y.Z"`, `"owner/repo@ref"`
+    github refs (SHA-pinned at snapshot), plus `cran_repos=[url]` for
+    extra repositories (emitted as `r_repositories`). Running R
+    kernels see it on the next `library()` call. Snapshot carries
     `deps.cran` → the minted env overlay-realizes on the frozen base.
+    Installers beyond the vocabulary: `session_run_installer(cmd,
+    writes_to="rlib"|"pylib")` runs over the read-only base with the
+    layer provisioned — recorded as post_install (realizes FULL, not
+    overlay; prefer session_install when it fits).
     Cost map on a frozen base: pypi=delta (pylib), cran=delta (rlib),
     conda=refusal with the map in `hints.delta_lanes`.
   - Out-of-band helper process? `exec_template` from

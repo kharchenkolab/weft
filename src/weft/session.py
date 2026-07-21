@@ -291,7 +291,8 @@ class SessionManager:
             adapter.write_file(rel, (current + line + "\n").encode())
 
     def _materialize_rlib(self, s: dict, adapter: SiteAdapter,
-                          cran: list[str]) -> dict:
+                          cran: list[str],
+                          extra_repos: list[str] | None = None) -> dict:
         """The R layer: install into a session-owned rlib composed via
         R_LIBS — R's installer checks every .libPaths() entry and skips
         base-satisfied dependencies natively, so this is delta-only on
@@ -305,12 +306,21 @@ class SessionManager:
         from .realize import _ns_wrap_cmd
         wrap = _ns_wrap_cmd if ns else (lambda x: x)
         site_row = self.store.get_site(adapter.name) or {}
-        repos = (site_row.get("config") or {}).get(
+        default_repo = (site_row.get("config") or {}).get(
             "cran_repos", "https://cloud.r-project.org")
-        # names only: install.packages cannot pin; pins/refs land at the
-        # snapshot's proper solve
-        names = [c.split("==")[0].split()[0] for c in cran]
-        vec = ", ".join(f'"{n}"' for n in names)
+        repo_urls = list(dict.fromkeys(
+            list(extra_repos or []) + [default_repo]))
+        repos_vec = ", ".join(f'"{u}"' for u in repo_urls)
+        # ONE vocabulary — the same strings deps.cran takes: plain names,
+        # "name ==X.Y.Z" (pin asserted at the snapshot's solve), and
+        # "owner/repo@ref" github sources (the solver SHA-pins those)
+        plain, refs = [], []
+        for c in cran:
+            if "/" in c:
+                refs.append(c)
+            else:
+                plain.append(c.split("==")[0].split()[0])
+        vec = ", ".join(f'"{n}"' for n in plain)
         # CRAN routinely compiles: bring weft's toolchain like the
         # overlay build does (best-effort — pure-R needs none)
         prelude = ""
@@ -321,11 +331,29 @@ class SessionManager:
                 prelude = build_env_prelude(adapter, tc, sdir)
         except WeftError:
             pass
-        rcmd = (f"install.packages(c({vec}), lib=\"{rlib}\", "
-                f"repos=\"{repos}\")")
+        parts = [f"repos <- c({repos_vec})"]
+        if plain:
+            parts.append(
+                f"install.packages(c({vec}), lib=\"{rlib}\", repos=repos)")
+        if refs:
+            # remotes bootstraps itself into the session layer once;
+            # install_github RAISES on failure (unlike install.packages,
+            # which only warns), so refs get honest rc propagation free
+            parts.append(
+                'if (!requireNamespace("remotes", quietly=TRUE)) '
+                f'install.packages("remotes", lib="{rlib}", repos=repos)')
+            for ref in refs:
+                parts.append(
+                    f'remotes::install_github("{ref}", lib="{rlib}", '
+                    f'upgrade="never", repos=repos)')
+        rcmd = "; ".join(parts)
         script = (prelude + act + " && "
                   f"mkdir -p {shlex.quote(rlib)} && "
                   f"export R_LIBS={shlex.quote(rlib)}\"${{R_LIBS:+:$R_LIBS}}\" && "
+                  # standalone: remotes uses ONLY base R — no callr/
+                  # processx helper stack, which a lean base env lacks
+                  # (cbe field find: install_github died wanting callr)
+                  "export R_REMOTES_STANDALONE=true && "
                   f"Rscript -e {shlex.quote(rcmd)} 2>&1")
         try:
             r = adapter.run_activated(wrap(script), timeout=3600)
@@ -334,28 +362,33 @@ class SessionManager:
                 "env.realize_failed",
                 "fetching/compiling the R delta stalled or timed out",
                 stage="realize", retryable=True,
-                hints={"requested": names, "detail": e.detail}) from e
+                hints={"requested": cran, "detail": e.detail}) from e
         # install.packages WARNS but exits 0 on failure — verify by
         # presence, or a broken add would report success (R's trap)
-        vcmd = (f'missing <- setdiff(c({vec}), '
-                f'basename(list.dirs("{rlib}", recursive=FALSE))); '
-                f'if (length(missing)) {{ '
-                f'cat("MISSING:", missing, "\\n"); quit(status=1) }}')
-        v = adapter.run_activated(wrap(
-            f"{act} && Rscript -e {shlex.quote(vcmd)}"), timeout=120)
-        if r.rc != 0 or v.rc != 0:
+        v_rc = 0
+        if plain:
+            vcmd = (f'missing <- setdiff(c({vec}), '
+                    f'basename(list.dirs("{rlib}", recursive=FALSE))); '
+                    f'if (length(missing)) {{ '
+                    f'cat("MISSING:", missing, "\\n"); quit(status=1) }}')
+            v = adapter.run_activated(wrap(
+                f"{act} && Rscript -e {shlex.quote(vcmd)}"), timeout=120)
+            v_rc = v.rc
+        if r.rc != 0 or v_rc != 0:
             raise WeftError(
                 "env.solve_conflict",
                 "installing the R delta into the session layer failed",
                 stage="realize",
-                hints={"requested": names,
-                       "log_tail": (r.err or r.out)[-1500:]})
+                hints={"requested": cran, "rc": r.rc,
+                       "out_tail": r.out[-1200:], "err_tail": r.err[-800:],
+                       "script_tail": rcmd[-400:]})
         self._ensure_overlay_line(
             s, adapter,
             f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"')
+        installed = plain + refs
         self.store.emit("session.installed", session=s["session_id"],
-                        cran=names, mode="rlib")
-        return {"rlib": rlib, "installed": names}
+                        cran=installed, mode="rlib")
+        return {"rlib": rlib, "installed": installed}
 
     def _base_cold(self, s: dict, adapter: SiteAdapter) -> bool:
         """Is the base's package cache COLD on this site? An adopted
@@ -383,7 +416,13 @@ class SessionManager:
                 "pypi": "session_install(pypi=[...]) layers delta-only "
                         "over this base (pylib)",
                 "cran": "session_install(cran=[...]) layers delta-only "
-                        "over this base (rlib)",
+                        "over this base (rlib) — plain names, "
+                        "'name ==X.Y.Z', AND 'owner/repo@ref' github "
+                        "sources; cran_repos=[url] adds repositories",
+                "installer": "session_run_installer(cmd, "
+                             "writes_to='rlib'|'pylib') declares the "
+                             "write target as the session layer and runs "
+                             "over the read-only base",
                 "conda": "cannot layer (embedded prefixes) — use a lever "
                          "below",
                 "julia": "not yet wired for sessions; extends_env works",
@@ -579,7 +618,8 @@ class SessionManager:
                 conda: list[str] | None = None,
                 pypi: list[str] | None = None, fast: bool = True,
                 full_clone: bool = False,
-                cran: list[str] | None = None) -> dict:
+                cran: list[str] | None = None,
+                cran_repos: list[str] | None = None) -> dict:
         """Add packages to the session. pypi-only requests take a FAST
         PATH by default: a direct pip/uv install into the session prefix
         — no re-solve of the whole manifest (which dominates a one-leaf
@@ -599,8 +639,10 @@ class SessionManager:
         # never flips the session's mode, and works the same everywhere
         rlib_out = None
         if cran:
-            rlib_out = self._materialize_rlib(s, adapter, cran)
-            self.store.session_add_deps(session_id, [], [], cran)
+            rlib_out = self._materialize_rlib(s, adapter, cran,
+                                              extra_repos=cran_repos)
+            self.store.session_add_deps(session_id, [], [], cran,
+                                        cran_repos=cran_repos)
             # keep the in-memory row honest: runtime() below reads it
             s["added_cran"] = s.get("added_cran", []) + cran
             if not conda and not pypi:
@@ -754,7 +796,8 @@ class SessionManager:
 
     def run_installer(self, session_id: str, adapter: SiteAdapter, cmd: str,
                       note: str = "", source: str | None = None,
-                      full_clone: bool = False) -> dict:
+                      full_clone: bool = False,
+                      writes_to: str | None = None) -> dict:
         """The bespoke install that no index can express — an R
         install.packages, a pip install -e, a vendored make install. A
         normal, supported move: it runs in the session AND is captured, so
@@ -765,14 +808,22 @@ class SessionManager:
         rebuilds ANYWHERE. Without it, a step that reads local paths mints
         an env only this machine can build — the grade will say so."""
         s = self._get(session_id)
-        # an installer mutates the prefix arbitrarily — it NEEDS a real
-        # writable clone; on a cold base that means re-downloading the
-        # base, so refuse with the levers unless explicitly overridden
+        # an UNDECLARED installer mutates the prefix arbitrarily — it
+        # needs a real writable clone; on a cold base that means
+        # re-downloading the base. writes_to DECLARES the write target
+        # as the session's own layer: the base is filesystem-read-only
+        # anyway (EROFS), weft provisions the layer and points the
+        # ecosystem's env at it, and the command runs over the mount.
+        layer_run = False
         if not full_clone and self._base_cold(s, adapter) \
                 and s.get("materialize_mode", "clone") != "clone":
-            raise self._cold_refusal(s, "a bespoke installer")
-        # an installer mutates the prefix: first mutation clones it
-        first_clone = self._materialize(s, adapter)
+            if writes_to not in ("rlib", "pylib"):
+                raise self._cold_refusal(s, "an undeclared installer")
+            layer_run = True
+        first_clone = False
+        if not layer_run:
+            # an installer mutates the prefix: first mutation clones it
+            first_clone = self._materialize(s, adapter)
         captured = None
         if source:
             from pathlib import Path as _P
@@ -782,12 +833,40 @@ class SessionManager:
             # stage it into the session too, so the same command line works
             # here and at realization (relative paths resolve identically)
             self._stage(adapter, s["location"], captured)
-        manifest = adapter.path(f"{s['location']}/pixi.toml")
-        r = adapter.run_activated(
-            f"cd {shlex.quote(adapter.path(s['location']))} && "
-            f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
-            f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )",
-            timeout=3600)
+        if layer_run:
+            act, ns = self._stack_activation(s, adapter)
+            sdir = adapter.path(s["location"])
+            layer = f"{sdir}/{writes_to}"
+            if writes_to == "rlib":
+                self._ensure_overlay_line(
+                    s, adapter,
+                    f'export R_LIBS="{layer}' + '${R_LIBS:+:$R_LIBS}"')
+                point = f'export R_LIBS={shlex.quote(layer)}"${{R_LIBS:+:$R_LIBS}}"'
+            else:
+                self._ensure_overlay_line(
+                    s, adapter,
+                    f'export PYTHONPATH="{layer}'
+                    + '${PYTHONPATH:+:$PYTHONPATH}"')
+                point = (f'export PIP_TARGET={shlex.quote(layer)} && '
+                         f'export PYTHONPATH={shlex.quote(layer)}'
+                         '"${PYTHONPATH:+:$PYTHONPATH}"')
+            overlay = f"{sdir}/overlay.sh"
+            script = (f"cd {shlex.quote(sdir)} && {act} && "
+                      f"{{ [ -f {shlex.quote(overlay)} ] && "
+                      f". {shlex.quote(overlay)}; true; }} && "
+                      f"mkdir -p {shlex.quote(layer)} && {point} && "
+                      f"( {cmd} )")
+            if ns:
+                from .realize import _ns_wrap_cmd
+                script = _ns_wrap_cmd(script)
+            r = adapter.run_activated(script, timeout=3600)
+        else:
+            manifest = adapter.path(f"{s['location']}/pixi.toml")
+            r = adapter.run_activated(
+                f"cd {shlex.quote(adapter.path(s['location']))} && "
+                f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
+                f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )",
+                timeout=3600)
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed",
@@ -809,6 +888,15 @@ class SessionManager:
                           "files, or the env will only rebuild on this "
                           "machine")}
         out["runtime"] = self.runtime(s, adapter)
+        if layer_run:
+            out["writes_to"] = writes_to
+            out["note"] += (
+                "; DECLARED-TARGET run on the read-only base: the command "
+                "wrote into the session layer only. Snapshot honesty: a "
+                "spec carrying post_install steps realizes FULL (extras "
+                "deltas cannot overlay) — prefer session_install(cran=/"
+                "pypi=) when the addition fits, to keep the snapshot "
+                "O(delta) on this base")
         if first_clone:
             out["materialized_note"] = (
                 "writable prefix cloned on this first installer; running "
@@ -852,9 +940,12 @@ class SessionManager:
         }
         if s.get("added_cran"):
             # the spec's native cran layer: the solve pins versions the
-            # scratch install left floating; classify_delta layers cran,
-            # so this realizes as a delta overlay on the frozen base
+            # scratch install left floating (github refs get SHA-pinned);
+            # classify_delta layers cran, so this realizes as a delta
+            # overlay on the frozen base
             spec["deps"]["cran"] = s["added_cran"]
+        if s.get("added_cran_repos"):
+            spec["r_repositories"] = s["added_cran_repos"]
         if installers:
             spec["post_install"] = [i["cmd"] for i in installers]
             spec["step_notes"] = {str(i): inst["note"]

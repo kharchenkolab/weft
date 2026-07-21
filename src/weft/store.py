@@ -60,6 +60,10 @@ _SESSION_MIGRATIONS = [
     # cran layer (R-parity round): R adds compose via R_LIBS, recorded
     # like conda/pypi so the snapshot carries them
     ("added_cran", "ALTER TABLE sessions ADD COLUMN added_cran TEXT"),
+    # extra CRAN-like repositories the session's installs named — the
+    # snapshot emits them as the spec's r_repositories
+    ("added_cran_repos",
+     "ALTER TABLE sessions ADD COLUMN added_cran_repos TEXT"),
 ]
 
 
@@ -865,6 +869,9 @@ class Store:
             "added_cran": (json.loads(r["added_cran"])
                            if "added_cran" in keys and r["added_cran"]
                            else []),
+            "added_cran_repos": (json.loads(r["added_cran_repos"])
+                                 if "added_cran_repos" in keys
+                                 and r["added_cran_repos"] else []),
             "installers": json.loads(r["installers"]) if "installers" in keys
             and r["installers"] else [],
             "state": r["state"],
@@ -906,13 +913,17 @@ class Store:
 
     def session_add_deps(self, session_id: str, conda: list[str],
                          pypi: list[str],
-                         cran: list[str] | None = None) -> None:
+                         cran: list[str] | None = None,
+                         cran_repos: list[str] | None = None) -> None:
         s = self.get_session(session_id)
+        merged_repos = list(dict.fromkeys(
+            s["added_cran_repos"] + list(cran_repos or [])))
         self._write(
-            "UPDATE sessions SET added_conda=?, added_pypi=?, added_cran=?"
-            " WHERE session_id=?",
+            "UPDATE sessions SET added_conda=?, added_pypi=?, added_cran=?,"
+            " added_cran_repos=? WHERE session_id=?",
             (_j(s["added_conda"] + conda), _j(s["added_pypi"] + pypi),
-             _j(s["added_cran"] + list(cran or [])), session_id),
+             _j(s["added_cran"] + list(cran or [])), _j(merged_repos),
+             session_id),
         )
 
     def set_session_state(self, session_id: str, state: str) -> None:

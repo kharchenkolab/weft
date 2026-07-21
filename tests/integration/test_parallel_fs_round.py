@@ -655,7 +655,7 @@ def test_cran_rlib_end_to_end_on_adopted_base(tmp_path, pixi_bin):
         out = w.session_install(sid, cran=["praise"])
         assert out["mode"] == "rlib", out
         sdir = tmp_path / "site" / "sessions" / sid
-        assert (sdir / "rlib" / "praise").is_dir()
+        assert (sdir / "rlib" / "crayon").is_dir()
         assert not (sdir / ".pixi").exists()     # no clone
 
         # live-install contract for R: next block, no restart
@@ -754,3 +754,132 @@ def test_tombstones_write_exec_and_strip(tmp_path):
     _strip_mount_tombstones(ad, "envs/e1")
     assert not (tmp_path / "envs/e1/mnt/.pixi").exists()
     assert (tmp_path / "envs/e1/mnt").exists()   # the mountpoint stays
+
+
+# ── non-CRAN R: one vocabulary (github refs, extra repos), writes_to ───────
+
+def test_cran_github_ref_routes_via_remotes(tmp_path, pixi_bin,
+                                            monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    _no_toolchain(monkeypatch)
+    ad = w.adapters["local"]
+    calls = []
+    monkeypatch.setattr(ad, "run_activated",
+                        lambda script, timeout=120.0:
+                        (calls.append(script), ShimResult(0, "", ""))[1])
+    out = w.session_install(sid, cran=["org/widgetlib@v2.1"])
+    assert len(calls) == 1                      # refs: no dir-verify pass
+    ins = calls[0]
+    assert 'remotes::install_github("org/widgetlib@v2.1"' in ins
+    assert f'lib="{tmp_path}/site/sessions/{sid}/rlib"' in ins
+    assert 'requireNamespace("remotes"' in ins  # self-bootstrap guard
+    assert "install.packages(c()" not in ins    # no empty plain install
+    assert out["installed"]["cran"] == ["org/widgetlib@v2.1"]
+    # the RECORD is the spec string — the snapshot's solve SHA-pins it
+    assert w.store.get_session(sid)["added_cran"] == ["org/widgetlib@v2.1"]
+
+
+def test_cran_mixed_refs_repos_and_snapshot(tmp_path, pixi_bin,
+                                            monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    _no_toolchain(monkeypatch)
+    ad = w.adapters["local"]
+    calls = []
+    monkeypatch.setattr(ad, "run_activated",
+                        lambda script, timeout=120.0:
+                        (calls.append(script), ShimResult(0, "", ""))[1])
+    w.session_install(sid, cran=["toolpkg", "org/widgetlib@v2"],
+                      cran_repos=["https://repo.example.org/cranlike"])
+    ins = calls[0]
+    assert '"https://repo.example.org/cranlike"' in ins   # extra repo FIRST
+    assert 'install.packages(c("toolpkg")' in ins
+    assert 'remotes::install_github("org/widgetlib@v2"' in ins
+    s = w.store.get_session(sid)
+    assert s["added_cran_repos"] == ["https://repo.example.org/cranlike"]
+
+    seen = {}
+    monkeypatch.setattr(w.sessions.envman, "ensure",
+                        lambda spec, **kw: (seen.update(spec=spec)
+                                            or {"env_id": "env:v1:" + "e" * 12}))
+    w.session_snapshot(sid, verify=False)
+    assert seen["spec"]["deps"]["cran"] == ["toolpkg", "org/widgetlib@v2"]
+    assert seen["spec"]["r_repositories"] == \
+        ["https://repo.example.org/cranlike"]
+
+
+def test_installer_undeclared_refused_declared_runs(tmp_path, pixi_bin,
+                                                    monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    out = w.session_run_installer(sid, "Rscript -e 'somepkg::install()'")
+    assert out["error"] == "session.cold_base"
+    assert "writes_to" in out["hints"]["delta_lanes"]["installer"]
+    out = w.session_run_installer(sid, "true", writes_to="attic")
+    assert out["error"] == "session.cold_base"   # only rlib|pylib declared
+
+    ad = w.adapters["local"]
+    calls = []
+    monkeypatch.setattr(ad, "run_activated",
+                        lambda script, timeout=120.0:
+                        (calls.append(script), ShimResult(0, "", ""))[1])
+    got = w.session_run_installer(
+        sid, "Rscript -e 'remotes::install_local(\"x\")'",
+        writes_to="rlib", note="vendored widget lib")
+    ins = calls[0]
+    sdir = f"{tmp_path}/site/sessions/{sid}"
+    assert f"mkdir -p {sdir}/rlib" in ins
+    assert "R_LIBS=" in ins and "activate.sh" in ins
+    assert got["writes_to"] == "rlib"
+    assert "post_install" in got["note"]        # the overlay-cost honesty
+    ov = (tmp_path / "site" / "sessions" / sid / "overlay.sh").read_text()
+    assert "R_LIBS" in ov
+    # recorded: the snapshot will replay it as a post_install step
+    assert w.store.get_session(sid)["installers"]
+
+
+def test_installer_writes_to_pylib_points_pip(tmp_path, pixi_bin,
+                                              monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    ad = w.adapters["local"]
+    calls = []
+    monkeypatch.setattr(ad, "run_activated",
+                        lambda script, timeout=120.0:
+                        (calls.append(script), ShimResult(0, "", ""))[1])
+    got = w.session_run_installer(sid, "pip install ./vendored",
+                                  writes_to="pylib")
+    ins = calls[0]
+    assert "PIP_TARGET=" in ins and "pylib" in ins
+    assert got["writes_to"] == "pylib"
+
+
+@pytest.mark.solver
+@pytest.mark.slow
+def test_cran_github_ref_end_to_end(tmp_path, pixi_bin):
+    """A REAL github R package onto an adopted base: remotes bootstraps
+    itself into the rlib, the ref installs delta-only, the running R
+    kernel sees it live, and the snapshot records the spec string."""
+    w = _weft(tmp_path, pixi_bin)
+    env = w.env_ensure({"name": "r-frozen-gh",
+                        "deps": {"conda": ["r-base =4.4"]}})
+    env_id = env["env_id"]
+    r0 = w.task_submit({"command": "true", "env": env_id, "site": "local"})
+    assert w.runner.wait(r0["job_id"], 900)["state"] == "DONE"
+    real = w.store.get_realization(env_id, "local")
+    w.store.set_realization(env_id, "local", real["strategy"],
+                            real["location"], "ready", read_only=True)
+
+    sid = w.session_start(env_id, "local")["session_id"]
+    out = w.session_install(sid, cran=["r-lib/crayon"])
+    assert out["mode"] == "rlib", out
+    sdir = tmp_path / "site" / "sessions" / sid
+    assert (sdir / "rlib" / "crayon").is_dir()
+    assert (sdir / "rlib" / "remotes").is_dir()   # self-bootstrapped
+    assert not (sdir / ".pixi").exists()          # still no clone
+
+    k = w.kernel_start("local", "r", session_id=sid)["kernel_id"]
+    try:
+        blk = w.kernel_exec(
+            k, 'library(crayon)\ncat(class(crayon::green("ok")))', timeout=120)
+        assert blk["rc"] == 0 and "character" in blk["out"], blk
+    finally:
+        w.kernel_stop(k)
+    assert w.store.get_session(sid)["added_cran"] == ["r-lib/crayon"]

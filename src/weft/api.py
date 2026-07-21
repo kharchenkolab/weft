@@ -1130,7 +1130,8 @@ class Weft:
     def session_install(self, session_id: str, conda: list[str] | None = None,
                         pypi: list[str] | None = None,
                         fast: bool = True, full_clone: bool = False,
-                        cran: list[str] | None = None) -> dict:
+                        cran: list[str] | None = None,
+                        cran_repos: list[str] | None = None) -> dict:
         """Add packages to the session. Captured, so a snapshot carries
         them into the spec. pypi-only adds skip the full manifest
         re-solve by default (direct uv/pip into the scratch prefix —
@@ -1139,7 +1140,12 @@ class Weft:
         (or any conda dep) solves at add time; a failed direct install
         falls through to the solve automatically.
 
-        cran adds ALWAYS compose via a session rlib layer (R checks
+        cran accepts the SPEC's vocabulary: plain names,
+        "name ==X.Y.Z", and "owner/repo@ref" github sources (SHA-pinned
+        at the snapshot's solve); cran_repos=[url] names extra
+        CRAN-like repositories (recorded; the snapshot emits them as
+        r_repositories). cran adds ALWAYS compose via a session rlib
+        layer (R checks
         every .libPaths() entry and skips base-satisfied deps natively) —
         delta-only on any base, frozen or built-here, never cloning.
         On a COLD base (adopted/unpacked pack — empty package cache),
@@ -1149,22 +1155,28 @@ class Weft:
         base from the index into a writable clone (needs egress)."""
         return self.sessions.install(
             session_id, self._session_adapter(session_id), conda, pypi,
-            fast=fast, full_clone=full_clone, cran=cran)
+            fast=fast, full_clone=full_clone, cran=cran,
+            cran_repos=cran_repos)
 
     def session_run_installer(self, session_id: str, cmd: str,
                               note: str = "", source: str | None = None,
-                              full_clone: bool = False) -> dict:
+                              full_clone: bool = False,
+                              writes_to: str | None = None) -> dict:
         """Run a bespoke install that no index expresses (R
         install.packages, pip install -e, a vendored make install). A normal
         move — it is captured and a snapshot carries it as a labeled
         post_install step (grade: escape-hatch). Pass `source=<local path>`
         if the command needs local files: weft content-addresses them so the
         step travels with the env and rebuilds ANYWHERE. `note` records why.
-        On a COLD base this needs a real writable clone: refuses with
-        levers unless full_clone=True."""
+        On a COLD base an UNDECLARED installer refuses with levers;
+        writes_to="rlib"|"pylib" declares the write target as the
+        session layer — weft provisions it, points R_LIBS/PIP_TARGET at
+        it, and runs the command over the read-only base. Snapshot
+        honesty: post_install specs realize FULL (no overlay) — prefer
+        session_install when the addition fits."""
         return self.sessions.run_installer(
             session_id, self._session_adapter(session_id), cmd, note, source,
-            full_clone=full_clone)
+            full_clone=full_clone, writes_to=writes_to)
 
     def session_snapshot(self, session_id: str, name: str | None = None,
                          notes: list[str] | None = None,

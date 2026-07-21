@@ -357,7 +357,16 @@ base + the existing layer), and mode mixing is refused, so mechanisms
 never switch or clash mid-session. On built-here bases nothing changes.
 
 **R is first-class**: `session_install(cran=[...])` composes a session
-`rlib` over the base via `R_LIBS` on ANY base, frozen or built-here —
+`rlib` over the base via `R_LIBS` on ANY base, frozen or built-here.
+It speaks the spec's whole vocabulary — plain names, `"name ==X.Y.Z"`,
+and `"owner/repo@ref"` github sources (routed via a self-bootstrapped
+`remotes`; the snapshot's solve SHA-pins the ref); `cran_repos=[url]`
+names extra CRAN-like repositories, recorded and emitted as the spec's
+`r_repositories`. For installers no vocabulary covers,
+`session_run_installer(cmd, writes_to="rlib"|"pylib")` declares the
+write target as the session layer and runs over the read-only base
+(recorded as a post_install step — which realizes FULL, not overlay:
+prefer `session_install` when the addition fits) —
 R's installer checks every `.libPaths()` entry and skips base-satisfied
 deps natively, so it is delta-only with no clone and no two-phase dance.
 Running R kernels see the package on their next `library()` call
