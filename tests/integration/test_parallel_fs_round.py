@@ -764,17 +764,26 @@ def test_cran_github_ref_routes_via_remotes(tmp_path, pixi_bin,
     _no_toolchain(monkeypatch)
     ad = w.adapters["local"]
     calls = []
-    monkeypatch.setattr(ad, "run_activated",
-                        lambda script, timeout=120.0:
-                        (calls.append(script), ShimResult(0, "", ""))[1])
+
+    def fake(script, timeout=120.0):
+        calls.append(script)
+        if "install_github" in script:
+            # the marker carries the DESCRIPTION name, not the repo tail
+            return ShimResult(0, "WEFT-INSTALLED widgetcore\n", "")
+        return ShimResult(0, "", "")
+
+    monkeypatch.setattr(ad, "run_activated", fake)
     out = w.session_install(sid, cran=["org/widgetlib@v2.1"])
-    assert len(calls) == 1                      # refs: no dir-verify pass
+    assert len(calls) == 2                      # install + presence verify
     ins = calls[0]
     assert 'remotes::install_github("org/widgetlib@v2.1"' in ins
     assert f'lib="{tmp_path}/site/sessions/{sid}/rlib"' in ins
     assert 'requireNamespace("remotes"' in ins  # self-bootstrap guard
     assert "install.packages(c()" not in ins    # no empty plain install
+    assert "WEFT-INSTALLED" in ins              # positive confirmation
+    assert '"widgetcore"' in calls[1]           # verified by RETURNED name
     assert out["installed"]["cran"] == ["org/widgetlib@v2.1"]
+    assert out["resolved"] == ["widgetcore"]
     # the RECORD is the spec string — the snapshot's solve SHA-pins it
     assert w.store.get_session(sid)["added_cran"] == ["org/widgetlib@v2.1"]
 
@@ -785,9 +794,14 @@ def test_cran_mixed_refs_repos_and_snapshot(tmp_path, pixi_bin,
     _no_toolchain(monkeypatch)
     ad = w.adapters["local"]
     calls = []
-    monkeypatch.setattr(ad, "run_activated",
-                        lambda script, timeout=120.0:
-                        (calls.append(script), ShimResult(0, "", ""))[1])
+
+    def fake(script, timeout=120.0):
+        calls.append(script)
+        if "install_github" in script:
+            return ShimResult(0, "WEFT-INSTALLED widgetlib\n", "")
+        return ShimResult(0, "", "")
+
+    monkeypatch.setattr(ad, "run_activated", fake)
     w.session_install(sid, cran=["toolpkg", "org/widgetlib@v2"],
                       cran_repos=["https://repo.example.org/cranlike"])
     ins = calls[0]
@@ -883,3 +897,44 @@ def test_cran_github_ref_end_to_end(tmp_path, pixi_bin):
     finally:
         w.kernel_stop(k)
     assert w.store.get_session(sid)["added_cran"] == ["r-lib/crayon"]
+
+
+
+# ── silent compile failures are LOUD now (field report) ────────────────────
+
+def test_github_ref_rc0_without_marker_fails(tmp_path, pixi_bin,
+                                             monkeypatch):
+    """install_github does NOT raise for compile-stage failures: rc 0,
+    package removed, no confirmation — must be an error, not a quiet
+    success that resurfaces as library() inside user code."""
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    _no_toolchain(monkeypatch)
+    ad = w.adapters["local"]
+    monkeypatch.setattr(
+        ad, "run_activated",
+        lambda script, timeout=120.0: ShimResult(
+            0, "ERROR: compilation failed for package 'widgetcore'\n"
+               "* removing rlib/widgetcore\n", ""))
+    out = w.session_install(sid, cran=["org/widgetlib@v2"])
+    assert out["error"] == "env.solve_conflict"
+    assert "without confirming" in out["detail"]
+    assert "compilation failed" in out["hints"]["out_tail"]
+    assert w.store.get_session(sid)["added_cran"] == []   # not recorded
+
+
+def test_github_ref_marker_but_package_absent_fails(tmp_path, pixi_bin,
+                                                    monkeypatch):
+    w, sid = _cold_session(tmp_path, pixi_bin)
+    _no_toolchain(monkeypatch)
+    ad = w.adapters["local"]
+
+    def fake(script, timeout=120.0):
+        if "install_github" in script:
+            return ShimResult(0, "WEFT-INSTALLED widgetcore\n", "")
+        if "MISSING" in script:
+            return ShimResult(1, "MISSING: widgetcore\n", "")
+        return ShimResult(0, "", "")
+
+    monkeypatch.setattr(ad, "run_activated", fake)
+    out = w.session_install(sid, cran=["org/widgetlib@v2"])
+    assert out["error"] == "env.solve_conflict"

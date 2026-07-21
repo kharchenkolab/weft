@@ -343,9 +343,17 @@ class SessionManager:
                 'if (!requireNamespace("remotes", quietly=TRUE)) '
                 f'install.packages("remotes", lib="{rlib}", repos=repos)')
             for ref in refs:
+                # capture the RETURNED package name (repo tail is not the
+                # package name; subdir specs even less so) — and because
+                # install_github does NOT raise for compile-stage R CMD
+                # INSTALL failures (field report: returns 0, package
+                # removed), the marker is the positive confirmation the
+                # verification below keys on
                 parts.append(
-                    f'remotes::install_github("{ref}", lib="{rlib}", '
-                    f'upgrade="never", repos=repos)')
+                    f'.nm <- remotes::install_github("{ref}", lib="{rlib}", '
+                    f'upgrade="never", repos=repos); '
+                    'cat("\nWEFT-INSTALLED ", '
+                    'paste(.nm, collapse=" "), "\n", sep="")')
         rcmd = "; ".join(parts)
         script = (prelude + act + " && "
                   f"mkdir -p {shlex.quote(rlib)} && "
@@ -365,9 +373,29 @@ class SessionManager:
                 hints={"requested": cran, "detail": e.detail}) from e
         # install.packages WARNS but exits 0 on failure — verify by
         # presence, or a broken add would report success (R's trap)
+        ref_installed: list[str] = []
+        if refs and r.rc == 0:
+            marker_lines = [ln for ln in r.out.splitlines()
+                            if ln.startswith("WEFT-INSTALLED ")]
+            for ln in marker_lines:
+                ref_installed += ln.split()[1:]
+            if len(marker_lines) < len(refs):
+                # returned 0 without confirming every ref: the silent
+                # compile-failure shape — fail LOUDLY with the build tail
+                raise WeftError(
+                    "env.solve_conflict",
+                    "a github R install returned without raising and "
+                    "without confirming the package — compile-stage "
+                    "failures do not raise; treating as failed",
+                    stage="realize",
+                    hints={"requested": cran, "confirmed": ref_installed,
+                           "out_tail": r.out[-1500:],
+                           "err_tail": r.err[-800:]})
+        verify_names = plain + ref_installed
         v_rc = 0
-        if plain:
-            vcmd = (f'missing <- setdiff(c({vec}), '
+        if verify_names and r.rc == 0:
+            vvec = ", ".join(f'"{n}"' for n in verify_names)
+            vcmd = (f'missing <- setdiff(c({vvec}), '
                     f'basename(list.dirs("{rlib}", recursive=FALSE))); '
                     f'if (length(missing)) {{ '
                     f'cat("MISSING:", missing, "\\n"); quit(status=1) }}')
@@ -388,7 +416,10 @@ class SessionManager:
         installed = plain + refs
         self.store.emit("session.installed", session=s["session_id"],
                         cran=installed, mode="rlib")
-        return {"rlib": rlib, "installed": installed}
+        out = {"rlib": rlib, "installed": installed}
+        if ref_installed:
+            out["resolved"] = ref_installed   # DESCRIPTION package names
+        return out
 
     def _base_cold(self, s: dict, adapter: SiteAdapter) -> bool:
         """Is the base's package cache COLD on this site? An adopted
@@ -650,6 +681,8 @@ class SessionManager:
                                       "cran": rlib_out["installed"]},
                         "session_id": session_id, "mode": "rlib",
                         "rlib": rlib_out["rlib"],
+                        **({"resolved": rlib_out["resolved"]}
+                           if rlib_out.get("resolved") else {}),
                         "runtime": self.runtime(s, adapter),
                         "note": "R delta composed over the base via "
                                 "R_LIBS — dependencies the base holds "
