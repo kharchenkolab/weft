@@ -119,8 +119,11 @@ The result envelope of `ensure_available` is a PINNED cross-repo
 contract: `documentation/ensure_envelope.schema.json` (versioned;
 currently 1). weft guards it with tests/conformance/test_envelope.py
 validating REAL envelopes; consumers (aba) mirror the guard in their
-conformance suite. Changes are deliberate, versioned events — additive
-values only within a version. Success: {satisfied, changed, attempts,
+conformance suite. Changes are deliberate,
+COORDINATED two-repo events: aba's drift guard byte-compares a
+vendored copy of the schema file against this checkout, so any edit —
+additive included — must land with their vendored copy updated in the
+same exchange. Success: {satisfied, changed, attempts,
 verified, runtime, session_id | env_id}. Failure: the standard error
 envelope with attempts/verified/runtime riding hints. Attempt lanes:
 conda|pypi|cran|installer|extends_env; outcomes: installed|
