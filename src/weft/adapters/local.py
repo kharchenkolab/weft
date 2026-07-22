@@ -146,8 +146,10 @@ class LocalAdapter(SiteAdapter):
     def submit(self, jobdir_rel: str, task: dict) -> str:
         r = self.shim(["run", "--dir", self.path(jobdir_rel)])
         if r.rc != 0:
+            # the user's command NEVER STARTED (same contract as ssh)
             raise WeftError(
-                "job.nonzero_exit", f"shim run failed: {r.err[:300]}", stage="submit"
+                "sched.rejected", f"shim run failed: {r.err[:300]}",
+                stage="submit"
             )
         return f"pid:{r.json().get('pid', 0)}"
 

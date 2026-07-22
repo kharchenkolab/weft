@@ -86,9 +86,11 @@ def test_death_is_diagnosed_and_replay_recovers(wk):
     assert died["killing_block"] == r["block"]  # THE diagnostic
     assert "kernel_restart" in died["suggestion"]
     assert wk.kernel_status(k)["state"] == "died"
-    # exec on a dead kernel: structured, with the workaround named
+    # exec on a dead kernel: structured, with the workaround named —
+    # caller-state, not a phantom node death (Round C recode)
     dead = wk.kernel_exec(k, "1+1")
-    assert dead["error"] == "sched.node_failure"
+    assert dead["error"] == "task.invalid"
+    assert dead["hints"]["state"] == "died"
 
     fresh = wk.kernel_restart(k, replay="successful")
     assert fresh["replayed_blocks"] == 2

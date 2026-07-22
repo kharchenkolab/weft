@@ -591,7 +591,11 @@ def test_cran_verification_catches_silent_r_failure(tmp_path, pixi_bin,
         ShimResult(1 if "MISSING" in script else 0,
                    "MISSING: praise", ""))
     out = w.session_install(sid, cran=["praise"])
-    assert out["error"] == "env.solve_conflict"
+    # a broken install after successful resolution is a REALIZE failure
+    # with the rcs discriminated (Round C)
+    assert out["error"] == "env.realize_failed"
+    assert out["hints"]["install_rc"] == 0
+    assert out["hints"]["verify_rc"] == 1
     assert w.store.get_session(sid)["added_cran"] == []   # not recorded
 
 
@@ -916,7 +920,7 @@ def test_github_ref_rc0_without_marker_fails(tmp_path, pixi_bin,
             0, "ERROR: compilation failed for package 'widgetcore'\n"
                "* removing rlib/widgetcore\n", ""))
     out = w.session_install(sid, cran=["org/widgetlib@v2"])
-    assert out["error"] == "env.solve_conflict"
+    assert out["error"] == "env.realize_failed"
     assert "without confirming" in out["detail"]
     assert "compilation failed" in out["hints"]["out_tail"]
     assert w.store.get_session(sid)["added_cran"] == []   # not recorded
@@ -937,4 +941,4 @@ def test_github_ref_marker_but_package_absent_fails(tmp_path, pixi_bin,
 
     monkeypatch.setattr(ad, "run_activated", fake)
     out = w.session_install(sid, cran=["org/widgetlib@v2"])
-    assert out["error"] == "env.solve_conflict"
+    assert out["error"] == "env.realize_failed"

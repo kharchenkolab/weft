@@ -66,11 +66,14 @@ def test_ssh_write_file_shared_root_group_bit(monkeypatch):
 
 
 def test_ssh_write_file_failure_is_honest(monkeypatch):
+    """A checksum mismatch is bytes corrupted IN TRANSIT — a transfer
+    failure worth retrying, not a site outage (Round C recode)."""
     ad = _adapter()
     _capture(monkeypatch, ad, rc=1, err="sha256sum: WARNING: 1 computed checksum did NOT match")
     with pytest.raises(WeftError) as ei:
         ad.write_file("f", b"x")
-    assert ei.value.code == "site.unreachable" and ei.value.retryable
+    assert ei.value.code == "data.transfer_failed" and ei.value.retryable
+    assert "transit" in ei.value.hints["suggestion"]
 
 
 # -- local: existence == completeness, always ------------------------------

@@ -53,8 +53,10 @@ def _read_catalog(adapter, tree: str) -> dict:
     except WeftError:
         return {"catalog_version": 1, "envs": {}}
     except ValueError:
+        # corrupt content at use — state.conflict said "wait and retry",
+        # which can never fix a damaged file (2026-07 sweep #21)
         raise WeftError(
-            "state.conflict",
+            "data.verify_failed",
             f"catalog at {_catalog_path(tree)} is not valid JSON",
             stage="infra",
             hints={"suggestion": "inspect/restore the catalog file; weft "

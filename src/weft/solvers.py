@@ -140,12 +140,16 @@ class CranSolver:
         return manifest
 
     def _rscript(self, code: str, timeout: float = 900):
+        import os
         import subprocess
         manifest = self._ensure_solver_env()
+        # C locale: solve-failure classification keys on R's message text
+        # ("unable to access index...") — translated messages would dodge it
+        env = {**os.environ, "LC_ALL": "C", "LANGUAGE": "C"}
         return subprocess.run(
             [self.pixi_bin, "run", "--manifest-path", str(manifest),
              "Rscript", "-e", code],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=timeout, env=env,
         )
 
     # -- ref parsing -----------------------------------------------------------
@@ -180,6 +184,7 @@ class CranSolver:
             req = urllib.request.Request(url, headers={"User-Agent": "weft"})
             return urllib.request.urlopen(req, timeout=30).read()
 
+        import urllib.error
         try:
             sha = _json.loads(
                 get(f"https://api.github.com/repos/{repo}/commits/{ref}")
@@ -187,15 +192,42 @@ class CranSolver:
             desc = get(
                 f"https://raw.githubusercontent.com/{repo}/{sha}/DESCRIPTION"
             ).decode()
+        except urllib.error.HTTPError as e:
+            if e.code in (404, 410, 422):
+                # the repo/ref genuinely is not there — a spec problem
+                raise WeftError(
+                    "env.solve_conflict",
+                    f"cannot resolve github ref {repo}@{ref}",
+                    stage="solve",
+                    hints={"ecosystem": "cran",
+                           "user_pins": [f"{repo}@{ref}"],
+                           "http_status": e.code,
+                           "solver_message": str(e)[-300:],
+                           "suggestion": "check repo/ref exist and are "
+                                         "public; an R package needs "
+                                         "DESCRIPTION at root"},
+                ) from e
+            # rate limits / 5xx: github's problem, not the spec's —
+            # calling this "unsatisfiable" told agents to change a
+            # correct pin (envman.py warns against exactly this)
+            raise WeftError(
+                "env.solve_failed",
+                f"github api error resolving {repo}@{ref}",
+                stage="solve", retryable=True,
+                hints={"ecosystem": "cran", "http_status": e.code,
+                       "solver_message": str(e)[-300:],
+                       "suggestion": "rate-limited or server-side "
+                                     "trouble; retry later"},
+            ) from e
         except Exception as e:
             raise WeftError(
-                "env.solve_conflict",
-                f"cannot resolve github ref {repo}@{ref}",
-                stage="solve",
-                hints={"ecosystem": "cran", "user_pins": [f"{repo}@{ref}"],
+                "env.solve_failed",
+                f"github unreachable resolving {repo}@{ref}",
+                stage="solve", retryable=True,
+                hints={"ecosystem": "cran",
                        "solver_message": str(e)[-300:],
-                       "suggestion": "check repo/ref exist and are public; "
-                                     "an R package needs DESCRIPTION at root"},
+                       "suggestion": "network/proxy from the controller; "
+                                     "retry when connectivity returns"},
             ) from e
         fields = {}
         key = None
@@ -223,8 +255,14 @@ class CranSolver:
         pinned provider expands to. Resolved JOINTLY — a package in a
         secondary repo may depend on base-mirror packages and vice versa."""
         import datetime
+        # default snapshot: UTC-today − 2, never the local calendar — a
+        # controller ahead of UTC (or ahead of the mirror's publishing
+        # lag) would ask for a snapshot that does not exist yet, failing
+        # every unpinned solve in a nightly dead window (2026-07 note #4)
         date = (getattr(spec, "system_requirements", {}) or {}).get(
-            "cran_snapshot") or datetime.date.today().isoformat()
+            "cran_snapshot") or (
+            datetime.datetime.now(datetime.timezone.utc).date()
+            - datetime.timedelta(days=2)).isoformat()
         snapshot = self.PPM.format(date=date)
         repos = [snapshot]
         for url in getattr(spec, "r_repositories", None) or []:
@@ -320,6 +358,25 @@ class CranSolver:
             r = self._rscript(code)
             if r.returncode != 0:
                 msg = (r.stderr or r.stdout)[-1200:]
+                if "unable to access index for repository" in \
+                        (r.stderr or "") + (r.stdout or ""):
+                    # an unreachable index empties available.packages()
+                    # SILENTLY — every wanted package then looks
+                    # "missing" and the old verdict blamed the spec
+                    # (2026-07 field note #3)
+                    raise WeftError(
+                        "env.solve_failed",
+                        "an R repository index is unreachable from the "
+                        "controller — the packages are not missing, the "
+                        "index is",
+                        stage="solve", retryable=True,
+                        hints={"ecosystem": "cran", "repos": repos,
+                               "solver_message": msg,
+                               "suggestion": "network/proxy to the "
+                                             "repository; retry, or point "
+                                             "r_repositories at a "
+                                             "reachable mirror"},
+                    )
                 raise WeftError(
                     "env.solve_conflict",
                     "cran layer is unsatisfiable against the repository set",

@@ -29,6 +29,13 @@ an unchanged failing task more than once.
 | `task.dep_failed` | an `after` dependency failed/vanished — this job never ran | fix + re-run the upstream job (`hints.dependency`), then resubmit this one |
 | `env.evict_blocked` | overlay children or live jobs/sessions/kernels use this env | hints name them: cascade=True for children, cancel/stop for live work |
 
+Session install failures discriminate: a dead package index is
+`env.solve_failed` (retryable — the packages are not missing, the index
+is), a package absent from the snapshot/repos is `env.solve_conflict`,
+and a broken compile is `env.realize_failed`; R-lane hints carry
+`install_rc` AND `verify_rc` separately (an rc of 0 in a failure means
+the OTHER stage failed) plus the verifier's `missing` line.
+
 Kernel deaths are events, not job errors: **`kernel.died`** carries the
 killing block and log tail; recover with
 `kernel_restart(k, replay="successful")` (returns a NEW kernel_id).

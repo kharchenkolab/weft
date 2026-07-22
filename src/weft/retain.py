@@ -263,8 +263,10 @@ class RetainManager:
         site = row["site"]
         adapter = self.adapters.get(site)
         if adapter is None:
-            raise WeftError("site.unreachable",
-                            f"site {site!r} not registered", stage="infra")
+            raise WeftError("task.invalid",
+                            f"site {site!r} not registered", stage="infra",
+                            hints={"suggestion": "register_site first — "
+                                                 "this is not an outage"})
         # the placement decision is made NOW — a pin on a no-durable
         # site must ask its question at retain time, not at settlement
         place = self._placement(target, site, jobdir_rel, dest, label,
@@ -373,7 +375,7 @@ class RetainManager:
                 else self.workspace).free
             if free - total < (headroom_gb or 20.0) * 1e9:
                 raise WeftError(
-                    "task.invalid",
+                    "quota.storage",
                     f"retaining {total/1e9:.2f} GB would leave "
                     f"{(free-total)/1e9:.2f} GB free (< {headroom_gb} GB "
                     "headroom)", stage="staging",
@@ -547,9 +549,11 @@ class RetainManager:
         kind, row, jobdir_rel = self._target_row(target)
         adapter = self.adapters.get(row["site"])
         if adapter is None:
-            raise WeftError("site.unreachable",
+            raise WeftError("task.invalid",
                             f"site {row['site']!r} not registered",
-                            stage="infra", retryable=True)
+                            stage="infra",
+                            hints={"suggestion": "register_site first — "
+                                                 "this is not an outage"})
         root = adapter.path(jobdir_rel)
         joined = os.path.normpath(os.path.join(root, rel))
         if not joined.startswith(root.rstrip("/") + "/"):
@@ -653,9 +657,11 @@ class RetainManager:
                             "only", stage="infra")
         adapter = self.adapters.get(row["site"])
         if adapter is None:
-            raise WeftError("site.unreachable",
+            raise WeftError("task.invalid",
                             f"site {row['site']!r} not registered",
-                            stage="infra", retryable=True)
+                            stage="infra",
+                            hints={"suggestion": "register_site first — "
+                                                 "this is not an outage"})
         # a discard must never destroy what a pin promised: capture first
         self.settle_pins(target)
         kept = self.store.get_retained(target)
@@ -750,17 +756,23 @@ class RetainManager:
                 if row["in_place"]:
                     adapter = self.adapters.get(row["site"])
                     if adapter is None:
-                        raise WeftError("site.unreachable",
+                        raise WeftError("task.invalid",
                                         f"site {row['site']!r} not "
                                         "registered", stage="infra",
-                                        retryable=True)
+                                        hints={"suggestion":
+                                               "register_site first — "
+                                               "this is not an outage"})
                     r = adapter.run_cmd(
                         f"rm -rf {shlex.quote(row['location'])}",
                         timeout=1800)
                     if r.rc != 0:
-                        raise WeftError("site.unreachable",
+                        raise WeftError("data.transfer_failed",
                                         f"delete failed: {r.err[:200]}",
-                                        stage="infra", retryable=True)
+                                        stage="infra",
+                                        hints={"suggestion":
+                                               "permissions or a busy "
+                                               "file at the retained "
+                                               "path; not an outage"})
                 else:
                     shutil.rmtree(row["location"], ignore_errors=True)
                 self.store.delete_retained(row["target"])

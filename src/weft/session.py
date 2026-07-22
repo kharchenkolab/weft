@@ -27,6 +27,39 @@ from .realize import env_dir_rel
 from .store import Store
 
 
+def _r_install_failure(text: str) -> tuple[str, bool, str]:
+    """Map an R install failure to WHICH of three different problems it
+    was — they pull three different agent levers (2026-07 field note).
+    The R invocations run under LC_ALL=C so these markers are stable."""
+    if "unable to access index for repository" in text:
+        return ("env.solve_failed", True,
+                "an R repository index is unreachable from this node — "
+                "network/proxy trouble, not a package problem")
+    if "is not available" in text:   # "package 'X' is not available ..."
+        return ("env.solve_conflict", False,
+                "requested package(s) not present in the configured "
+                "repositories/snapshot")
+    return ("env.realize_failed", False,
+            "installing the R delta into the session layer failed")
+
+
+def _pip_failure(text: str, default: str = "env.realize_failed",
+                 default_retryable: bool = False) -> tuple[str, bool]:
+    """Same discrimination for pip: a spec conflict, a dead index, and a
+    broken install are different failures with different levers — none
+    of them is 'unsatisfiable spec' by default."""
+    if any(m in text for m in ("ResolutionImpossible",
+                               "No matching distribution",
+                               "Could not find a version that satisfies")):
+        return "env.solve_conflict", False
+    if any(m in text for m in ("Could not fetch URL", "NewConnectionError",
+                               "ReadTimeoutError", "ProxyError",
+                               "Temporary failure in name resolution",
+                               "Connection broken", "timed out")):
+        return "env.solve_failed", True
+    return default, default_retryable
+
+
 class SessionManager:
     def __init__(self, store: Store, envman: EnvManager, runner=None,
                  dataman=None, adapters=None):
@@ -362,6 +395,10 @@ class SessionManager:
                   # processx helper stack, which a lean base env lacks
                   # (cbe field find: install_github died wanting callr)
                   "export R_REMOTES_STANDALONE=true && "
+                  # C locale: failure classification keys on R's message
+                  # text ("unable to access index...") — a translated
+                  # message would dodge the classifier
+                  "export LC_ALL=C LANGUAGE=C && "
                   f"Rscript -e {shlex.quote(rcmd)} 2>&1")
         try:
             r = adapter.run_activated(wrap(script), timeout=3600)
@@ -381,9 +418,11 @@ class SessionManager:
                 ref_installed += ln.split()[1:]
             if len(marker_lines) < len(refs):
                 # returned 0 without confirming every ref: the silent
-                # compile-failure shape — fail LOUDLY with the build tail
+                # compile-failure shape — fail LOUDLY with the build
+                # tail. This is a BUILD failure after successful
+                # resolution, not an unsatisfiable spec.
                 raise WeftError(
-                    "env.solve_conflict",
+                    "env.realize_failed",
                     "a github R install returned without raising and "
                     "without confirming the package — compile-stage "
                     "failures do not raise; treating as failed",
@@ -392,7 +431,7 @@ class SessionManager:
                            "out_tail": r.out[-1500:],
                            "err_tail": r.err[-800:]})
         verify_names = plain + ref_installed
-        v_rc = 0
+        v_rc, v_out = 0, ""
         if verify_names and r.rc == 0:
             vvec = ", ".join(f'"{n}"' for n in verify_names)
             vcmd = (f'missing <- setdiff(c({vvec}), '
@@ -401,15 +440,24 @@ class SessionManager:
                     f'cat("MISSING:", missing, "\\n"); quit(status=1) }}')
             v = adapter.run_activated(wrap(
                 f"{act} && Rscript -e {shlex.quote(vcmd)}"), timeout=120)
-            v_rc = v.rc
+            v_rc, v_out = v.rc, v.out
         if r.rc != 0 or v_rc != 0:
-            raise WeftError(
-                "env.solve_conflict",
-                "installing the R delta into the session layer failed",
-                stage="realize",
-                hints={"requested": cran, "rc": r.rc,
-                       "out_tail": r.out[-1200:], "err_tail": r.err[-800:],
-                       "script_tail": rcmd[-400:]})
+            # WHICH failure decides the code (dead index / not-in-repo /
+            # broken build are different levers), and every rc says
+            # WHOSE rc it is — a bare {"rc": 0} in a raised failure sent
+            # the field agent hunting a phantom (2026-07 note, #1/#2)
+            code, retryable, why = _r_install_failure(
+                r.out + r.err + v_out)
+            missing_line = next((ln for ln in v_out.splitlines()
+                                 if ln.startswith("MISSING:")), "")
+            hints = {"requested": cran, "install_rc": r.rc,
+                     "verify_rc": v_rc,
+                     "out_tail": r.out[-1200:], "err_tail": r.err[-800:],
+                     "script_tail": rcmd[-400:]}
+            if missing_line:
+                hints["missing"] = missing_line
+            raise WeftError(code, why, stage="realize",
+                            retryable=retryable, hints=hints)
         self._ensure_overlay_line(
             s, adapter,
             f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"')
@@ -524,20 +572,26 @@ class SessionManager:
                 f"python -m pip install --no-input --quiet "
                 f"--target {shlex.quote(pylib)} {specs}"), timeout=1800)
             if r.rc != 0:
+                tail = (r.err or r.out)[-1500:]
+                code, retryable = _pip_failure(tail)
                 raise WeftError(
-                    "env.solve_conflict", "pypi install into the session "
-                    "layer failed", stage="realize",
-                    hints={"log_tail": (r.err or r.out)[-1500:]})
+                    code, "pypi install into the session layer failed",
+                    stage="realize", retryable=retryable,
+                    hints={"log_tail": tail})
             note = ("this site's pip predates --dry-run/--report: the "
                     "full dependency closure was installed into the "
                     "session layer (base-satisfied deps duplicated)")
         elif ra.rc != 0:
+            # resolution ran and failed: a real conflict says so in the
+            # log; an unrecognized crash is solver INFRASTRUCTURE, not
+            # proof the spec is unsatisfiable
+            tail = (ra.err or ra.out)[-1500:]
+            code, retryable = _pip_failure(
+                tail, default="env.solve_failed", default_retryable=True)
             raise WeftError(
-                "env.solve_conflict",
-                "pypi delta resolution failed against the base",
-                stage="realize",
-                hints={"requested": pypi,
-                       "log_tail": (ra.err or ra.out)[-1500:]})
+                code, "pypi delta resolution failed against the base",
+                stage="realize", retryable=retryable,
+                hints={"requested": pypi, "log_tail": tail})
         else:
             data = _json.loads(adapter.read_file(report_rel).decode())
             missing = [f'{i["metadata"]["name"]}=={i["metadata"]["version"]}'
@@ -568,12 +622,15 @@ class SessionManager:
                         hints={"missing": missing,
                                "detail": e.detail}) from e
                 if rb.rc != 0:
+                    # phase B is --no-deps at exact pins: by construction
+                    # NO resolution happens here — "unsatisfiable spec"
+                    # was always the wrong verdict for this raise
+                    tail = (rb.err or rb.out)[-1500:]
+                    code, retryable = _pip_failure(tail)
                     raise WeftError(
-                        "env.solve_conflict",
-                        "installing the pypi delta failed",
-                        stage="realize",
-                        hints={"missing": missing,
-                               "log_tail": (rb.err or rb.out)[-1500:]})
+                        code, "installing the pypi delta failed",
+                        stage="realize", retryable=retryable,
+                        hints={"missing": missing, "log_tail": tail})
                 fetch_s = round(_t.monotonic() - t1, 2)
                 fetch_method = "uv" if "#fetch uv" in rb.out else "pip"
             else:
@@ -823,8 +880,8 @@ class SessionManager:
         if method is None:
             return None                    # no tool: not an error
         if r.rc != 0:
-            return {"error": "env.solve_conflict",
-                    "detail": (r.err or r.out)[-1500:]}
+            tail = (r.err or r.out)[-1500:]
+            return {"error": _pip_failure(tail)[0], "detail": tail}
         return {"method": method}
 
     def run_installer(self, session_id: str, adapter: SiteAdapter, cmd: str,

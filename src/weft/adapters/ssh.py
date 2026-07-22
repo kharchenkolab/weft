@@ -387,9 +387,22 @@ class SSHAdapter(SiteAdapter):
             input_bytes=data, timeout=120,
         )
         if r.rc != 0:
+            # transport failures raised inside _run (timeout, rc 255) —
+            # an rc here is the REMOTE side. Two shapes, two levers: a
+            # checksum mismatch is bytes corrupted in transit (retry);
+            # anything else is the site refusing the write (disk full,
+            # quota, permissions — backing off cannot help, and
+            # site.unreachable told agents to do exactly that)
+            corrupted = "did NOT match" in r.err or "checksum" in r.err
             raise WeftError(
-                "site.unreachable", f"write_file {rel} failed: {r.err[:300]}",
-                stage="infra", retryable=True,
+                "data.transfer_failed",
+                f"write_file {rel} failed on {self.name}",
+                stage="infra", retryable=corrupted,
+                hints={"stderr": r.err[-300:],
+                       "suggestion": "bytes corrupted in transit; retry"
+                       if corrupted else
+                       "disk full, quota, or permissions at the "
+                       "destination path"},
             )
 
     def read_file(self, rel: str, max_bytes: int | None = None) -> bytes:
@@ -426,8 +439,11 @@ class SSHAdapter(SiteAdapter):
     def submit(self, jobdir_rel: str, task: dict) -> str:
         r = self.shim(["run", "--dir", self.path(jobdir_rel)])
         if r.rc != 0:
+            # the user's command NEVER STARTED — job.nonzero_exit said
+            # "user command failed" and sent agents debugging their code
             raise WeftError(
-                "job.nonzero_exit", f"shim run failed: {(r.err or r.out)[:300]}",
+                "sched.rejected",
+                f"shim run failed: {(r.err or r.out)[:300]}",
                 stage="submit",
             )
         return f"pid:{r.json().get('pid', 0)}"

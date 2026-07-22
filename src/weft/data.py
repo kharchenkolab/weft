@@ -916,9 +916,13 @@ class DataManager:
                 timeout=600,
             )
             if r.rc != 0:
+                # a failed hardlink/copy into the site CAS is a TRANSFER
+                # problem — verify_failed ("corrupt content") sent agents
+                # re-running healthy jobs (2026-07 sweep #20)
                 raise WeftError(
-                    "data.verify_failed", f"output ingest failed: {r.err[:300]}",
-                    stage="collecting",
+                    "data.transfer_failed",
+                    f"output ingest failed: {r.err[:300]}",
+                    stage="collecting", retryable=True,
                 )
             for e in entries:
                 self.store.set_location(e["ref"], adapter.name, endpoint["cas_root"])

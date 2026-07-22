@@ -475,6 +475,8 @@ env = w.env_ensure({
                       "lab/pkg@fix-branch"]},           # github → pinned SHA
     "system_requirements": {"cran_snapshot": "2026-07-01"},  # frozen forever
 })
+# omitted cran_snapshot defaults to UTC-today − 2 (concrete date, recorded
+# in the layer — never the controller's local calendar)
 env["layers"]                        # per-layer package counts, source builds
 w.env_ensure(spec, dry_run=True)     # test a fix; nothing stored
 w.env_why(env_id, "data.table")      # what pulls it in / the locked record

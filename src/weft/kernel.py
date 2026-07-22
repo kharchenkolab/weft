@@ -287,11 +287,15 @@ class KernelManager:
 
     def _assert_alive(self, k: dict) -> None:
         if k["state"] != "running":
+            # exec against a non-running kernel is a caller-state error —
+            # sched.node_failure minted phantom node deaths that poisoned
+            # site-health reasoning (2026-07 sweep #19)
             raise WeftError(
-                "sched.node_failure",
+                "task.invalid",
                 f"kernel {k['kernel_id']} is {k['state']}",
                 stage="running",
-                hints={"suggestion": "kernel_restart(kernel_id, "
+                hints={"state": k["state"],
+                       "suggestion": "kernel_restart(kernel_id, "
                                      "replay='successful') starts a NEW "
                                      "kernel (use the returned kernel_id) "
                                      "with state rebuilt from the transcript",
