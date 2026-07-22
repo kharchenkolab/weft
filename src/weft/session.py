@@ -716,11 +716,15 @@ class SessionManager:
                     "default (a default ranking would be weft owning "
                     "intent)", stage="realize",
                     hints={"lanes": ["conda", "pypi", "cran"]})
-            if not request or not all(isinstance(x, str) for x in request):
+            ok_entry = lambda x: isinstance(x, str) or (
+                isinstance(x, dict) and "name" in x
+                and not set(x) - ({"name", "conda", "pypi", "cran"}))
+            if not request or not all(ok_entry(x) for x in request):
                 raise WeftError(
                     "task.invalid",
-                    "ranked request is a non-empty list of package "
-                    "strings", stage="realize")
+                    "ranked request entries are package strings or "
+                    '{"name": ..., "<lane>": "<spelling>"} objects',
+                    stage="realize")
         elif not isinstance(request, dict) or \
                 set(request) - {"conda", "pypi", "cran"} or \
                 not any(request.get(k) for k in ("conda", "pypi", "cran")):
@@ -878,7 +882,33 @@ class SessionManager:
         and NO synthesized suggestion — the attempts are the advice."""
         import time as _t
         from .verify import run_grouped, default_checks, usable_want
-        from .spec import split_constraint
+        from .spec import lane_spelling, request_namespace, \
+            split_constraint
+        norm: list[tuple[str, dict]] = []
+        for e in packages:
+            if isinstance(e, dict):
+                norm.append((e["name"], {ln: e.get(ln) for ln in lanes}))
+            else:
+                norm.append((e, {}))
+        from .spec import ranked_namespace
+        ns = ranked_namespace(norm, lanes)
+        # dialect is only safe under a postcondition (verify-in-loop
+        # bounds a dialect miss) — the NOT-X case is closed, not open
+        derives = ns == "r" and "conda" in lanes and any(
+            not ov.get("conda") and "/" not in d.partition("@")[0]
+            for d, ov in norm)
+        if derives and eff is None:
+            raise WeftError(
+                "task.invalid",
+                "bare R names on a conda lane need dialect derivation, "
+                "and derivation requires an effective postcondition",
+                stage="realize",
+                hints={"levers": ["pass verify=True (or an explicit "
+                                  "verify dict)",
+                                  'or per-lane spellings: {"name": '
+                                  '"X", "conda": "r-x"}']})
+        packages = [d for d, _ in norm]
+        overrides = dict(norm)
         s = self._get(session_id)
         attempts: list[dict] = []
         verified: dict[str, dict] = {}
@@ -895,7 +925,7 @@ class SessionManager:
                     continue                    # refs never pre-check
                 n, c = split_constraint(pkg)
                 checks += default_checks(
-                    lanes[0], [n],
+                    "cran" if ns == "r" else lanes[0], [n],
                     {n: c.strip()} if usable_want(c) else None)
             pre = run_grouped(self._verify_exec_fn(s, adapter), checks)
             verified.update(pre)
@@ -928,7 +958,9 @@ class SessionManager:
                                     session=session_id, lane=lane,
                                     outcome="skipped", code=None)
                     continue
-                if lane != "cran" and "/" in pkg.partition("@")[0]:
+                spelling = (overrides.get(pkg, {}).get(lane)
+                            or lane_spelling(pkg, lane, ns))
+                if lane != "cran" and "/" in spelling.partition("@")[0]:
                     # this lane's grammar cannot speak the spec — a
                     # skipped lane, not a burned typed failure
                     attempts.append({"lane": lane, "package": pkg,
@@ -941,10 +973,11 @@ class SessionManager:
                 t0 = _t.monotonic()
                 try:
                     out = self.install(session_id, adapter,
-                                       **{lane: [pkg]},
+                                       **{lane: [spelling]},
                                        verify=(verify if eff is not None
                                                else None))
                     a = {"lane": lane, "package": pkg,
+                         "spelling": spelling,
                          "outcome": ("installed" if eff is not None
                                      else "installed_unverified"),
                          "seconds": round(_t.monotonic() - t0, 2)}
@@ -953,6 +986,7 @@ class SessionManager:
                     installed_count += 1
                 except WeftError as e:
                     a = {"lane": lane, "package": pkg,
+                         "spelling": spelling,
                          "outcome": ("refused"
                                      if e.code == "session.cold_base"
                                      else "failed"),

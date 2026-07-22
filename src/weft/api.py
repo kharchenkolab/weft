@@ -1200,17 +1200,54 @@ class Weft:
                 set(target) - {"session", "env"}:
             raise WeftError(
                 "task.invalid",
-                'target must be {"session": <session_id>} '
-                '(env targets arrive in a later round)',
-                stage="realize")
+                'target must be {"session": <session_id>} or '
+                '{"env": <env_id>}', stage="realize")
+        if probe:
+            # observation, never choice, never mutation — no claim, no
+            # session state touched; the SAME dialect function the
+            # chain uses picks each spelling
+            if not isinstance(request, list) or not lanes:
+                raise WeftError(
+                    "task.invalid",
+                    "probe takes a ranked list of names + lanes=[...]",
+                    stage="realize")
+            from .probe import probe_lanes
+            from .spec import ranked_namespace
+            norm = [(e["name"], {ln: e.get(ln) for ln in lanes})
+                    if isinstance(e, dict) else (e, {}) for e in request]
+            ns = ranked_namespace(norm, lanes)
+            return {"candidates": probe_lanes(request, lanes, ns)}
         if "env" in target:
-            raise WeftError(
-                "task.invalid",
-                "env targets arrive in a later round — the spec's own "
-                "verify block already enforces realize postconditions "
-                "today", stage="realize",
-                hints={"suggestion": "put verify in the env SPEC "
-                                     "(identity-neutral) and realize it"})
+            # ONE solve: extends_env mints exactly as today; the verify
+            # block (identity-neutral) enforces at realize — ready
+            # means verified, per site
+            import time as _t
+            if lanes is not None or not isinstance(request, dict):
+                raise WeftError(
+                    "task.invalid",
+                    "env targets take an eco-tagged delta (one solve — "
+                    "there is no lane ranking to run)", stage="realize")
+            spec = {"extends_env": target["env"], "deps": request}
+            if isinstance(verify, dict) and verify:
+                spec["verify"] = verify
+            t0 = _t.monotonic()
+            got = self.env_ensure(spec)
+            attempt = {"lane": "extends_env",
+                       "seconds": round(_t.monotonic() - t0, 2)}
+            if "error" in got:
+                attempt["outcome"] = "failed"
+                attempt["error"] = {k: got[k] for k in
+                                    ("error", "stage", "detail",
+                                     "retryable", "hints") if k in got}
+                got.setdefault("hints", {})["attempts"] = [attempt]
+                return got
+            attempt["outcome"] = "solved"
+            return {"satisfied": True,
+                    "changed": got["env_id"] != target["env"],
+                    "attempts": [attempt], "verified": {},
+                    "env_id": got["env_id"],
+                    "note": "postconditions enforce at realize — ready "
+                            "means verified, per site"}
         sid = target["session"]
         return self.sessions.ensure_available(
             sid, self._session_adapter(sid), request, verify=verify,

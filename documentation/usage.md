@@ -366,7 +366,23 @@ first — already-proven entries short-circuit (`changed: false`,
 `hints.attempts` verbatim; a site outage HALTS remaining lanes and the
 verdict is the outage, never unavailability. One ensure per session at
 a time (`state.conflict`, retryable, heartbeat-stale claims are taken
-over). Ranked lane fallback and probe arrive in a later round.
+over).
+
+Ranked mode: `ensure_available(target, ["RNetCDF"], lanes=["conda",
+"cran"])` — YOUR ranking (no default), per-package independent chains,
+a lane succeeds only if its postcondition passes (verify-in-loop; a
+failed lane's record is retracted and the chain continues), outages
+HALT, exhaustion is `env.unavailable_in_lanes` with every attempt.
+The substrate speaks each lane's DIALECT (an R-namespace bare name is
+`r-<lowercase>` on conda — one documented derivation, used by probe
+too; attempts record the `spelling` used); dialect requires an
+effective postcondition, and a bare name across cran+pypi is refused
+as ambiguous (per-lane spellings `{"name": "X", "pypi": "x"}` are the
+escape). `probe=True` returns per-lane availability FACTS (404 is
+false; transport trouble is "unknown", never false) with no mutation.
+`target={"env": env_id}` runs the ONE-solve extends path and returns
+the same envelope (`lane: "extends_env"`, `outcome: "solved"`) —
+postconditions enforce at realize.
 
 `session_install(..., verify=...)` runs a POSTCONDITION in the
 composed runtime after the install — `verify=True` proves presence (and

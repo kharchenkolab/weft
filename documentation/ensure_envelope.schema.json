@@ -7,7 +7,8 @@
     "attempts": "list[attempt] — [] when satisfied at pre-check",
     "verified": "dict[name -> {status: passed|failed|unknown, check, want?, got?, reason?}]",
     "runtime": "the session runtime contract block",
-    "session_id": "str"
+    "session_id": "str (session targets)",
+    "env_id": "str (env targets; with a `note` — postconditions enforce at realize)"
   },
   "error_hints": {
     "$comment": "failures use the standard error envelope {error, stage, detail, hints, retryable, meaning}; these keys ride hints",
@@ -16,8 +17,8 @@
     "runtime": "present even on failure — mutations may have landed"
   },
   "attempt": {
-    "lane": "conda|pypi|cran|installer",
-    "outcome": "installed|installed_unverified|failed|refused|skipped",
+    "lane": "conda|pypi|cran|installer|extends_env",
+    "outcome": "installed|installed_unverified|failed|refused|skipped|solved",
     "seconds": "float (absent on skipped)",
     "error": "the lane's typed error dict VERBATIM (outcome=failed/refused)",
     "mutations": "list[str] (outcome=installed*)",

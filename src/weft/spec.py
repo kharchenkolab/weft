@@ -114,6 +114,52 @@ _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PLATFORM_RE = re.compile(r"[a-z0-9]+(-[a-z0-9_]+)*")
 
 
+def request_namespace(lanes: list[str]) -> str:
+    """The namespace bare names are written in, derived from the
+    RANKING itself: cran in lanes => R registry names (the conda lane
+    derives its dialect); lanes within {conda, pypi} => passthrough
+    (those ecosystems mostly agree). cran+pypi together is AMBIGUOUS
+    for a bare name — refusal, never a guess."""
+    ls = set(lanes)
+    if "cran" in ls and "pypi" in ls:
+        raise WeftError(
+            "task.invalid",
+            "bare names are ambiguous across cran+pypi lanes — say which "
+            "ecosystem's name you mean",
+            stage="realize",
+            hints={"escape": 'per-lane spellings: {"name": "X", '
+                             '"pypi": "x", "cran": "X"}'})
+    return "r" if "cran" in ls else "py"
+
+
+def ranked_namespace(norm: list, lanes: list[str]) -> str:
+    """Entry-scoped namespace resolution (a github ref is lane-tagged
+    by grammar; a fully-spelled entry needs no interpretation — only a
+    BARE name forces the question). ONE function for chain and probe."""
+    bare = [d for d, ov in norm
+            if "/" not in d.partition("@")[0]
+            and not all(ov.get(ln) for ln in lanes)]
+    if bare:
+        return request_namespace(lanes)
+    return "r" if "cran" in lanes else "py"
+
+
+def lane_spelling(name: str, lane: str, namespace: str) -> str:
+    """THE dialect function — one derivation used by the chain AND
+    probe (a second implementation would be a split-brain on day one).
+    Deterministic, documented: an R-namespace bare name on the conda
+    lane follows conda's r-<lowercase> convention; everything else
+    passes through. Only safe under an effective postcondition
+    (verify-in-loop bounds a dialect miss) — callers enforce that."""
+    if namespace == "r" and lane == "conda" and "/" not in name:
+        parts = name.strip().split(None, 1)
+        base, tail = parts[0], (f" {parts[1]}" if len(parts) > 1 else "")
+        if not base.lower().startswith("r-"):
+            base = f"r-{base.lower()}"
+        return base + tail
+    return name
+
+
 def _dep_key(eco: str, dep: str) -> str:
     """Collision key for one dep within a lane. conda names are
     case-insensitive; pypi normalizes per PEP 503; cran/julia/... are

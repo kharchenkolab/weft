@@ -16,8 +16,9 @@ def test_target_and_request_shapes_refused(tmp_path, pixi_bin):
     for target in ("s1", {}, {"nonsense": 1}):
         r = w.ensure_available(target, {"pypi": ["idna"]})
         assert r["error"] == "task.invalid", target
-    r = w.ensure_available({"env": "env:v1:x"}, {"pypi": ["idna"]})
-    assert r["error"] == "task.invalid" and "later round" in r["detail"]
+    r = w.ensure_available({"env": "env:v1:x"}, ["idna"],
+                           lanes=["conda"])           # env + ranked: no
+    assert r["error"] == "task.invalid" and "one solve" in r["detail"]
     for req in ("idna", {}, {"julia": ["X"]}):
         r = w.ensure_available({"session": sid}, req)
         assert r["error"] == "task.invalid", req
@@ -27,8 +28,8 @@ def test_target_and_request_shapes_refused(tmp_path, pixi_bin):
     r = w.ensure_available({"session": sid}, ["idna"])   # list, no lanes
     assert r["error"] == "task.invalid" and "ranking" in r["detail"]
     r = w.ensure_available({"session": sid}, {"pypi": ["idna"]},
-                           probe=True)
-    assert r["error"] == "task.invalid" and "later round" in r["detail"]
+                           probe=True)                # probe wants a list
+    assert r["error"] == "task.invalid" and "ranked list" in r["detail"]
 
 
 # ── pre-check: satisfaction is checked, not assumed ────────────────────────
@@ -278,3 +279,135 @@ def test_crash_mid_chain_releases_claim_and_converges(tmp_path, pixi_bin,
     calls = _ranked_rig(monkeypatch, {("aa", "conda"): "installed"})
     out = w.ensure_available({"session": sid}, ["aa"], lanes=["conda"])
     assert out["satisfied"] is True                     # converges
+
+
+# ── P5: dialect, probe, env target ─────────────────────────────────────────
+
+def test_dialect_spelling_rides_the_chain(tmp_path, pixi_bin,
+                                          monkeypatch):
+    """An R-namespace bare name derives conda's r-<lowercase> spelling;
+    the attempt records the spelling ACTUALLY used."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    fail = WeftError("env.solve_conflict", "no conda build", stage="solve")
+    calls = _ranked_rig(monkeypatch, {
+        ("RNetCDF", "conda"): fail,          # keyed by DISPLAY name
+        ("RNetCDF", "cran"): "installed"})
+    from weft.session import SessionManager
+    spellings = []
+
+    def keyed(self, session_id, adapter, conda=None, pypi=None,
+              cran=None, verify=None, **kw):
+        lane = "conda" if conda else ("pypi" if pypi else "cran")
+        spelling = (conda or pypi or cran)[0]
+        spellings.append((lane, spelling))
+        if lane == "conda":
+            raise fail
+        return {"installed": {lane: [spelling]},
+                "verified": {"RNetCDF": {"status": "passed",
+                                         "check": "loads"}},
+                "session_id": session_id}
+
+    monkeypatch.setattr(SessionManager, "install", keyed)
+    out = w.ensure_available({"session": sid}, ["RNetCDF"],
+                             lanes=["conda", "cran"])
+    assert out["satisfied"] is True
+    assert ("conda", "r-rnetcdf") in spellings       # dialect derived
+    assert ("cran", "RNetCDF") in spellings          # registry name kept
+    atts = {a["lane"]: a for a in out["attempts"]}
+    assert atts["conda"]["spelling"] == "r-rnetcdf"
+    assert atts["cran"]["spelling"] == "RNetCDF"
+
+
+def test_dialect_requires_effective_verify(tmp_path, pixi_bin,
+                                           monkeypatch):
+    """The NOT-X guard: derivation without a postcondition is the
+    unguarded-translation back door — refused with both levers."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    out = w.ensure_available({"session": sid}, ["RNetCDF"],
+                             lanes=["conda", "cran"], verify=False)
+    assert out["error"] == "task.invalid"
+    assert "levers" in out["hints"]
+
+
+def test_bare_name_across_cran_and_pypi_is_ambiguous(tmp_path, pixi_bin,
+                                                     monkeypatch):
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    out = w.ensure_available({"session": sid}, ["thing"],
+                             lanes=["pypi", "cran"])
+    assert out["error"] == "task.invalid"
+    assert "ambiguous" in out["detail"]
+    # per-lane spellings are the escape
+    calls = _ranked_rig(monkeypatch, {("thing", "pypi"): "installed"})
+    out2 = w.ensure_available(
+        {"session": sid},
+        [{"name": "thing", "pypi": "thing", "cran": "Thing"}],
+        lanes=["pypi", "cran"])
+    assert out2["satisfied"] is True
+
+
+def test_env_target_mints_and_reports(tmp_path, pixi_bin, monkeypatch):
+    w, sid = cold_session(tmp_path, pixi_bin)
+    monkeypatch.setattr(w, "env_ensure",
+                        lambda spec: {"env_id": "env:v1:childchild"})
+    out = w.ensure_available({"env": "env:v1:deadbeefcafe"},
+                             {"pypi": ["emcee"]})
+    assert out["satisfied"] is True and out["changed"] is True
+    assert out["env_id"] == "env:v1:childchild"
+    assert out["attempts"][0]["lane"] == "extends_env"
+    assert out["attempts"][0]["outcome"] == "solved"
+    monkeypatch.setattr(w, "env_ensure", lambda spec: {
+        "error": "env.layer_conflict", "stage": "solve",
+        "detail": "contradicts frozen pin", "retryable": False,
+        "hints": {}})
+    out2 = w.ensure_available({"env": "env:v1:deadbeefcafe"},
+                              {"pypi": ["emcee ==99"]})
+    assert out2["error"] == "env.layer_conflict"
+    assert out2["hints"]["attempts"][0]["outcome"] == "failed"
+
+
+def test_probe_honesty(tmp_path, pixi_bin, monkeypatch):
+    """404 is FALSE (the index's answer); transport trouble is UNKNOWN
+    — never false (an agent ranking on a false fact)."""
+    import io
+    import urllib.error
+
+    def fake_urlopen(req, timeout=15.0):
+        url = req.full_url
+        if "pypi.org" in url:
+            raise urllib.error.HTTPError(url, 404, "nf", {}, None)
+        if "anaconda.org" in url:
+            return io.BytesIO(b'{"latest_version": "5.4.6"}')
+        raise urllib.error.URLError("proxy down")
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    w, sid = cold_session(tmp_path, pixi_bin)
+    out = w.ensure_available(
+        {"session": sid},
+        [{"name": "xz", "conda": "xz", "pypi": "xz", "cran": "xz"}],
+        lanes=["conda", "pypi", "cran"], probe=True)
+    facts = out["candidates"]["xz"]
+    assert facts["conda"]["available"] is True
+    assert facts["conda"]["version_latest"] == "5.4.6"
+    assert facts["pypi"]["available"] is False
+    assert facts["cran"]["available"] == "unknown"
+    assert "proxy" in facts["cran"]["reason"]
+
+
+def test_probe_uses_the_one_dialect_function(tmp_path, pixi_bin,
+                                             monkeypatch):
+    from weft import probe as probe_mod
+    asked = []
+    monkeypatch.setattr(probe_mod, "_BACKENDS", {
+        "conda": lambda n: (asked.append(("conda", n)) or
+                            {"available": True, "spelling": n}),
+        "cran": lambda n: (asked.append(("cran", n)) or
+                           {"available": True, "spelling": n}),
+        "pypi": lambda n: {"available": True, "spelling": n}})
+    w, sid = cold_session(tmp_path, pixi_bin)
+    w.ensure_available({"session": sid}, ["RNetCDF"],
+                       lanes=["conda", "cran"], probe=True)
+    assert ("conda", "r-rnetcdf") in asked      # the dialect, in probe
+    assert ("cran", "RNetCDF") in asked

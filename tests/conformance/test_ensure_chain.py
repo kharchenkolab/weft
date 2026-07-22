@@ -88,7 +88,11 @@ def rig_session(tmp_path_factory, pixi_bin):
 
 
 def _run(w, sid, lanes):
-    return w.ensure_available({"session": sid}, ["pkgx"], lanes=lanes)
+    # a bare name across cran+pypi is AMBIGUOUS by design (settled
+    # vocabulary) — the harness speaks per-lane spellings there
+    entry = "pkgx" if "cran" not in lanes else {
+        "name": "pkgx", **{ln: "pkgx" for ln in lanes}}
+    return w.ensure_available({"session": sid}, [entry], lanes=lanes)
 
 
 def _events_for(w, sid, since):

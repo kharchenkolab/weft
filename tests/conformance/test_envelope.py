@@ -13,12 +13,13 @@ from helpers_verify import cold_session, marker, no_toolchain, script_log
 from weft.adapters.base import ShimResult
 
 ATTEMPT_OUTCOMES = {"installed", "installed_unverified", "failed",
-                    "refused", "skipped"}
+                    "refused", "skipped", "solved"}
 VERIFY_STATUSES = {"passed", "failed", "unknown"}
 
 
 def _check_attempt(a):
-    assert a["lane"] in {"conda", "pypi", "cran", "installer"}
+    assert a["lane"] in {"conda", "pypi", "cran", "installer",
+                     "extends_env"}
     assert a["outcome"] in ATTEMPT_OUTCOMES
     if a["outcome"] == "skipped":
         assert a["skip_reason"] in {"halted", "budget", "grammar"}
@@ -43,7 +44,8 @@ def check_success(env):
     for a in env["attempts"]:
         _check_attempt(a)
     _check_verified(env["verified"])
-    assert env["runtime"] and env["session_id"]
+    assert ("session_id" in env and env["runtime"]) or \
+        "env_id" in env
 
 
 def check_error(env):

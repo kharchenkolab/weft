@@ -46,3 +46,14 @@ def test_verify_block_does_not_fork_the_env_id(w):
     b = w.env_ensure({"name": "same", "deps": {"conda": ["xz"]},
                       "verify": {"versions": {"xz": ">=5"}}})
     assert a["env_id"] == b["env_id"]     # identity-neutral, END TO END
+
+
+def test_probe_backends_live():
+    """P5: the three probe backends against the real indexes —
+    available facts with versions; absent is FALSE."""
+    from weft.probe import probe_conda, probe_cran, probe_pypi
+    p = probe_pypi("pip")
+    assert p["available"] is True and p["version_latest"]
+    assert probe_conda("xz")["available"] is True
+    assert probe_cran("jsonlite")["available"] is True
+    assert probe_pypi("weft-no-such-dist-xyz")["available"] is False
