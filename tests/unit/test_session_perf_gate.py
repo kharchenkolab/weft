@@ -229,3 +229,24 @@ def test_installer_full_clone_upgrades_then_runs(tmp_path, pixi_bin,
     assert "absorbed" in out["upgrade_note"]
     assert w.store.get_session(sid)["materialize_mode"] == "clone"
     assert any("shell-hook" in c and "./install.sh" in c for c in calls)
+
+
+def test_installer_build_failure_carries_syslib_class(tmp_path, pixi_bin,
+                                                      monkeypatch):
+    """End-to-end payload for the missing_system_lib subclass (aba
+    check-in item 3): a real raise site, not just the classifier — the
+    typed class + captured library name ride hints on the standard
+    env.realize_failed envelope."""
+    w, sid = warm_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    _pylib_fakes(monkeypatch, w, sid, tmp_path, extra={
+        "pixi install": ShimResult(0, "cloned", ""),
+        "shell-hook": ShimResult(
+            1, "", "/usr/bin/ld: cannot find -lpng: "
+                   "No such file or directory\n"
+                   "collect2: error: ld returned 1 exit status")})
+    out = w.session_run_installer(sid, "./build.sh")
+    assert out["error"] == "env.realize_failed", out
+    assert out["hints"]["failure_class"] == "missing_system_lib"
+    assert out["hints"]["missing_system"]["library"] == "png"
+    assert "extends_env" in out["hints"]["remedy"]

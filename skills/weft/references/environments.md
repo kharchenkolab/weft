@@ -117,8 +117,20 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   `env.unavailable_in_lanes` and each attempt carries its own levers).
   Satisfaction is CHECKED first (`changed: false` short-circuit);
   `probe=True` returns per-lane availability facts (unknown is never
-  false); `{"env": env_id}` targets run the one-solve extends path.
-  One ensure per session at a time (retryable state.conflict).
+  false; with `cran_repos` the cran probe is "unknown" outright —
+  secondary registries are not probeable); `{"env": env_id}` targets
+  run the one-solve extends path. `cran_repos=[urls]` names extra
+  repositories for the cran lane in either mode (attempts record
+  `repositories`; env targets emit `r_repositories`). Env targets +
+  `site=`: verify-NOW against an already-ready realization on that
+  site (`verified` populates + `verified_site`; failing live check =
+  degraded realization, `env_repair` lever) — otherwise the note says
+  enforcement stays at realize; never a forced realize. One ensure
+  per session at a time (retryable state.conflict). Build failures
+  under any lane may carry `hints.failure_class:
+  "missing_system_lib"` (+ `missing_system` header/library name):
+  the remedy is an isolated env with a full solve, NOT a session
+  retry.
 - **Sessions (interactive):** `session_start(spec_or_env_id, site)` → a
   scratch env, cloned LAZILY: start attaches to the base realization in
   place (including an adopted read-only squashfs pack — no per-session

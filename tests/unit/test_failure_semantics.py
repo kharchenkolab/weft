@@ -301,3 +301,79 @@ def test_ingest_failure_is_transfer_failed(tmp_path):
                            Task.from_dict({"command": "true",
                                            "outputs": ["o.txt"]}))
     assert ei.value.code == "data.transfer_failed" and ei.value.retryable
+
+
+# ── missing_system_lib: the typed subclass below env.realize_failed ────────
+# (aba check-in item 3: its remedy is categorically different — isolated
+# env with a full solve, never a session-lane retry — so the class and
+# the captured header/library name ride hints, not rendered prose)
+
+from weft.session import _syslib_hints  # noqa: E402
+
+
+def test_syslib_gcc_missing_header_names_it():
+    h = _syslib_hints(
+        "gcc -I/usr/include -c foo.c\n"
+        "foo.c:2:10: fatal error: png.h: No such file or directory\n"
+        "compilation terminated.")
+    assert h["failure_class"] == "missing_system_lib"
+    assert h["missing_system"]["header"] == "png.h"
+    assert "extends_env" in h["remedy"]
+
+
+def test_syslib_clang_missing_header_names_it():
+    h = _syslib_hints("foo.c:1:10: fatal error: 'zlib.h' file not found")
+    assert h["missing_system"]["header"] == "zlib.h"
+
+
+def test_syslib_gnu_ld_missing_lib_names_it():
+    h = _syslib_hints("/usr/bin/ld: cannot find -lxml2: "
+                      "No such file or directory\n"
+                      "collect2: error: ld returned 1 exit status")
+    assert h["failure_class"] == "missing_system_lib"
+    assert h["missing_system"]["library"] == "xml2"
+
+
+def test_syslib_darwin_ld_both_vintages():
+    old = _syslib_hints("ld: library not found for -lgfortran")
+    new = _syslib_hints("ld: library 'gfortran' not found")
+    assert old["missing_system"]["library"] == "gfortran"
+    assert new["missing_system"]["library"] == "gfortran"
+
+
+def test_syslib_runtime_shared_lib_names_it():
+    h = _syslib_hints("Rscript: error while loading shared libraries: "
+                      "libcurl.so.4: cannot open shared object file")
+    assert h["missing_system"]["library"] == "curl"
+
+
+def test_syslib_pkg_config_names_it():
+    h = _syslib_hints("Package libxml-2.0 was not found in the "
+                      "pkg-config search path.\n"
+                      "No package 'libxml-2.0' found")
+    assert h["missing_system"]["pkg_config"] == "libxml-2.0"
+
+
+def test_syslib_configure_error_is_class_only():
+    h = _syslib_hints("checking for zlib... no\n"
+                      "configure: error: zlib not found, please install")
+    assert h["failure_class"] == "missing_system_lib"
+    assert "missing_system" not in h
+
+
+def test_syslib_plain_build_failure_is_not_reclassed():
+    assert _syslib_hints(
+        "ERROR: compilation failed for package 'xml2'\n"
+        "error: expected ';' before '}' token") is None
+
+
+def test_syslib_never_rides_a_network_verdict():
+    """Caller-level guard: the scan applies only to env.realize_failed —
+    an outage log with stray compiler text keeps its transport code
+    (a false re-class would suppress the retry lever)."""
+    code, retryable = _pip_failure(
+        "ReadTimeoutError: HTTPSConnectionPool\n"
+        "note: earlier build had: fatal error: png.h: "
+        "No such file or directory")
+    assert (code, retryable) == ("env.solve_failed", True)
+    # the classifier's verdict wins; _syslib_hints is never merged there

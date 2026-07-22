@@ -1182,7 +1182,9 @@ class Weft:
 
     def ensure_available(self, target: dict, request: dict,
                          lanes=None, verify=True,
-                         probe: bool = False) -> dict:
+                         probe: bool = False,
+                         cran_repos: list[str] | None = None,
+                         site: str | None = None) -> dict:
         """Make REQUEST available in TARGET, prove it, and report one
         typed envelope: {satisfied, changed, attempts, verified,
         runtime}. Tagged mode: request is an eco-tagged delta
@@ -1195,7 +1197,13 @@ class Weft:
         of package strings with lanes=[...] — YOUR ranking; per-package
         independent chains, verify-in-loop, halting on outages,
         exhaustion = env.unavailable_in_lanes with every attempt.
-        Probe and env targets arrive in later rounds."""
+        cran_repos=[urls] names extra repositories for the cran lane
+        (either mode; recorded on attempts; the cran PROBE degrades to
+        unknown — secondary registries are not probeable). Env targets:
+        site= adds verify-NOW against an already-ready realization on
+        that site (verified populated + verified_site; otherwise the
+        note says enforcement stays at realize — never a forced
+        realize)."""
         if not isinstance(target, dict) or not target or \
                 set(target) - {"session", "env"}:
             raise WeftError(
@@ -1212,11 +1220,18 @@ class Weft:
                     "probe takes a ranked list of names + lanes=[...]",
                     stage="realize")
             from .probe import probe_lanes
-            from .spec import ranked_namespace
+            from .spec import ranked_namespace, validate_repo_urls
+            validate_repo_urls(cran_repos, where="probe")
+            if cran_repos and "cran" not in lanes:
+                raise WeftError(
+                    "task.invalid",
+                    "cran_repos was passed but no cran lane is being "
+                    "probed", stage="realize", hints={"lanes": lanes})
             norm = [(e["name"], {ln: e.get(ln) for ln in lanes})
                     if isinstance(e, dict) else (e, {}) for e in request]
             ns = ranked_namespace(norm, lanes)
-            return {"candidates": probe_lanes(request, lanes, ns)}
+            return {"candidates": probe_lanes(request, lanes, ns,
+                                              cran_repos=cran_repos)}
         if "env" in target:
             # ONE solve: extends_env mints exactly as today; the verify
             # block (identity-neutral) enforces at realize — ready
@@ -1227,7 +1242,17 @@ class Weft:
                     "task.invalid",
                     "env targets take an eco-tagged delta (one solve — "
                     "there is no lane ranking to run)", stage="realize")
+            from .spec import validate_repo_urls
+            validate_repo_urls(cran_repos, where="ensure_available")
             spec = {"extends_env": target["env"], "deps": request}
+            if cran_repos:
+                if not request.get("cran"):
+                    raise WeftError(
+                        "task.invalid",
+                        "cran_repos was passed but the delta has no "
+                        "cran entries", stage="solve",
+                        hints={"request_lanes": sorted(request)})
+                spec["r_repositories"] = list(cran_repos)
             if isinstance(verify, dict) and verify:
                 spec["verify"] = verify
             t0 = _t.monotonic()
@@ -1242,16 +1267,90 @@ class Weft:
                 got.setdefault("hints", {})["attempts"] = [attempt]
                 return got
             attempt["outcome"] = "solved"
-            return {"satisfied": True,
-                    "changed": got["env_id"] != target["env"],
-                    "attempts": [attempt], "verified": {},
-                    "env_id": got["env_id"],
-                    "note": "postconditions enforce at realize — ready "
-                            "means verified, per site"}
+            out = {"satisfied": True,
+                   "changed": got["env_id"] != target["env"],
+                   "attempts": [attempt], "verified": {},
+                   "env_id": got["env_id"],
+                   "note": "postconditions enforce at realize — ready "
+                           "means verified, per site"}
+            if site:
+                out.update(self._env_verify_now(
+                    got["env_id"], site, request, verify, attempt))
+            return out
+        if site is not None:
+            raise WeftError(
+                "task.invalid",
+                "site= applies to env targets only (verify-now against "
+                "a ready realization) — a session target carries its "
+                "own site", stage="realize",
+                hints={"target": "session", "site": site})
         sid = target["session"]
         return self.sessions.ensure_available(
             sid, self._session_adapter(sid), request, verify=verify,
-            lanes=lanes, probe=probe)
+            lanes=lanes, probe=probe, cran_repos=cran_repos)
+
+    def _env_verify_now(self, env_id: str, site: str, request: dict,
+                        verify, attempt: dict) -> dict:
+        """Env-target refinement (aba check-in item 1): when the RESULT
+        env already holds a READY realization on `site`, prove the
+        claim against it NOW — a cheap honest answer with no forced
+        realize (the idempotent re-extend shape). Anything else keeps
+        the deferred contract: nothing realizes on the caller's clock,
+        and the note says which of the two happened. The keys returned
+        here OVERWRITE the base envelope's verified/note."""
+        import shlex as _sh
+        adapter = self._adapter(site)
+        real = self.store.get_realization(env_id, site)
+        if not real or real.get("state") != "ready":
+            return {"note": f"not realized on '{site}' yet — "
+                            f"postconditions enforce at realize; ready "
+                            f"means verified"}
+        if verify in (None, False):
+            return {"note": f"a ready realization exists on '{site}' "
+                            f"but verify is off — no live check ran; "
+                            f"postconditions enforce at realize"}
+        from .realize import env_dir_rel
+        from .session import _request_checks
+        from .verify import run_grouped, validate_verify
+        checks, _ = _request_checks(request, validate_verify(verify))
+        if not checks:
+            return {"note": "request has no live-checkable entries "
+                            "(github refs resolve at realize) — "
+                            "enforcement remains at realize"}
+        rel = real.get("location") or env_dir_rel(env_id)
+
+        def exec_fn(script: str, timeout: float):
+            full = (f". {_sh.quote(adapter.path(rel))}/activate.sh && "
+                    f"( {script} )")
+            return adapter.run_activated(full, timeout=timeout)
+
+        got = run_grouped(exec_fn, checks)
+        failed = {n: r for n, r in got.items()
+                  if r["status"] == "failed"}
+        if failed:
+            # a live realization that fails its own claim is a REAL
+            # finding (degraded/stale build), not a solve problem
+            raise WeftError(
+                "env.realize_failed",
+                f"the ready realization on '{site}' does not hold the "
+                f"claim for {sorted(failed)}",
+                stage="realize",
+                hints={"postcondition": True, "verified": got,
+                       "env_id": env_id, "site": site,
+                       "attempts": [attempt],
+                       "levers": {
+                           "env_repair": "rebuild this site's "
+                                         "realization",
+                           "note": "the claim re-enforces at the next "
+                                   "realize regardless"}})
+        if got and all(r["status"] == "unknown" for r in got.values()):
+            return {"verified": got, "verified_site": site,
+                    "note": f"could not verify against '{site}' now "
+                            f"(oracle could not run) — enforcement "
+                            f"remains at realize"}
+        return {"verified": got, "verified_site": site,
+                "note": f"verified now against the ready realization "
+                        f"on '{site}'"}
 
     def session_snapshot(self, session_id: str, name: str | None = None,
                          notes: list[str] | None = None,

@@ -180,6 +180,38 @@ def _dep_key(eco: str, dep: str) -> str:
     return d.split()[0]
 
 
+def validate_repo_urls(urls, where: str = "install"):
+    """Intake guard for extra repository URLs (cran_repos): a list of
+    http(s) URLs with no whitespace/control characters. Downstream the
+    strings are json.dumps-quoted into R code (injection-safe), but a
+    malformed URL would still be accepted-and-mangled by R's repos
+    machinery — refuse at intake instead (malformed-input lane)."""
+    if urls is None:
+        return None
+    from .errors import WeftError
+    if not isinstance(urls, list) or \
+            not all(isinstance(u, str) for u in urls):
+        raise WeftError("task.invalid",
+                        f"{where}: cran_repos must be a list of URL "
+                        f"strings", stage="solve",
+                        hints={"got": type(urls).__name__})
+    for u in urls:
+        # file:// is legitimate (air-gapped CRAN mirrors) and the spec
+        # lane has always accepted it — cran_repos becomes the spec's
+        # r_repositories at snapshot, ONE vocabulary
+        if (not u.startswith(("http://", "https://", "file://"))
+                or any(c.isspace() for c in u)
+                or any(ord(c) < 32 for c in u)):
+            raise WeftError("task.invalid",
+                            f"{where}: not a usable repository URL",
+                            stage="solve",
+                            hints={"entry": u[:200],
+                                   "expected": "http(s):// or file:// "
+                                               "with no whitespace/"
+                                               "control characters"})
+    return urls
+
+
 def refuse_duplicate_deps(eco: str, deps: list[str],
                           where: str = "deps") -> None:
     """A name listed twice in one lane is a malformed REQUEST — refuse
@@ -381,7 +413,9 @@ class EnvSpec:
                                  (d.get("post_install_inputs") or [])],
             extends=d.get("extends"),
             extends_env=d.get("extends_env"),
-            r_repositories=[str(x) for x in (d.get("r_repositories") or [])],
+            r_repositories=validate_repo_urls(
+                [str(x) for x in (d.get("r_repositories") or [])],
+                where="spec") or [],
             r_release_repos=[dict(x) for x in
                              (d.get("r_release_repos") or [])],
             system_requirements={

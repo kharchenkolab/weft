@@ -18,6 +18,7 @@ says so instead of half-working.
 from __future__ import annotations
 
 import json as _json
+import re
 import shlex
 import time
 import uuid
@@ -143,6 +144,59 @@ def _pixi_add_failure(text: str) -> tuple[str, bool, str, str]:
                 "site", "solve")
     return ("env.realize_failed", False,
             "incremental install failed in session", "realize")
+
+
+# The missing-SYSTEM-library subclass of a broken build pulls a
+# categorically different agent lever (aba check-in item 3): retrying
+# the session lane fails identically — the remedy is an isolated env
+# with a full solve, where conda-forge supplies the system dependency.
+# Markers are LC_ALL=C-stable compiler/linker/configure/pkg-config
+# shapes (the umbrella pins the locale on every install path). Seed set
+# is conservative and grows via the ledger, never speculation.
+_SYSLIB_PATTERNS: tuple[tuple[str | None, re.Pattern], ...] = (
+    # gcc:   fatal error: png.h: No such file or directory
+    # clang: fatal error: 'png.h' file not found
+    ("header", re.compile(r"fatal error: '?([\w./+-]+\.h)'?"
+                          r"(?:: No such file or directory|"
+                          r" file not found)")),
+    ("header", re.compile(r"([\w./+-]+\.h): No such file or directory")),
+    ("library", re.compile(r"cannot find -l([\w.+-]+)")),        # GNU ld
+    ("library", re.compile(r"library not found for -l([\w.+-]+)")),
+    ("library", re.compile(r"ld: library '([\w.+-]+)' not found")),
+    ("library", re.compile(r"error while loading shared libraries: "
+                           r"lib([\w.+-]+)\.so")),
+    ("pkg_config", re.compile(r"No package '([\w.+-]+)' found")),
+    (None, re.compile(r"configure: error")),   # class only, no name
+)
+
+
+def _syslib_hints(text: str) -> dict | None:
+    """Scan a BUILD-failure log for the missing-system-library shape.
+    Returns hint keys to merge (failure_class + captured names +
+    remedy), or None — callers apply this ONLY to env.realize_failed
+    verdicts, never to solve/network codes, so stray compiler text in
+    an outage log cannot re-class the failure."""
+    found: dict[str, str] = {}
+    hit = False
+    for kind, rx in _SYSLIB_PATTERNS:
+        m = rx.search(text)
+        if not m:
+            continue
+        hit = True
+        if kind and kind not in found:
+            found[kind] = m.group(1)
+    if not hit:
+        return None
+    out = {"failure_class": "missing_system_lib",
+           "remedy": "a system library is missing on this site — "
+                     "retrying the session lane will fail identically; "
+                     "mint an isolated env with a full solve "
+                     "(extends_env / ensure_available env target), "
+                     "which lets conda-forge supply the system "
+                     "dependency"}
+    if found:
+        out["missing_system"] = found
+    return out
 
 
 def _pip_failure(text: str, default: str = "env.realize_failed",
@@ -578,7 +632,8 @@ class SessionManager:
                     stage="realize",
                     hints={"requested": cran, "confirmed": ref_installed,
                            "out_tail": r.out[-1500:],
-                           "err_tail": r.err[-800:]})
+                           "err_tail": r.err[-800:],
+                           **(_syslib_hints(r.out + r.err) or {})})
         verify_names = plain + ref_installed
         v_rc, v_out = 0, ""
         if verify_names and r.rc == 0:
@@ -603,6 +658,8 @@ class SessionManager:
                      "verify_rc": v_rc,
                      "out_tail": r.out[-1200:], "err_tail": r.err[-800:],
                      "script_tail": rcmd[-400:]}
+            if code == "env.realize_failed":
+                hints.update(_syslib_hints(r.out + r.err + v_out) or {})
             if missing_line:
                 hints["missing"] = missing_line
             if (code == "env.solve_failed" and refs
@@ -722,7 +779,8 @@ class SessionManager:
 
     def ensure_available(self, session_id: str, adapter: SiteAdapter,
                          request: dict, verify=True, lanes=None,
-                         probe: bool = False) -> dict:
+                         probe: bool = False,
+                         cran_repos: list[str] | None = None) -> dict:
         """ensure_available, TAGGED mode (P3): make an eco-tagged delta
         available in the session, prove it, report the envelope
         {satisfied, changed, attempts, verified, runtime}. Pre-check
@@ -772,6 +830,17 @@ class SessionManager:
                 "task.invalid",
                 "lanes= ranks a LIST of bare names; an eco-tagged dict "
                 "already names its lanes", stage="realize")
+        from .spec import validate_repo_urls
+        validate_repo_urls(cran_repos, where="ensure_available")
+        if cran_repos and not (("cran" in (lanes or [])) if ranked
+                               else request.get("cran")):
+            raise WeftError(
+                "task.invalid",
+                "cran_repos was passed but no cran lane is in the "
+                "request — repositories only apply to the cran lane",
+                stage="realize",
+                hints={"lanes": lanes} if ranked
+                else {"request_lanes": sorted(request)})
         eff = None
         if verify not in (None, False):
             from .verify import validate_verify
@@ -799,15 +868,18 @@ class SessionManager:
         try:
             if ranked:
                 return self._ensure_ranked(session_id, adapter, request,
-                                           lanes, verify, eff)
+                                           lanes, verify, eff,
+                                           cran_repos=cran_repos)
             return self._ensure_tagged(session_id, adapter, request,
-                                       verify, eff)
+                                       verify, eff,
+                                       cran_repos=cran_repos)
         finally:
             stop.set()
             self.store.release_session_ensure(session_id, nonce)
 
     def _ensure_tagged(self, session_id: str, adapter: SiteAdapter,
-                       request: dict, verify, eff: dict | None) -> dict:
+                       request: dict, verify, eff: dict | None,
+                       cran_repos: list[str] | None = None) -> dict:
         import time as _t
         s = self._get(session_id)
         remaining = {k: list(request.get(k) or [])
@@ -863,12 +935,17 @@ class SessionManager:
             try:
                 out = self.install(session_id, adapter, **{eco: entries},
                                    verify=(verify if eff is not None
-                                           else None))
+                                           else None),
+                                   cran_repos=(cran_repos
+                                               if eco == "cran"
+                                               else None))
                 a = {"lane": eco,
                      "outcome": ("installed" if eff is not None
                                  else "installed_unverified"),
                      "seconds": round(_t.monotonic() - t0, 2),
                      "mutations": [out.get("mode") or "prefix"]}
+                if eco == "cran" and cran_repos:
+                    a["repositories"] = list(cran_repos)
                 verified.update(out.get("verified") or {})
             except WeftError as e:
                 a = {"lane": eco, "outcome": "failed",
@@ -903,7 +980,8 @@ class SessionManager:
 
     def _ensure_ranked(self, session_id: str, adapter: SiteAdapter,
                        packages: list[str], lanes: list[str], verify,
-                       eff: dict | None) -> dict:
+                       eff: dict | None,
+                       cran_repos: list[str] | None = None) -> dict:
         """The ranked chain (P4): per-package INDEPENDENT chains over
         caller-ranked lanes. A lane succeeds only if its postcondition
         passed (verify-in-loop rides P1's install: a verify-failed lane
@@ -1007,12 +1085,17 @@ class SessionManager:
                     out = self.install(session_id, adapter,
                                        **{lane: [spelling]},
                                        verify=(verify if eff is not None
-                                               else None))
+                                               else None),
+                                       cran_repos=(cran_repos
+                                                   if lane == "cran"
+                                                   else None))
                     a = {"lane": lane, "package": pkg,
                          "spelling": spelling,
                          "outcome": ("installed" if eff is not None
                                      else "installed_unverified"),
                          "seconds": round(_t.monotonic() - t0, 2)}
+                    if lane == "cran" and cran_repos:
+                        a["repositories"] = list(cran_repos)
                     verified.update(out.get("verified") or {})
                     success = True
                     installed_count += 1
@@ -1105,7 +1188,8 @@ class SessionManager:
                         "retry or snapshot",
                         stage="realize",
                         hints={"replay": pypi_rec,
-                               "log_tail": (r.err or r.out)[-800:]})
+                               "log_tail": (r.err or r.out)[-800:],
+                               **(_syslib_hints(r.err + r.out) or {})})
         pylib = adapter.path(f"{s['location']}/pylib")
         self._remove_overlay_line(s, adapter, "/pylib")
         adapter.run_cmd(f"rm -rf {shlex.quote(pylib)}")
@@ -1222,10 +1306,12 @@ class SessionManager:
             if r.rc != 0:
                 tail = (r.err or r.out)[-1500:]
                 code, retryable = _pip_failure(tail)
+                hints = {"log_tail": tail}
+                if code == "env.realize_failed":
+                    hints.update(_syslib_hints(tail) or {})
                 raise WeftError(
                     code, "pypi install into the session layer failed",
-                    stage="realize", retryable=retryable,
-                    hints={"log_tail": tail})
+                    stage="realize", retryable=retryable, hints=hints)
             note = ("this site's pip predates --dry-run/--report: the "
                     "full dependency closure was installed into the "
                     "session layer (base-satisfied deps duplicated)")
@@ -1272,10 +1358,13 @@ class SessionManager:
                     # was always the wrong verdict for this raise
                     tail = (rb.err or rb.out)[-1500:]
                     code, retryable = _pip_failure(tail)
+                    hints = {"missing": missing, "log_tail": tail}
+                    if code == "env.realize_failed":
+                        hints.update(_syslib_hints(tail) or {})
                     raise WeftError(
                         code, "installing the pypi delta failed",
                         stage="realize", retryable=retryable,
-                        hints={"missing": missing, "log_tail": tail})
+                        hints=hints)
                 fetch_s = round(_t.monotonic() - t1, 2)
                 fetch_method = "uv" if "#fetch uv" in rb.out else "pip"
             else:
@@ -1418,10 +1507,11 @@ class SessionManager:
         # a malformed request, refused before any tool sees it (each
         # ecosystem otherwise fails its own way — R tolerates silently,
         # pip errors in its own words). Re-adding across CALLS stays fine.
-        from .spec import refuse_duplicate_deps
+        from .spec import refuse_duplicate_deps, validate_repo_urls
         refuse_duplicate_deps("conda", conda, where="install")
         refuse_duplicate_deps("pypi", pypi, where="install")
         refuse_duplicate_deps("cran", cran, where="install")
+        validate_repo_urls(cran_repos, where="install")
         # cran is ORTHOGONAL to the prefix modes: R composes via
         # R_LIBS on any base (frozen or built-here), so it never clones,
         # never flips the session's mode, and works the same everywhere
@@ -1554,6 +1644,8 @@ class SessionManager:
             tail = (r.err or r.out)[-1500:]
             code, retryable, why, stg = _pixi_add_failure(tail)
             hints = {"log_tail": tail, "requested": conda + pypi}
+            if code == "env.realize_failed":
+                hints.update(_syslib_hints(tail) or {})
             if code == "internal.error":
                 hints["suggestion"] = ("the session manifest is corrupt "
                                        "(crashed earlier add?) — snapshot "
@@ -1714,7 +1806,9 @@ class SessionManager:
                 "env.realize_failed",
                 "session installer failed",
                 stage="realize",
-                hints={"command": cmd, "log_tail": (r.err or r.out)[-1500:]})
+                hints={"command": cmd,
+                       "log_tail": (r.err or r.out)[-1500:],
+                       **(_syslib_hints(r.err + r.out) or {})})
         self.store.session_add_installer(session_id, cmd, note,
                                          input=captured)
         self.store.emit("session.installer", session=session_id, cmd=cmd[:200],

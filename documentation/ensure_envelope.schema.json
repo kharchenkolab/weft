@@ -1,5 +1,5 @@
 {
-  "$comment": "ensure_available result envelope v1 — the PINNED cross-repo contract (aba guards it consumer-side; tests/conformance/test_envelope.py guards it here). Changes are deliberate, versioned events.",
+  "$comment": "ensure_available result envelope v1 — the PINNED cross-repo contract (aba guards it consumer-side; tests/conformance/test_envelope.py guards it here). Changes are deliberate, versioned events. 2026-07-22 additive: attempt.repositories, success.verified_site + env-target verify-now note semantics (coordinated with aba's vendored copy).",
   "envelope_version": 1,
   "success": {
     "satisfied": "bool (true)",
@@ -8,13 +8,14 @@
     "verified": "dict[name -> {status: passed|failed|unknown, check, want?, got?, reason?}]",
     "runtime": "the session runtime contract block",
     "session_id": "str (session targets)",
-    "env_id": "str (env targets; with a `note` — postconditions enforce at realize)"
+    "env_id": "str (env targets; the note says WHICH enforcement happened: 'verified now' against site='s ready realization, or 'postconditions enforce at realize')",
+    "verified_site": "str (env targets only, and only when site= was passed AND the result env already held a ready realization there — verified is then populated from a live check; absent = deferred to realize, verified stays {})"
   },
   "error_hints": {
     "$comment": "failures use the standard error envelope {error, stage, detail, hints, retryable, meaning}; these keys ride hints",
     "attempts": "list[attempt] — every lane that ran or was skipped",
     "verified": "dict as above (may be partial)",
-    "runtime": "present even on failure — mutations may have landed"
+    "runtime": "present even on failure — mutations may have landed (session targets; env targets carry env_id/site instead)"
   },
   "attempt": {
     "lane": "conda|pypi|cran|installer|extends_env",
@@ -24,6 +25,7 @@
     "mutations": "list[str] (outcome=installed*)",
     "skip_reason": "halted|budget|grammar (outcome=skipped)",
     "verify": "per-lane got/want when a postcondition failed in-loop (ranked mode)",
-    "spelling": "the lane-dialect spelling actually used (ranked mode)"
+    "spelling": "the lane-dialect spelling actually used (ranked mode)",
+    "repositories": "list[str] (cran lane, when cran_repos was passed — the extra repositories actually used; provenance, like spelling)"
   }
 }

@@ -78,10 +78,14 @@ _BACKENDS = {"pypi": probe_pypi, "conda": probe_conda, "cran": probe_cran}
 
 
 def probe_lanes(packages: list, lanes: list[str],
-                namespace: str) -> dict:
+                namespace: str,
+                cran_repos: list | None = None) -> dict:
     """{package: {lane: fact}} — the same dialect function the chain
     uses picks each lane's spelling (one derivation, or probe reports a
-    false fact for a lane that would succeed)."""
+    false fact for a lane that would succeed). With extra cran_repos,
+    the cran lane answers UNKNOWN: crandb indexes CRAN only, and a
+    package living in a secondary registry would otherwise probe FALSE
+    — a lie an agent would rank on."""
     out: dict = {}
     for pkg in packages:
         if isinstance(pkg, dict):
@@ -98,6 +102,13 @@ def probe_lanes(packages: list, lanes: list[str],
                 continue
             sp = spellings.get(lane) or lane_spelling(display, lane,
                                                       namespace)
+            if lane == "cran" and cran_repos:
+                facts[lane] = _fact(
+                    "unknown", sp.split()[0],
+                    reason="secondary repositories are not probeable "
+                           "(crandb indexes CRAN only) — unknown, "
+                           "never false")
+                continue
             facts[lane] = _BACKENDS[lane](split_constraint(sp)[0]
                                           if lane != "cran"
                                           else sp.split()[0])

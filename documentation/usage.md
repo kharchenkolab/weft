@@ -403,11 +403,31 @@ The substrate speaks each lane's DIALECT (an R-namespace bare name is
 too; attempts record the `spelling` used); dialect requires an
 effective postcondition, and a bare name across cran+pypi is refused
 as ambiguous (per-lane spellings `{"name": "X", "pypi": "x"}` are the
-escape). `probe=True` returns per-lane availability FACTS (404 is
-false; transport trouble is "unknown", never false) with no mutation.
+escape). `cran_repos=[urls]` names extra repositories for the cran
+lane in EITHER mode (validated at intake; the attempt records the
+`repositories` actually used, like `spelling`). `probe=True` returns
+per-lane availability FACTS (404 is false; transport trouble is
+"unknown", never false) with no mutation — and with `cran_repos` the
+cran probe answers "unknown" outright: crandb indexes CRAN only, and
+a package living in a secondary registry must never probe false.
 `target={"env": env_id}` runs the ONE-solve extends path and returns
-the same envelope (`lane: "extends_env"`, `outcome: "solved"`) —
-postconditions enforce at realize.
+the same envelope (`lane: "extends_env"`, `outcome: "solved"`;
+`cran_repos` becomes the spec's `r_repositories`). Enforcement is
+at-realize by default — the note says so, `verified` stays `{}`, and
+nothing realizes on your clock. Pass `site=` to add **verify-now**:
+when the RESULT env already holds a ready realization on that site
+(the idempotent re-extend shape), the claim is proven against it
+live — `verified` populates and `verified_site` names the site; a
+failing live check is a degraded-realization finding
+(`env.realize_failed` with the `env_repair` lever), and an oracle
+that cannot run stays "unknown" with enforcement still at realize.
+
+Build failures below any lane carry the `missing_system_lib`
+subclass when the log shows the classic configure/header/linker
+shapes: `hints.failure_class`, `hints.missing_system`
+(`{header|library|pkg_config: name}` when captured), and a remedy
+naming the real lever — an isolated env with a full solve, never a
+session-lane retry.
 
 `session_install(..., verify=...)` runs a POSTCONDITION in the
 composed runtime after the install — `verify=True` proves presence (and

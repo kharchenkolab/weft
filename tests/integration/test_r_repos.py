@@ -196,3 +196,29 @@ def test_packed_offline_with_extra_repo(w, tmp_path, pixi_bin):
         "env": env["env_id"], "outputs": ["results/"],
         "site": "dark"})["job_id"], 3600)
     assert j["state"] == "DONE", j["error"]
+
+
+def test_ranked_ensure_with_extra_repo_end_to_end(w, tmp_path):
+    """aba check-in item 2, the real thing: the RANKED verb +
+    cran_repos installs a package that exists ONLY in the secondary
+    repo, verify-in-loop proves it in the composed runtime, and the
+    attempt records the repositories used (provenance, like
+    spelling)."""
+    repo = _make_local_repo(tmp_path)
+    s = w.session_start({"name": "ranked-repos",
+                         "deps": {"conda": ["r-base =4.4",
+                                            "r-jsonlite"]},
+                         "system_requirements": SNAP}, "local")
+    assert "error" not in s, s
+    sid = s["session_id"]
+    out = w.ensure_available({"session": sid}, ["weftdemo"],
+                             lanes=["cran"], cran_repos=[repo])
+    assert out["satisfied"] is True, out
+    att = next(a for a in out["attempts"] if a["lane"] == "cran")
+    assert att["repositories"] == [repo]
+    assert att["outcome"] == "installed"
+    assert out["verified"]["weftdemo"]["status"] == "passed", out
+    r = w.session_exec(
+        sid, "Rscript -e 'library(weftdemo); cat(demo_tag())'")
+    assert r["rc"] == 0 and "weft-extra-repo" in r["stdout"], r
+    w.session_stop(sid)

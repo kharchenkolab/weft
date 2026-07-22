@@ -4,7 +4,8 @@ heartbeated one-ensure-per-session claim."""
 
 import pytest
 
-from helpers_verify import cold_session, marker, no_toolchain, script_log
+from helpers_verify import (ENV, cold_session, marker, no_toolchain,
+                            script_log)
 from weft.adapters.base import ShimResult
 from weft.errors import WeftError
 
@@ -411,3 +412,179 @@ def test_probe_uses_the_one_dialect_function(tmp_path, pixi_bin,
                        lanes=["conda", "cran"], probe=True)
     assert ("conda", "r-rnetcdf") in asked      # the dialect, in probe
     assert ("cran", "RNetCDF") in asked
+
+
+# ── aba check-in: ranked cran_repos + env-target site= verify-now ──────────
+
+def test_cran_repos_ride_the_cran_lane_only(tmp_path, pixi_bin,
+                                            monkeypatch):
+    """Repositories reach exactly the cran lane's install and ride the
+    attempt as provenance (like spelling); other lanes never see them."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    from weft.session import SessionManager
+    seen = []
+
+    def keyed(self, session_id, adapter, conda=None, pypi=None,
+              cran=None, verify=None, cran_repos=None, **kw):
+        lane = "conda" if conda else ("pypi" if pypi else "cran")
+        seen.append((lane, cran_repos))
+        if lane == "conda":
+            raise WeftError("env.solve_conflict", "no build",
+                            stage="solve")
+        return {"installed": {lane: cran},
+                "verified": {"RNetCDF": {"status": "passed",
+                                         "check": "loads"}},
+                "session_id": session_id}
+
+    monkeypatch.setattr(SessionManager, "install", keyed)
+    out = w.ensure_available({"session": sid}, ["RNetCDF"],
+                             lanes=["conda", "cran"],
+                             cran_repos=["https://r.example.org/repo"])
+    assert out["satisfied"] is True
+    assert ("conda", None) in seen                    # never leaked
+    assert ("cran", ["https://r.example.org/repo"]) in seen
+    cran_att = next(a for a in out["attempts"] if a["lane"] == "cran")
+    assert cran_att["repositories"] == ["https://r.example.org/repo"]
+    conda_att = next(a for a in out["attempts"] if a["lane"] == "conda")
+    assert "repositories" not in conda_att
+
+
+def test_cran_repos_need_a_cran_lane(tmp_path, pixi_bin, monkeypatch):
+    w, sid = cold_session(tmp_path, pixi_bin)
+    out = w.ensure_available({"session": sid}, ["numpy"],
+                             lanes=["conda"],
+                             cran_repos=["https://r.example.org"])
+    assert out["error"] == "task.invalid"
+    out2 = w.ensure_available({"session": sid}, {"pypi": ["numpy"]},
+                              cran_repos=["https://r.example.org"])
+    assert out2["error"] == "task.invalid"
+
+
+def test_cran_repos_hostile_urls_refused_at_intake(tmp_path, pixi_bin):
+    """Malformed-input lane: the URLs later render into R code — refuse
+    at intake, never accept-and-mangle."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    for bad in (["ftp://mirror.example"],           # not http(s)
+                ["https://r.example.org/\nevil"],   # container-breaking
+                "https://r.example.org",            # not a list
+                [42]):
+        out = w.ensure_available({"session": sid}, {"cran": ["pkgA"]},
+                                 cran_repos=bad)
+        assert out["error"] == "task.invalid", bad
+        out2 = w.session_install(sid, cran=["pkgA"], cran_repos=bad)
+        assert out2["error"] == "task.invalid", bad
+
+
+def test_probe_with_secondary_repos_is_unknown_never_false(tmp_path,
+                                                           pixi_bin):
+    """crandb indexes CRAN only: with extra repositories the cran probe
+    must answer unknown — a package living in the secondary registry
+    would otherwise probe FALSE, a lie an agent would rank on."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    out = w.ensure_available({"session": sid}, ["secretpkg"],
+                             lanes=["cran"], probe=True,
+                             cran_repos=["https://r.example.org"])
+    fact = out["candidates"]["secretpkg"]["cran"]
+    assert fact["available"] == "unknown"
+    assert "not probeable" in fact["reason"]
+
+
+def test_env_target_cran_repos_ride_the_spec(tmp_path, pixi_bin,
+                                             monkeypatch):
+    w, sid = cold_session(tmp_path, pixi_bin)
+    captured = {}
+    monkeypatch.setattr(
+        w, "env_ensure",
+        lambda spec: captured.update(spec) or {"env_id": "env:v1:kid"})
+    out = w.ensure_available({"env": ENV}, {"cran": ["pkgA"]},
+                             cran_repos=["https://r.example.org"])
+    assert out["satisfied"] is True
+    assert captured["r_repositories"] == ["https://r.example.org"]
+    out2 = w.ensure_available({"env": ENV}, {"pypi": ["numpy"]},
+                              cran_repos=["https://r.example.org"])
+    assert out2["error"] == "task.invalid"    # repos with no cran delta
+
+
+def test_env_target_site_verifies_now_against_ready_realization(
+        tmp_path, pixi_bin, monkeypatch):
+    """The re-extend shape (aba item 1): the result env already realized
+    on the site -> the claim is proven NOW, no realize forced, and the
+    envelope SAYS so (verified populated + verified_site)."""
+    from helpers_verify import marker, script_log
+    w, sid = cold_session(tmp_path, pixi_bin)
+    monkeypatch.setattr(w, "env_ensure", lambda spec: {"env_id": ENV})
+    script_log(monkeypatch, w, {"WEFT-VERIFY": marker("plotpkg")})
+    out = w.ensure_available({"env": ENV}, {"pypi": ["plotpkg"]},
+                             site="local")
+    assert out["satisfied"] is True and out["changed"] is False
+    assert out["verified"]["plotpkg"]["status"] == "passed"
+    assert out["verified_site"] == "local"
+    assert "verified now" in out["note"]
+
+
+def test_env_target_site_failing_claim_is_a_degraded_realization(
+        tmp_path, pixi_bin, monkeypatch):
+    from helpers_verify import marker, script_log
+    w, sid = cold_session(tmp_path, pixi_bin)
+    monkeypatch.setattr(w, "env_ensure", lambda spec: {"env_id": ENV})
+    script_log(monkeypatch, w,
+               {"WEFT-VERIFY": marker("plotpkg", ok=False)})
+    out = w.ensure_available({"env": ENV}, {"pypi": ["plotpkg"]},
+                             site="local")
+    assert out["error"] == "env.realize_failed"
+    assert out["hints"]["postcondition"] is True
+    assert "env_repair" in out["hints"]["levers"]
+    assert out["hints"]["env_id"] == ENV
+    assert out["hints"]["attempts"][0]["outcome"] == "solved"
+
+
+def test_env_target_site_unrealized_defers_and_says_so(tmp_path,
+                                                       pixi_bin,
+                                                       monkeypatch):
+    """A fresh child env has no realization anywhere: never realized on
+    the caller's clock — the note names the deferral, verified stays
+    empty (the machine discriminator aba relays to the agent)."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    monkeypatch.setattr(w, "env_ensure",
+                        lambda spec: {"env_id": "env:v1:neverbuilt"})
+    out = w.ensure_available({"env": ENV}, {"pypi": ["plotpkg"]},
+                             site="local")
+    assert out["satisfied"] is True
+    assert out["verified"] == {} and "verified_site" not in out
+    assert "not realized on 'local'" in out["note"]
+
+
+def test_env_target_site_unknown_oracle_keeps_enforcement_deferred(
+        tmp_path, pixi_bin, monkeypatch):
+    """Fail-closed: an oracle that cannot run is unknown, never a
+    verdict — the note keeps enforcement at realize."""
+    from helpers_verify import script_log
+    from weft.adapters.base import ShimResult
+    w, sid = cold_session(tmp_path, pixi_bin)
+    monkeypatch.setattr(w, "env_ensure", lambda spec: {"env_id": ENV})
+    script_log(monkeypatch, w,
+               {"WEFT-VERIFY": ShimResult(0, "garbage no marker", "")})
+    out = w.ensure_available({"env": ENV}, {"pypi": ["plotpkg"]},
+                             site="local")
+    assert out["satisfied"] is True
+    assert out["verified"]["plotpkg"]["status"] == "unknown"
+    assert "enforcement" in out["note"] and "realize" in out["note"]
+
+
+def test_site_on_session_target_refused_loudly(tmp_path, pixi_bin):
+    """site= is an env-target lever; silently ignoring it on a session
+    target would let a caller believe verify-now ran somewhere."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    out = w.ensure_available({"session": sid}, {"pypi": ["numpy"]},
+                             site="local")
+    assert out["error"] == "task.invalid"
+    assert "session" in out["detail"]
+
+
+def test_probe_cran_repos_without_cran_lane_refused(tmp_path, pixi_bin):
+    w, sid = cold_session(tmp_path, pixi_bin)
+    out = w.ensure_available({"session": sid}, ["numpy"],
+                             lanes=["pypi"], probe=True,
+                             cran_repos=["https://r.example.org"])
+    assert out["error"] == "task.invalid"

@@ -92,3 +92,43 @@ def test_schema_file_exists_and_versioned():
          "ensure_envelope.schema.json").read_text())
     assert schema["envelope_version"] == 1
     assert set(schema["attempt"]["outcome"].split("|")) == ATTEMPT_OUTCOMES
+
+
+def test_env_target_verify_now_envelopes_validate(tmp_path, pixi_bin,
+                                                  monkeypatch):
+    """The 2026-07-22 additive shapes (coordinated with aba's vendored
+    schema copy): env-target with site= — verified_site + populated
+    verified on the live path, absent + empty verified on the deferred
+    path; the note is the human twin of that discriminator."""
+    from helpers_verify import ENV
+    w, sid = cold_session(tmp_path, pixi_bin)
+    monkeypatch.setattr(w, "env_ensure", lambda spec: {"env_id": ENV})
+    script_log(monkeypatch, w, {"WEFT-VERIFY": marker("plotpkg")})
+    live = w.ensure_available({"env": ENV}, {"pypi": ["plotpkg"]},
+                              site="local")
+    check_success(live)
+    assert live["verified_site"] == "local" and live["verified"]
+    monkeypatch.setattr(w, "env_ensure",
+                        lambda spec: {"env_id": "env:v1:fresh"})
+    deferred = w.ensure_available({"env": ENV}, {"pypi": ["plotpkg"]},
+                                  site="local")
+    check_success(deferred)
+    assert "verified_site" not in deferred and deferred["verified"] == {}
+
+
+def test_ranked_cran_repositories_attempt_validates(tmp_path, pixi_bin,
+                                                    monkeypatch):
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    from weft.session import SessionManager
+    monkeypatch.setattr(
+        SessionManager, "install",
+        lambda self, session_id, adapter, cran=None, verify=None, **kw: {
+            "installed": {"cran": cran},
+            "verified": {"pkgA": {"status": "passed", "check": "loads"}},
+            "session_id": session_id})
+    out = w.ensure_available({"session": sid}, ["pkgA"], lanes=["cran"],
+                             cran_repos=["https://r.example.org"])
+    check_success(out)
+    att = next(a for a in out["attempts"] if a["lane"] == "cran")
+    assert att["repositories"] == ["https://r.example.org"]
