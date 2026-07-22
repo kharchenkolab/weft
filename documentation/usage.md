@@ -356,6 +356,16 @@ session — every later install takes the SAME lane (each resolve sees
 base + the existing layer), and mode mixing is refused, so mechanisms
 never switch or clash mid-session. On built-here bases nothing changes.
 
+`session_install(..., verify=...)` runs a POSTCONDITION in the
+composed runtime after the install — `verify=True` proves presence (and
+any `==`/`>=` pins) with per-ecosystem defaults; an explicit dict
+(`{"import": [...], "loads": [...], "versions": {name: "==X|>=X"}}`)
+states exactly what must hold. Failure is a typed
+`env.realize_failed` (`hints.postcondition: true`, got/want) and the
+entries are NOT recorded — the snapshot only carries what was proven.
+An oracle that could not run reports "unknown" (never failed/passed);
+those entries stay unrecorded and a re-install converges.
+
 **R is first-class**: `session_install(cran=[...])` composes a session
 `rlib` over the base via `R_LIBS` on ANY base, frozen or built-here.
 It speaks the spec's whole vocabulary — plain names, `"name ==X.Y.Z"`,

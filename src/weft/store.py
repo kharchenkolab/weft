@@ -938,6 +938,22 @@ class Store:
              session_id),
         )
 
+    def session_remove_deps(self, session_id: str, conda: list[str],
+                            pypi: list[str],
+                            cran: list[str] | None = None) -> None:
+        """Retract UNVERIFIED entries (record-gating: records exist
+        exactly when verification passed — an unverified record would
+        ride the snapshot into a minted env)."""
+        s = self.get_session(session_id)
+        self._write(
+            "UPDATE sessions SET added_conda=?, added_pypi=?, added_cran=?"
+            " WHERE session_id=?",
+            (_j([x for x in s["added_conda"] if x not in set(conda)]),
+             _j([x for x in s["added_pypi"] if x not in set(pypi)]),
+             _j([x for x in s["added_cran"] if x not in set(cran or [])]),
+             session_id),
+        )
+
     def set_session_state(self, session_id: str, state: str) -> None:
         self._write(
             "UPDATE sessions SET state=? WHERE session_id=?", (state, session_id)

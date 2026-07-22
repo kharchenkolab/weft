@@ -550,6 +550,126 @@ class SessionManager:
             out["pin_notes"] = pin_notes      # honest: pins are recorded,
         return out                            # not enforced, until snapshot
 
+    def _postconditions(self, session_id: str, adapter: SiteAdapter,
+                        out: dict, eff: dict, conda: list[str],
+                        pypi: list[str], cran: list[str]) -> dict:
+        """Run the postcondition in the composed runtime and GATE the
+        records: entries whose verification did not PASS are retracted
+        from the session's recorded deps (the disk residue stays —
+        idempotent scratch; the snapshot must only carry what is true).
+        A crash between record and retraction leaves an unverified
+        record for one call — the P3 claim + pre-check heal that
+        window. failed => typed error (the caller asked for proof);
+        unknown-only => success with the packages unrecorded (re-install
+        converges: late-record)."""
+        from .spec import parse_cran_dep, split_constraint
+        from .verify import (default_checks, explicit_checks, run_verify,
+                             usable_want)
+        s = self._get(session_id)
+        requested = {"conda": conda, "pypi": pypi, "cran": cran}
+        lanes: dict[str, tuple[list, dict, dict]] = {}
+        for eco in ("conda", "pypi"):
+            names, pins, by_name = [], {}, {}
+            for e in requested[eco]:
+                n, c = split_constraint(e)
+                names.append(n)
+                by_name[n] = e
+                if usable_want(c):
+                    pins[n] = c.strip()
+            lanes[eco] = (names, pins, by_name)
+        names, pins, by_name = [], {}, {}
+        refs = []
+        for e in requested["cran"]:
+            p = parse_cran_dep(e)
+            if p["kind"] == "github":
+                refs.append(e)
+                continue
+            names.append(p["name"])
+            by_name[p["name"]] = e
+            if p["version"]:
+                pins[p["name"]] = f'=={p["version"]}'
+        resolved = list(out.get("resolved") or [])
+        if refs and len(resolved) == len(refs):
+            for rname, rentry in zip(resolved, refs):
+                names.append(rname)
+                by_name[rname] = rentry     # verify keys on RESOLVED name
+        else:
+            names += resolved               # coarse: any ref failure
+            for rname in resolved:          # retracts all refs below
+                by_name[rname] = None
+        lanes["cran"] = (names, pins, by_name)
+
+        if eff:
+            lane_of = {n: "cran" for n in lanes["cran"][0]}
+            lane_of.update({n: "conda" for n in lanes["conda"][0]})
+            checks = explicit_checks(eff, lane_of)
+        else:
+            checks = []
+            for eco in ("conda", "pypi", "cran"):
+                nm, pn, _ = lanes[eco]
+                checks += default_checks(eco, nm, pn)
+        by_oracle: dict[str, list] = {"cran": [], "conda": [], "pypi": []}
+        for c in checks:
+            oracle = {"loads": "cran", "conda_meta": "conda"}.get(
+                c["kind"], "pypi")
+            by_oracle[oracle].append(c)
+        fn = self._verify_exec_fn(s, adapter)
+        verified: dict[str, dict] = {}
+        for oracle, group in by_oracle.items():
+            verified.update(run_verify(fn, oracle, group))
+
+        not_passed = {n for n, r in verified.items()
+                      if r["status"] != "passed"}
+        retract: dict[str, list] = {"conda": [], "pypi": [], "cran": []}
+        for eco in ("conda", "pypi", "cran"):
+            _, _, by_name = lanes[eco]
+            for n in not_passed:
+                if n in by_name:
+                    e = by_name[n]
+                    if e is None:           # coarse ref mapping
+                        retract[eco] = [x for x in requested[eco]
+                                        if "/" in x.partition("@")[0]]
+                    elif e not in retract[eco]:
+                        retract[eco].append(e)
+        if any(retract.values()):
+            self.store.session_remove_deps(session_id, retract["conda"],
+                                           retract["pypi"],
+                                           retract["cran"])
+        self.store.emit(
+            "session.verified", session=session_id,
+            passed=sorted(n for n, r in verified.items()
+                          if r["status"] == "passed"),
+            failed=sorted(n for n, r in verified.items()
+                          if r["status"] == "failed"),
+            unknown=sorted(n for n, r in verified.items()
+                           if r["status"] == "unknown"))
+        failed = {n: r for n, r in verified.items()
+                  if r["status"] == "failed"}
+        if failed:
+            raise WeftError(
+                "env.realize_failed",
+                f"postcondition failed for {sorted(failed)} — installed "
+                f"but not proven (wrong version, wrong package, or "
+                f"broken load)",
+                stage="realize",
+                hints={"postcondition": True, "verified": verified,
+                       "retracted": {k: v for k, v in retract.items()
+                                     if v},
+                       "runtime": out.get("runtime"),
+                       "note": "retracted entries are NOT in the "
+                               "session record; the disk residue is "
+                               "scratch and a snapshot will not carry "
+                               "it"})
+        out["verified"] = verified
+        unknown = [n for n, r in verified.items()
+                   if r["status"] == "unknown"]
+        if unknown:
+            out["unverified_note"] = (
+                f"{sorted(unknown)} could not be verified (oracle could "
+                f"not run) and are NOT recorded — re-running the install "
+                f"converges once verification succeeds (late-record)")
+        return out
+
     def _base_cold(self, s: dict, adapter: SiteAdapter) -> bool:
         """Is the base's package cache COLD on this site? An adopted
         (read-only) or archive-unpacked (packed) realization was never
@@ -763,17 +883,34 @@ class SessionManager:
             self.store.touch_session(session_id)
         return s
 
+    def _composed(self, s: dict, adapter: SiteAdapter) -> tuple[str, bool]:
+        """The ONE composition rule for every consumer (exec, kernels
+        via driver, the verify oracle): interpreter-stack activation,
+        then overlay.sh when any layer exists (pylib PYTHONPATH, rlib
+        R_LIBS). The verify oracle MUST run through this — anything
+        else verifies a different world than user code sees."""
+        main, ns = self._stack_activation(s, adapter)
+        overlay = adapter.path(f"{s['location']}/overlay.sh")
+        return (f"{main} && {{ [ -f {shlex.quote(overlay)} ] && "
+                f". {shlex.quote(overlay)}; true; }}"), ns
+
+    def _verify_exec_fn(self, s: dict, adapter: SiteAdapter):
+        pre, ns = self._composed(s, adapter)
+
+        def run(script: str, timeout: float):
+            full = f"{pre} && ( {script} )"
+            if ns:
+                from .realize import _ns_wrap_cmd
+                full = _ns_wrap_cmd(full)
+            return adapter.run_cmd(full, timeout=timeout)
+
+        return run
+
     def exec(self, session_id: str, adapter: SiteAdapter, cmd: str) -> dict:
         s = self._get(session_id)
         sdir = shlex.quote(adapter.path(s["location"]))
-        # ONE composition rule for every mode: interpreter-stack
-        # activation (clone prefix or base realization), then overlay.sh
-        # when any layer exists (pylib PYTHONPATH, rlib R_LIBS)
-        main, ns = self._stack_activation(s, adapter)
-        overlay = adapter.path(f"{s['location']}/overlay.sh")
-        script = (f"cd {sdir} && {main} && "
-                  f"{{ [ -f {shlex.quote(overlay)} ] && "
-                  f". {shlex.quote(overlay)}; true; }} && ( {cmd} )")
+        pre, ns = self._composed(s, adapter)
+        script = f"cd {sdir} && {pre} && ( {cmd} )"
         if ns:
             from .realize import _ns_wrap_cmd
             script = _ns_wrap_cmd(script)
@@ -788,7 +925,37 @@ class SessionManager:
                 pypi: list[str] | None = None, fast: bool = True,
                 full_clone: bool = False,
                 cran: list[str] | None = None,
-                cran_repos: list[str] | None = None) -> dict:
+                cran_repos: list[str] | None = None,
+                verify=None) -> dict:
+        """Public entry: the install flow, then (when verify= is on)
+        the POSTCONDITION phase in the composed runtime, with record-
+        gating — records exist exactly when verification passed
+        (ensure_available P1). verify=None/False is byte-identical to
+        the pre-verify contract."""
+        eff = None
+        if verify not in (None, False):
+            from .verify import validate_verify
+            eff = validate_verify(verify)
+        out = self._install_inner(session_id, adapter, conda=conda,
+                                  pypi=pypi, fast=fast,
+                                  full_clone=full_clone, cran=cran,
+                                  cran_repos=cran_repos)
+        if eff is None:
+            return out
+        # postconditions key on the ORIGINAL request entries — the
+        # result's installed lists are normalized (pins stripped), and
+        # the records to gate hold the original strings
+        return self._postconditions(session_id, adapter, out, eff,
+                                    conda=list(conda or []),
+                                    pypi=list(pypi or []),
+                                    cran=list(cran or []))
+
+    def _install_inner(self, session_id: str, adapter: SiteAdapter,
+                       conda: list[str] | None = None,
+                       pypi: list[str] | None = None, fast: bool = True,
+                       full_clone: bool = False,
+                       cran: list[str] | None = None,
+                       cran_repos: list[str] | None = None) -> dict:
         """Add packages to the session. pypi-only requests take a FAST
         PATH by default: a direct pip/uv install into the session prefix
         — no re-solve of the whole manifest (which dominates a one-leaf
@@ -979,7 +1146,8 @@ class SessionManager:
     def run_installer(self, session_id: str, adapter: SiteAdapter, cmd: str,
                       note: str = "", source: str | None = None,
                       full_clone: bool = False,
-                      writes_to: str | None = None) -> dict:
+                      writes_to: str | None = None,
+                      verify=None) -> dict:
         """The bespoke install that no index can express — an R
         install.packages, a pip install -e, a vendored make install. A
         normal, supported move: it runs in the session AND is captured, so
@@ -1085,6 +1253,53 @@ class SessionManager:
                 "python kernels see its packages on their next block "
                 "(forward hook); R/julia kernels attached before this "
                 "need kernel_restart")
+        if verify not in (None, False):
+            # a bespoke cmd has no derivable defaults — weft cannot know
+            # what it was supposed to produce; EXPLICIT checks only
+            from .verify import (explicit_checks, run_verify,
+                                 validate_verify)
+            eff = validate_verify(verify)
+            if not eff:
+                raise WeftError(
+                    "task.invalid",
+                    "run_installer verify must be explicit — weft "
+                    "cannot derive a postcondition from an arbitrary "
+                    "command",
+                    stage="realize",
+                    hints={"example": {"loads": ["<pkg>"],
+                                       "import": ["<module>"],
+                                       "versions": {"<name>": ">=1.0"}}})
+            lane_of = {n: "cran" for n in eff.get("loads", [])}
+            checks = explicit_checks(eff, lane_of)
+            fn = self._verify_exec_fn(s, adapter)
+            verified: dict = {}
+            for oracle in ("cran", "pypi"):
+                group = [c for c in checks
+                         if ({"loads": "cran"}.get(c["kind"], "pypi")
+                             == oracle)]
+                verified.update(run_verify(fn, oracle, group))
+            out["verified"] = verified
+            failed = {n: r for n, r in verified.items()
+                      if r["status"] == "failed"}
+            self.store.emit("session.verified", session=session_id,
+                            passed=sorted(n for n, r in verified.items()
+                                          if r["status"] == "passed"),
+                            failed=sorted(failed),
+                            unknown=sorted(
+                                n for n, r in verified.items()
+                                if r["status"] == "unknown"))
+            if failed:
+                raise WeftError(
+                    "env.realize_failed",
+                    f"installer postcondition failed for "
+                    f"{sorted(failed)}",
+                    stage="realize",
+                    hints={"postcondition": True, "verified": verified,
+                           "runtime": out.get("runtime"),
+                           "note": "the installer step IS captured "
+                                   "(snapshot carries it); the "
+                                   "postcondition proves it did not "
+                                   "produce what you asserted"})
         return out
 
     def snapshot(self, session_id: str, name: str | None = None,

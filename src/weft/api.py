@@ -1131,7 +1131,8 @@ class Weft:
                         pypi: list[str] | None = None,
                         fast: bool = True, full_clone: bool = False,
                         cran: list[str] | None = None,
-                        cran_repos: list[str] | None = None) -> dict:
+                        cran_repos: list[str] | None = None,
+                        verify=None) -> dict:
         """Add packages to the session. Captured, so a snapshot carries
         them into the spec. pypi-only adds skip the full manifest
         re-solve by default (direct uv/pip into the scratch prefix —
@@ -1156,12 +1157,13 @@ class Weft:
         return self.sessions.install(
             session_id, self._session_adapter(session_id), conda, pypi,
             fast=fast, full_clone=full_clone, cran=cran,
-            cran_repos=cran_repos)
+            cran_repos=cran_repos, verify=verify)
 
     def session_run_installer(self, session_id: str, cmd: str,
                               note: str = "", source: str | None = None,
                               full_clone: bool = False,
-                              writes_to: str | None = None) -> dict:
+                              writes_to: str | None = None,
+                              verify=None) -> dict:
         """Run a bespoke install that no index expresses (R
         install.packages, pip install -e, a vendored make install). A normal
         move — it is captured and a snapshot carries it as a labeled
@@ -1176,7 +1178,7 @@ class Weft:
         session_install when the addition fits."""
         return self.sessions.run_installer(
             session_id, self._session_adapter(session_id), cmd, note, source,
-            full_clone=full_clone, writes_to=writes_to)
+            full_clone=full_clone, writes_to=writes_to, verify=verify)
 
     def session_snapshot(self, session_id: str, name: str | None = None,
                          notes: list[str] | None = None,

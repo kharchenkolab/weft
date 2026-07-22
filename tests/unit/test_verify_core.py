@@ -157,3 +157,28 @@ def test_python_script_never_interpolates_raw_names():
     s = python_verify_script([{"name": "scikit-learn", "kind": "metadata",
                                "want": None}])
     assert "scikit-learn" in s and "json.loads" in s
+
+
+def test_conda_meta_oracle_end_to_end(tmp_path, monkeypatch):
+    """conda packages that are not python dists (no importlib metadata):
+    the conda-meta record is the installed fact; the digit-anchored glob
+    keeps a prefix-name sibling from matching."""
+    import os
+    import subprocess
+    from weft.verify import sh_conda_verify_script
+    meta = tmp_path / "conda-meta"
+    meta.mkdir()
+    (meta / "xz-5.4.6-h1234_0.json").write_text("{}")
+    (meta / "xz-utils-9.9-h0_0.json").write_text("{}")   # sibling
+    checks = [{"name": "xz", "kind": "conda_meta", "want": ">=5.0"},
+              {"name": "absent", "kind": "conda_meta", "want": None}]
+    r = subprocess.run(["sh", "-c", sh_conda_verify_script(checks)],
+                       capture_output=True, text=True,
+                       env={**os.environ, "CONDA_PREFIX": str(tmp_path)})
+    res = parse_verify_output(r.stdout, r.returncode, checks)
+    assert res["xz"]["status"] == "passed" and res["xz"]["got"] == "5.4.6"
+    assert res["absent"]["status"] == "failed"
+
+
+def test_default_checks_conda_routes_to_conda_meta():
+    assert default_checks("conda", ["cmake"])[0]["kind"] == "conda_meta"

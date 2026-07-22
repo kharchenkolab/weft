@@ -67,6 +67,14 @@ def validate_verify(v) -> dict:
     return out
 
 
+def usable_want(spec: str) -> bool:
+    """Is a dep constraint usable as a verify want? Only the verify
+    grammar (==X.Y.Z / >=X.Y, no wildcards) — an unusable want must be
+    DROPPED, not passed through: it would land 'unknown' at the
+    comparator and record-gating would retract a good install."""
+    return bool(_VERSION_RE.fullmatch(spec.strip()))
+
+
 def _vtuple(s: str) -> tuple | None:
     """Naive comparable form: dashes normalized to dots, numeric parts
     as ints, alpha tails kept as strings. None = incomparable."""
@@ -107,7 +115,7 @@ def default_checks(lane: str, packages: list[str],
     so no import is attempted implicitly). cran: library() load, keyed
     on the RESOLVED name for refs (63b6199). Pins become versions."""
     pins = pins or {}
-    kind = "loads" if lane == "cran" else "metadata"
+    kind = {"cran": "loads", "conda": "conda_meta"}.get(lane, "metadata")
     return [{"name": p, "kind": kind, "want": pins.get(p)}
             for p in packages]
 
@@ -175,6 +183,29 @@ def r_verify_script(checks: list[dict]) -> str:
         "}\n")
 
 
+def sh_conda_verify_script(checks: list[dict]) -> str:
+    """Presence oracle for conda packages that are not python dists
+    (cmake has no importlib metadata): the conda-meta record IS the
+    installed fact. Filename shape <name>-<version>-<build>.json; the
+    glob anchors the version at a digit so a prefix-name sibling
+    (name- vs name-extra-) cannot match. Names are _NAME_OK-validated
+    upstream."""
+    lines = []
+    for c in checks:
+        n = c["name"]
+        lines.append(
+            f'f=$(ls "$CONDA_PREFIX"/conda-meta/{n}-[0-9]*.json '
+            f'2>/dev/null | head -1); '
+            f'if [ -n "$f" ]; then v=$(basename "$f" .json); '
+            f'v=${{v#{n}-}}; v=${{v%-*}}; '
+            f'echo \'{MARKER}\'\'{{"name": "{n}", "kind": "conda_meta", '
+            f'"ok": true, "got": "\'"$v"\'"}}\'; '
+            f'else echo \'{MARKER}\'\'{{"name": "{n}", '
+            f'"kind": "conda_meta", "ok": false, '
+            f'"reason": "no conda-meta record"}}\'; fi')
+    return "\n".join(lines)
+
+
 def parse_verify_output(out: str, rc: int,
                         checks: list[dict]) -> dict[str, dict]:
     """Marker lines -> per-check results, fail-closed: rc != 0 -> ALL
@@ -226,6 +257,8 @@ def run_verify(exec_fn, lane: str, checks: list[dict],
         return {}
     if lane == "cran":
         script = f"Rscript -e {_shquote(r_verify_script(checks))}"
+    elif lane == "conda":
+        script = sh_conda_verify_script(checks)     # plain sh, no interp
     else:
         script = f"python -c {_shquote(python_verify_script(checks))}"
     try:
