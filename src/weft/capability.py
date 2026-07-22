@@ -94,19 +94,17 @@ def gpu_count(caps: dict) -> int:
 
 
 def slurm_time_to_s(t: str) -> float | None:
-    """'1-00:00:00', '4:00:00', '30:00', 'infinite' -> seconds (None = no limit)."""
-    t = (t or "").strip().lower()
-    if not t or t in ("infinite", "unlimited", "n/a"):
+    """'1-00:00:00', '4:00:00', '30:00', 'infinite' -> seconds (None =
+    no limit). ONE grammar with the poller and task intake
+    (runner_util.walltime_to_s); this wrapper never raises — it parses
+    PROBE data (sinfo output), where an unparseable token is unknown,
+    not a caller error."""
+    from .errors import WeftError
+    from .runner_util import walltime_to_s
+    try:
+        return walltime_to_s(t)
+    except WeftError:
         return None
-    days = 0
-    if "-" in t:
-        d, t = t.split("-", 1)
-        days = int(d)
-    parts = [int(p) for p in t.split(":")]
-    while len(parts) < 3:
-        parts.insert(0, 0)
-    h, m, s = parts[-3:]
-    return days * 86400 + h * 3600 + m * 60 + s
 
 
 def satisfies_resources(caps: dict, resources: dict, partitions: list[dict] | None = None) -> tuple[bool, dict]:

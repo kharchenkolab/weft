@@ -57,10 +57,11 @@ class Task:
     site: str = "auto"
     array: int | None = None          # N elements; WEFT_ARRAY_INDEX in [0, N)
     env_vars: dict[str, str] = field(default_factory=dict)
-    # control-flow chaining: job_ids that must finish (DONE) first. The
-    # scheduler holds the job natively where it can (sbatch --dependency);
-    # weft holds it controller-side elsewhere. NOT part of task_hash:
-    # dependencies say WHEN a task may run, not WHAT it computes.
+    # control-flow chaining: job_ids that must finish (DONE) first —
+    # held CONTROLLER-side on every site kind (no sbatch --dependency
+    # translation exists; one holder, one grammar). NOT part of
+    # task_hash: dependencies say WHEN a task may run, not WHAT it
+    # computes.
     after: list[str] = field(default_factory=list)
     # human handle for lists/events ("calibrate run 3"), ≤200 chars. NOT
     # part of task_hash: a label says what to CALL a task, not what it
@@ -158,6 +159,11 @@ class Task:
                 )
         if self.array is not None and self.array < 1:
             raise WeftError("task.invalid", "array must be >= 1", stage="submit")
+        if self.resources.walltime:
+            # one grammar (slurm's --time); an unparseable walltime used
+            # to crash the POLLER mid-tick instead of refusing at submit
+            from .runner_util import walltime_to_s
+            walltime_to_s(self.resources.walltime)
         refs = [i.ref for i in self.inputs] + ([self.code.ref] if self.code else [])
         for r in refs:
             if not r.startswith("dref:"):

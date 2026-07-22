@@ -93,3 +93,14 @@ def test_cran_layer_realizes_and_runs(w):
     assert out["preview"]["lines"] == ['{"ok":[true]}']
     kinds = [e["kind"] for e in w.events_poll(0, 800, compact=False)["events"]]
     assert "realize.layer" in kinds and "realize.layer.done" in kinds
+
+
+def test_subdir_ref_resolves_live():
+    """The founding vocabulary split: a monorepo R package
+    (dmlc/xgboost's R-package subdir) resolves against the LIVE api —
+    this exact shape was a 404 misdiagnosed as an unresolvable repo."""
+    from weft.solvers import CranSolver
+    got = CranSolver._github_resolve("dmlc/xgboost", "HEAD", "R-package")
+    assert got["name"] == "xgboost"
+    assert got["subdir"] == "R-package"
+    assert got["sha"]

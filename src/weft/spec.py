@@ -68,6 +68,44 @@ def relax_dep(dep: str) -> str:
     return split_constraint(dep)[0]
 
 
+def parse_cran_dep(dep: str) -> dict:
+    """THE grammar for R dep strings — every lane parses with this one
+    function, forwarding lanes included (a vocabulary with two parsers
+    is a bug in waiting: subdir refs installed fine in sessions via
+    remotes' grammar and 404'd in solves; same-owner refs collapsed in
+    extends merges — 2026-07 vocabulary sweep).
+
+    Shapes: 'name', 'name ==X.Y.Z', 'owner/repo@ref',
+    'owner/repo/sub/dir@ref' (nested subdir, remotes' grammar; ref
+    optional -> HEAD; a branch name may contain '/' AFTER the '@')."""
+    dep = dep.strip()
+    if "/" in dep.partition("@")[0]:
+        path, _, ref = dep.partition("@")
+        segs = path.split("/")
+        if len(segs) < 2 or not all(segs) or " " in path:
+            raise WeftError(
+                "task.invalid", f"cannot parse github ref {dep!r}",
+                stage="solve",
+                hints={"expected": "owner/repo[/subdir...][@ref]"})
+        return {"kind": "github", "repo": "/".join(segs[:2]),
+                "subdir": "/".join(segs[2:]) or None,
+                "ref": ref or "HEAD"}
+    parts = dep.split()
+    if len(parts) == 1:
+        return {"kind": "cran", "name": parts[0], "version": None}
+    name, constraint = parts[0], " ".join(parts[1:])
+    if constraint.startswith("=="):
+        return {"kind": "cran", "name": name,
+                "version": constraint[2:].strip()}
+    raise WeftError(
+        "task.invalid", f"cran constraint {dep!r} not supported",
+        stage="solve",
+        hints={"supported": ["name", "name ==X.Y.Z",
+                             "owner/repo[/subdir]@ref"],
+               "note": "the dated snapshot already freezes versions — "
+                       "ranges have no meaning against it"})
+
+
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # conda platform subdirs: linux-64, osx-arm64, win-64, linux-aarch64,
 # noarch... — anything else (dots, brackets, quotes) would land RAW in a
@@ -80,13 +118,20 @@ def _dep_key(eco: str, dep: str) -> str:
     """Collision key for one dep within a lane. conda names are
     case-insensitive; pypi normalizes per PEP 503; cran/julia/... are
     case-SENSITIVE ecosystems (Matrix != matrix), so their key is the
-    exact name — and a github ref is its whole string."""
+    exact name — and a github ref keys by its SOURCE (repo+subdir):
+    the same package at two refs is still the same package twice."""
     if eco == "conda":
         return split_constraint(dep)[0]
     if eco == "pypi":
         return re.sub(r"[-_.]+", "-", split_constraint(dep)[0])
     d = strip_soft(dep).strip()
-    return d if "/" in d else d.split()[0]
+    if "/" in d.partition("@")[0]:
+        try:
+            p = parse_cran_dep(d)
+            return p["repo"] + (f"/{p['subdir']}" if p["subdir"] else "")
+        except WeftError:
+            return d
+    return d.split()[0]
 
 
 def refuse_duplicate_deps(eco: str, deps: list[str],
@@ -113,11 +158,17 @@ def refuse_duplicate_deps(eco: str, deps: list[str],
         seen[key] = dep
 
 
-def _merge_deps(parent: list[str], child: list[str]) -> list[str]:
+def _merge_deps(parent: list[str], child: list[str],
+                eco: str = "conda") -> list[str]:
+    """Child-wins merge, keyed per ECOSYSTEM — keying every lane with
+    split_constraint (whose name regex stops at '/' and lowercases)
+    silently collapsed same-owner github refs to the OWNER and unified
+    case-distinct R packages during extends/snapshot merges (2026-07
+    vocabulary sweep #1: a minted EnvID lost a declared package)."""
     merged = list(parent)
-    index = {split_constraint(d)[0]: i for i, d in enumerate(merged)}
+    index = {_dep_key(eco, d): i for i, d in enumerate(merged)}
     for dep in child:
-        name, _ = split_constraint(dep)
+        name = _dep_key(eco, dep)
         if name in index:
             merged[index[name]] = dep
         else:
@@ -305,17 +356,19 @@ class EnvSpec:
         }
         for plat, v in self.variants.items():
             base = variants.setdefault(plat, {"conda": [], "pypi": []})
-            base["conda"] = _merge_deps(base["conda"], v.get("conda", []))
-            base["pypi"] = _merge_deps(base["pypi"], v.get("pypi", []))
+            base["conda"] = _merge_deps(base["conda"], v.get("conda", []),
+                                        "conda")
+            base["pypi"] = _merge_deps(base["pypi"], v.get("pypi", []),
+                                       "pypi")
         return EnvSpec(
             name=self.name if self.name != "unnamed" else parent.name,
             platforms=_prepend_unique(parent.platforms, self.platforms),
             channels=_prepend_unique(self.channels, parent.channels),
-            conda=_merge_deps(parent.conda, self.conda),
-            pypi=_merge_deps(parent.pypi, self.pypi),
+            conda=_merge_deps(parent.conda, self.conda, "conda"),
+            pypi=_merge_deps(parent.pypi, self.pypi, "pypi"),
             deps_extra={
                 eco: _merge_deps(parent.deps_extra.get(eco, []),
-                                 self.deps_extra.get(eco, []))
+                                 self.deps_extra.get(eco, []), eco)
                 for eco in {**parent.deps_extra, **self.deps_extra}
             },
             variants=variants,

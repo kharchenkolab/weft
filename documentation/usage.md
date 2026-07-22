@@ -472,7 +472,8 @@ env = w.env_ensure({
     "deps": {"conda": ["r-base =4.4"],                  # interpreter layer
              "cran": ["data.table",                     # snapshot-locked
                       "jsonlite ==2.0.1",               # exact assertion
-                      "lab/pkg@fix-branch"]},           # github → pinned SHA
+                      "lab/pkg@fix-branch",             # github → pinned SHA
+                      "lab/mono/rpkg@v2"]},             # package in a subdir
     "system_requirements": {"cran_snapshot": "2026-07-01"},  # frozen forever
 })
 # omitted cran_snapshot defaults to UTC-today − 2 (concrete date, recorded

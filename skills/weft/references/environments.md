@@ -126,6 +126,7 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     composed via `R_LIBS`, delta-only on ANY base (R skips
     base-satisfied deps natively; no clone, mode never flips). Takes
     the SPEC's vocabulary: names, `"name ==X.Y.Z"`, `"owner/repo@ref"`
+    (and `"owner/repo/subdir@ref"` for packages in a subfolder)
     github refs (SHA-pinned at snapshot), plus `cran_repos=[url]` for
     extra repositories (emitted as `r_repositories`). Running R
     kernels see it on the next `library()` call. Snapshot carries

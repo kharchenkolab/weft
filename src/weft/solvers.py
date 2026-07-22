@@ -156,27 +156,16 @@ class CranSolver:
 
     @staticmethod
     def _parse(dep: str) -> dict:
-        dep = dep.strip()
-        if "/" in dep:
-            repo, _, ref = dep.partition("@")
-            return {"kind": "github", "repo": repo, "ref": ref or "HEAD"}
-        parts = dep.split()
-        if len(parts) == 1:
-            return {"kind": "cran", "name": parts[0], "version": None}
-        name, constraint = parts[0], " ".join(parts[1:])
-        if constraint.startswith("=="):
-            return {"kind": "cran", "name": name,
-                    "version": constraint[2:].strip()}
-        raise WeftError(
-            "task.invalid", f"cran constraint {dep!r} not supported",
-            stage="solve",
-            hints={"supported": ["name", "name ==X.Y.Z", "owner/repo@ref"],
-                   "suggestion": "the snapshot date pins everything else; "
-                                 "use ==X.Y.Z only to assert an expectation"},
-        )
+        # ONE grammar for the whole vocabulary — spec.parse_cran_dep.
+        # This lane's private parser split on the FIRST '/', turned
+        # owner/repo/subdir@ref into a three-segment "repo", and
+        # reported the resulting 404 as an unresolvable repository
+        # (2026-07 field note: a live public repo declared missing).
+        from .spec import parse_cran_dep
+        return parse_cran_dep(dep)
 
     @staticmethod
-    def _github_resolve(repo: str, ref: str) -> dict:
+    def _github_resolve(repo: str, ref: str, subdir: str | None = None) -> dict:
         import json as _json
         import urllib.request
 
@@ -185,50 +174,68 @@ class CranSolver:
             return urllib.request.urlopen(req, timeout=30).read()
 
         import urllib.error
+
+        def transient(e, what):
+            return WeftError(
+                "env.solve_failed",
+                f"github {what} resolving {repo}@{ref}",
+                stage="solve", retryable=True,
+                hints={"ecosystem": "cran",
+                       **({"http_status": e.code}
+                          if isinstance(e, urllib.error.HTTPError) else {}),
+                       "solver_message": str(e)[-300:],
+                       "suggestion": "rate-limited, server-side, or "
+                                     "network trouble from the "
+                                     "controller; retry later"})
+
+        _GONE = (404, 410, 422)
+        # TWO different 404s, two different verdicts: the commits API
+        # failing means the repo/ref is not there; DESCRIPTION failing
+        # with a LIVE repo/ref means the package is not where we looked
+        # — which, before subdir support, misdiagnosed every
+        # subdirectory package as an unresolvable repository
         try:
             sha = _json.loads(
                 get(f"https://api.github.com/repos/{repo}/commits/{ref}")
             )["sha"]
-            desc = get(
-                f"https://raw.githubusercontent.com/{repo}/{sha}/DESCRIPTION"
-            ).decode()
         except urllib.error.HTTPError as e:
-            if e.code in (404, 410, 422):
-                # the repo/ref genuinely is not there — a spec problem
+            if e.code in _GONE:
                 raise WeftError(
                     "env.solve_conflict",
-                    f"cannot resolve github ref {repo}@{ref}",
+                    f"cannot resolve github ref {repo}@{ref} — the "
+                    f"repo or ref does not exist (or is private)",
                     stage="solve",
                     hints={"ecosystem": "cran",
                            "user_pins": [f"{repo}@{ref}"],
                            "http_status": e.code,
                            "solver_message": str(e)[-300:],
-                           "suggestion": "check repo/ref exist and are "
-                                         "public; an R package needs "
-                                         "DESCRIPTION at root"},
+                           "suggestion": "check owner/repo spelling and "
+                                         "that the ref exists"},
                 ) from e
-            # rate limits / 5xx: github's problem, not the spec's —
-            # calling this "unsatisfiable" told agents to change a
-            # correct pin (envman.py warns against exactly this)
-            raise WeftError(
-                "env.solve_failed",
-                f"github api error resolving {repo}@{ref}",
-                stage="solve", retryable=True,
-                hints={"ecosystem": "cran", "http_status": e.code,
-                       "solver_message": str(e)[-300:],
-                       "suggestion": "rate-limited or server-side "
-                                     "trouble; retry later"},
-            ) from e
+            raise transient(e, "api error") from e
         except Exception as e:
-            raise WeftError(
-                "env.solve_failed",
-                f"github unreachable resolving {repo}@{ref}",
-                stage="solve", retryable=True,
-                hints={"ecosystem": "cran",
-                       "solver_message": str(e)[-300:],
-                       "suggestion": "network/proxy from the controller; "
-                                     "retry when connectivity returns"},
-            ) from e
+            raise transient(e, "unreachable") from e
+        where = f"{subdir}/DESCRIPTION" if subdir else "DESCRIPTION"
+        try:
+            desc = get(f"https://raw.githubusercontent.com/{repo}/{sha}/"
+                       f"{where}").decode()
+        except urllib.error.HTTPError as e:
+            if e.code in _GONE:
+                raise WeftError(
+                    "env.solve_conflict",
+                    f"{repo}@{ref} exists, but there is no DESCRIPTION "
+                    f"at {subdir or 'the repository root'}",
+                    stage="solve",
+                    hints={"ecosystem": "cran",
+                           "user_pins": [f"{repo}@{ref}"],
+                           "http_status": e.code,
+                           "suggestion": "if the package lives in a "
+                                         "subfolder, say "
+                                         "owner/repo/subdir@ref"},
+                ) from e
+            raise transient(e, "api error") from e
+        except Exception as e:
+            raise transient(e, "unreachable") from e
         fields = {}
         key = None
         for line in desc.splitlines():
@@ -245,7 +252,7 @@ class CranSolver:
                     deps.append(nm)
         return {"name": fields.get("Package", repo.split("/")[-1]),
                 "version": fields.get("Version", ""), "sha": sha,
-                "repo": repo, "ref": ref, "deps": deps}
+                "repo": repo, "ref": ref, "subdir": subdir, "deps": deps}
 
     # -- Solver interface --------------------------------------------------------
 
@@ -322,7 +329,7 @@ class CranSolver:
         import json as _json
         workdir.mkdir(parents=True, exist_ok=True)
         parsed = [self._parse(d) for d in deps]
-        gh = [self._github_resolve(p["repo"], p["ref"])
+        gh = [self._github_resolve(p["repo"], p["ref"], p.get("subdir"))
               for p in parsed if p["kind"] == "github"]
         cran_direct = [p for p in parsed if p["kind"] == "cran"]
         want = [p["name"] for p in cran_direct] + \
@@ -417,7 +424,12 @@ class CranSolver:
         for g in gh:
             records.append({
                 "name": g["name"], "version": g["version"],
-                "source": f'github:{g["repo"]}@{g["ref"]}',
+                "source": f'github:{g["repo"]}'
+                          + (f'/{g["subdir"]}' if g.get("subdir") else "")
+                          + f'@{g["ref"]}',
+                # subdir rides the record so every install site knows the
+                # package is NOT at the tarball root (whole-repo tarball)
+                **({"subdir": g["subdir"]} if g.get("subdir") else {}),
                 "remote_sha": g["sha"], "sha256": "",
                 "tarball": f'https://codeload.github.com/{g["repo"]}'
                            f'/tar.gz/{g["sha"]}',
@@ -476,8 +488,6 @@ class CranSolver:
         rlib = f"{env_dir}/rlib"
         cran_names = [r["name"] for r in layer["records"]
                       if not r.get("remote_sha")]
-        tarballs = [r["tarball"] for r in layer["records"]
-                    if r.get("remote_sha")]
         top = layer.get("top_level", [])
         repos = layer.get("repos") or [layer["snapshot"]]
         rcode = (
@@ -498,8 +508,7 @@ class CranSolver:
             ' srcrepo <- sub("__linux__/[^/]+/", "", getOption("repos"));'
             ' remove.packages(bad, lib=lib);'
             ' install.packages(bad, lib=lib, repos=srcrepo, type="source") }};'
-            't <- c({tarballs});'
-            'if (length(t)) install.packages(t, lib=lib, repos=NULL, type="source");'
+            '{ghinstall}'
             'need <- c({top});'
             'ok <- need %in% rownames(installed.packages(lib.loc=lib));'
             'if (!all(ok)) {{ write(paste("FAILED:", paste(need[!ok], collapse=",")), stderr()); quit(status=4) }}'
@@ -507,7 +516,7 @@ class CranSolver:
                      f"R{i}={_json.dumps(u)}" for i, u in enumerate(repos)),
                  lib=_json.dumps(rlib),
                  pkgs=", ".join(_json.dumps(x) for x in cran_names) or '""',
-                 tarballs=", ".join(_json.dumps(x) for x in tarballs) or 'character(0)',
+                 ghinstall=_r_gh_install(layer["records"]),
                  top=", ".join(_json.dumps(x) for x in top) or 'character(0)')
         # converge, don't flinch: the R code is incremental (installed
         # packages are skipped, broken binaries re-detected), so when a
@@ -616,7 +625,6 @@ class CranSolver:
             store.update_dataref_meta(hit, {"compile_cache": None})
 
         cran_names = [r["name"] for r in recs if not r.get("remote_sha")]
-        tarballs = [r["tarball"] for r in recs if r.get("remote_sha")]
         rcode = (
             'options(repos=c({repovec}), HTTPUserAgent=sprintf('
             '"R/%s R (%s)", getRversion(), paste(getRversion(), '
@@ -625,8 +633,7 @@ class CranSolver:
             '.libPaths(c(lib, {plib}, .libPaths()));'
             'p <- c({pkgs});'
             'if (length(p)) install.packages(p, lib=lib);'
-            't <- c({tarballs});'
-            'if (length(t)) install.packages(t, lib=lib, repos=NULL, type="source");'
+            '{ghinstall}'
             'need <- c({need});'
             'ok <- need %in% rownames(installed.packages(lib.loc=lib));'
             'if (!all(ok)) {{ write(paste("FAILED:", paste(need[!ok], collapse=",")), stderr()); quit(status=4) }}'
@@ -635,7 +642,7 @@ class CranSolver:
                          layer.get("repos") or [layer["snapshot"]])),
                  lib=_json.dumps(rlib), plib=_json.dumps(parent_rlib),
                  pkgs=", ".join(_json.dumps(x) for x in cran_names) or 'character(0)',
-                 tarballs=", ".join(_json.dumps(x) for x in tarballs) or 'character(0)',
+                 ghinstall=_r_gh_install(recs),
                  need=", ".join(_json.dumps(x) for x in added) or 'character(0)')
         _w = pack_tools.get("wrap_cmd") or (lambda s: s)
         r = adapter.run_activated(_w(
@@ -726,6 +733,11 @@ class CranSolver:
                         f"could not download {rec['name']} for offline packing",
                         stage="realize",
                         hints={"url": url, "detail": str(e)[-200:]}) from e
+                if rec.get("remote_sha") and rec.get("subdir"):
+                    # whole-repo tarball, package in a subfolder: re-pack
+                    # controller-side so the site's plain `R CMD INSTALL
+                    # file` loop stays unchanged
+                    data = _subdir_tarball(data, rec["subdir"], rec["name"])
                 (tdp / "src" / fn).write_bytes(data)
                 files.append(fn)
             # one filename per line, in install order — a shell loop reads it
@@ -770,6 +782,61 @@ class CranSolver:
 
     def why(self, env_row: dict, package: str, workdir: Path) -> str:
         return f"{package}: see the cran layer record (env_why returns it)"
+
+
+def _r_gh_install(records: list[dict]) -> str:
+    """R lines installing github tarballs, subdir-aware. The tarball is
+    the WHOLE repo by SHA: install.packages on it builds the repo ROOT,
+    so a subdir package must be untarred and built from its directory
+    (2026-07 vocabulary round). Returns a fully-formed snippet — callers
+    splice it into their rcode template as a pre-formatted argument."""
+    import json as _json
+    gh = [r for r in records if r.get("remote_sha")]
+    if not gh:
+        return ""
+    t = ", ".join(_json.dumps(r["tarball"]) for r in gh)
+    s = ", ".join(_json.dumps(r.get("subdir") or "") for r in gh)
+    return (
+        f't <- c({t}); s <- c({s});'
+        'for (i in seq_along(t)) {'
+        ' if (nzchar(s[i])) {'
+        '  tf <- tempfile(fileext=".tar.gz");'
+        '  download.file(t[i], tf, quiet=TRUE);'
+        '  xd <- tempfile(); untar(tf, exdir=xd);'
+        '  pd <- file.path(list.dirs(xd, recursive=FALSE)[1], s[i]);'
+        '  install.packages(pd, lib=lib, repos=NULL, type="source")'
+        ' } else install.packages(t[i], lib=lib, repos=NULL,'
+        ' type="source")'
+        '};'
+    )
+
+
+def _subdir_tarball(data: bytes, subdir: str, name: str) -> bytes:
+    """Re-pack a whole-repo tarball down to just the subdir package
+    (rooted at the package name) so the offline packed lane's plain
+    `R CMD INSTALL file` keeps working unchanged."""
+    import io
+    import tarfile
+    src = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz")
+    members = src.getmembers()
+    top = members[0].name.split("/")[0]
+    prefix = f"{top}/{subdir}/"
+    out = io.BytesIO()
+    kept = 0
+    with tarfile.open(fileobj=out, mode="w:gz") as dst:
+        for m in members:
+            if not m.name.startswith(prefix):
+                continue
+            m.name = name + "/" + m.name[len(prefix):]
+            dst.addfile(m, src.extractfile(m) if m.isfile() else None)
+            kept += 1
+    if not kept:
+        raise WeftError(
+            "env.realize_failed",
+            f"the {name} tarball has no {subdir!r} directory — resolve "
+            f"and archive disagree about the repo layout",
+            stage="realize", hints={"subdir": subdir})
+    return out.getvalue()
 
 
 def _topo_order(records: list[dict]) -> list[dict]:

@@ -383,12 +383,26 @@ class SessionManager:
         # ONE vocabulary — the same strings deps.cran takes: plain names,
         # "name ==X.Y.Z" (pin asserted at the snapshot's solve), and
         # "owner/repo@ref" github sources (the solver SHA-pins those)
-        plain, refs = [], []
+        # ONE grammar (spec.parse_cran_dep) — this lane used to accept
+        # any operator by silently reducing to the bare name, and the
+        # snapshot then re-emitted a string the solve lane REFUSES: a
+        # working session minted an unsnapshottable state (2026-07
+        # vocabulary sweep #2). Unsupported shapes now refuse here, at
+        # install time, with the solve lane's exact contract.
+        from .spec import parse_cran_dep
+        plain, refs, pin_notes = [], [], []
         for c in cran:
-            if "/" in c:
+            p = parse_cran_dep(c)
+            if p["kind"] == "github":
                 refs.append(c)
-            else:
-                plain.append(c.split("==")[0].split()[0])
+                continue
+            plain.append(p["name"])
+            if p["version"]:
+                pin_notes.append(
+                    f'{p["name"]}: sessions install the repository '
+                    f'latest (unpinned scratch by doctrine); the '
+                    f'recorded =={p["version"]} is asserted at '
+                    f'session_snapshot against the dated snapshot')
         vec = ", ".join(_json.dumps(n) for n in plain)
         # CRAN routinely compiles: bring weft's toolchain like the
         # overlay build does (best-effort — pure-R needs none)
@@ -504,7 +518,8 @@ class SessionManager:
                 for ref in refs:
                     p = CranSolver._parse(ref)
                     try:
-                        CranSolver._github_resolve(p["repo"], p["ref"])
+                        CranSolver._github_resolve(p["repo"], p["ref"],
+                                                   p.get("subdir"))
                     except WeftError as ge:
                         if ge.code == "env.solve_conflict":
                             code, retryable = "env.solve_conflict", False
@@ -531,7 +546,9 @@ class SessionManager:
         out = {"rlib": rlib, "installed": installed}
         if ref_installed:
             out["resolved"] = ref_installed   # DESCRIPTION package names
-        return out
+        if pin_notes:
+            out["pin_notes"] = pin_notes      # honest: pins are recorded,
+        return out                            # not enforced, until snapshot
 
     def _base_cold(self, s: dict, adapter: SiteAdapter) -> bool:
         """Is the base's package cache COLD on this site? An adopted
@@ -1225,8 +1242,12 @@ class SessionManager:
 
 
 def _pixi_spec(dep: str) -> str:
-    """'numpy >=2' -> 'numpy>=2' (pixi add wants no space)."""
-    return dep.replace(" ", "")
+    """'numpy >=2' -> 'numpy>=2' (pixi add wants no space). Soft-pin
+    '?' is WEFT vocabulary, not pip/uv/pixi vocabulary — leaked, it
+    reached the tools as a literal and died as 'Invalid requirement'
+    (2026-07 vocabulary sweep #3)."""
+    from .spec import strip_soft
+    return strip_soft(dep).replace(" ", "")
 
 
 def _unportable_paths(installers: list[dict]) -> list[str]:

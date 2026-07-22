@@ -66,6 +66,13 @@ remotes, removable in one command.
   ratifies miscoding as spec.
 - External tools: new invocation => row in misc/tool_honesty.md +
   compensating check (positive markers over rc-trust).
+- One vocabulary, one parser: a string grammar with two implementations
+  is a bug in waiting (subdir refs installed in sessions and 404'd in
+  solves; same-owner refs collapsed in extends merges). Shared
+  vocabularies get ONE owner function; a conformance table drives every
+  consumer (all-accept or all-refuse-loudly — accept-and-mangle is the
+  tested failure); hand-off emitters (snapshot, adopt, retry) test
+  against the REAL consumer, never a mock.
 - Malformed input is a test lane: intake boundaries (spec from_dict,
   verb list args) get hostile cases — duplicates, case collisions,
   container-breaking strings — asserting the REFUSAL payload; anything

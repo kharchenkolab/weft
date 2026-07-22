@@ -44,9 +44,11 @@ def _pep503(name: str) -> str:
 
 def _layer_dep_name(dep: str) -> str:
     """The package name a layer dep string refers to: 'glue ==1.7.0' →
-    glue, 'tidyverse/glue@abc123' → glue, 'owner/Repo.jl@ref' → Repo."""
-    if "/" in dep:
-        tail = dep.split("/", 1)[1].split("@")[0]
+    glue, 'tidyverse/glue@abc123' → glue, 'owner/Repo.jl@ref' → Repo,
+    'owner/mono/rpkg@v2' → rpkg (subdir refs: the LAST path segment is
+    the best string-derived guess at the DESCRIPTION name)."""
+    if "/" in dep.partition("@")[0]:
+        tail = dep.partition("@")[0].split("/")[-1]
         return tail[:-3] if tail.endswith(".jl") else tail
     from .spec import split_constraint
     return split_constraint(dep)[0]

@@ -263,6 +263,18 @@ def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi") -> LockResult:
         err = (proc.stderr or proc.stdout).strip()
         tail = "\n".join(err.splitlines()[-30:])
         low = err.lower()
+        if "is not a known platform" in err:
+            # caller's platform typo — intake's shape check is
+            # deliberately loose (future subdirs must not need a weft
+            # release); pixi's verdict is authoritative and even lists
+            # the valid set (probed verbatim)
+            raise WeftError(
+                "task.invalid",
+                f"spec '{spec.name}' names a platform pixi does not know",
+                stage="solve",
+                hints={"stderr_tail": tail,
+                       "platforms": list(spec.platforms)},
+            )
         if "duplicate key" in low or _PARSE_RE.search(err):
             # after intake validation, a manifest pixi cannot parse is
             # weft's own renderer bug — not a statement about the

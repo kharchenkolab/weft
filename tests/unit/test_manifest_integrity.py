@@ -151,9 +151,10 @@ def test_missing_repo_becomes_a_spec_verdict(tmp_path, monkeypatch):
     from weft.solvers import CranSolver
     monkeypatch.setattr(
         CranSolver, "_github_resolve",
-        staticmethod(lambda repo, ref: (_ for _ in ()).throw(WeftError(
-            "env.solve_conflict", f"cannot resolve github ref {repo}@{ref}",
-            stage="solve"))))
+        staticmethod(lambda repo, ref, subdir=None: (_ for _ in ()).throw(
+            WeftError("env.solve_conflict",
+                      f"cannot resolve github ref {repo}@{ref}",
+                      stage="solve"))))
     with pytest.raises(WeftError) as ei:
         _rlib_ref_call(tmp_path, monkeypatch)()
     assert ei.value.code == "env.solve_conflict"
@@ -165,7 +166,7 @@ def test_missing_repo_becomes_a_spec_verdict(tmp_path, monkeypatch):
 def test_live_repo_blames_the_site_egress(tmp_path, monkeypatch):
     from weft.solvers import CranSolver
     monkeypatch.setattr(CranSolver, "_github_resolve",
-                        staticmethod(lambda repo, ref: {"name": "widgetcore"}))
+                        staticmethod(lambda repo, ref, subdir=None: {"name": "widgetcore"}))
     with pytest.raises(WeftError) as ei:
         _rlib_ref_call(tmp_path, monkeypatch)()
     assert ei.value.code == "env.solve_failed" and ei.value.retryable
@@ -176,9 +177,9 @@ def test_controller_offline_stays_retryable(tmp_path, monkeypatch):
     from weft.solvers import CranSolver
     monkeypatch.setattr(
         CranSolver, "_github_resolve",
-        staticmethod(lambda repo, ref: (_ for _ in ()).throw(WeftError(
-            "env.solve_failed", "github unreachable", stage="solve",
-            retryable=True))))
+        staticmethod(lambda repo, ref, subdir=None: (_ for _ in ()).throw(
+            WeftError("env.solve_failed", "github unreachable",
+                      stage="solve", retryable=True))))
     with pytest.raises(WeftError) as ei:
         _rlib_ref_call(tmp_path, monkeypatch)()
     assert ei.value.code == "env.solve_failed" and ei.value.retryable
