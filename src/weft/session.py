@@ -701,23 +701,41 @@ class SessionManager:
         an unavailability verdict)."""
         import threading
         import time as _t
-        if probe or lanes is not None:
+        if probe:
             raise WeftError(
-                "task.invalid",
-                "ranked mode (lanes=) and probe arrive in a later round "
-                "— pass an eco-tagged request dict",
-                stage="realize",
-                hints={"request": {"conda": ["..."], "pypi": ["..."],
-                                   "cran": ["..."]}})
-        if not isinstance(request, dict) or \
+                "task.invalid", "probe arrives in a later round",
+                stage="realize")
+        ranked = isinstance(request, list)
+        if ranked:
+            if not lanes or not isinstance(lanes, list) or \
+                    set(lanes) - {"conda", "pypi", "cran"} or \
+                    len(set(lanes)) != len(lanes):
+                raise WeftError(
+                    "task.invalid",
+                    "ranked mode needs lanes=[...] — YOUR ranking, no "
+                    "default (a default ranking would be weft owning "
+                    "intent)", stage="realize",
+                    hints={"lanes": ["conda", "pypi", "cran"]})
+            if not request or not all(isinstance(x, str) for x in request):
+                raise WeftError(
+                    "task.invalid",
+                    "ranked request is a non-empty list of package "
+                    "strings", stage="realize")
+        elif not isinstance(request, dict) or \
                 set(request) - {"conda", "pypi", "cran"} or \
                 not any(request.get(k) for k in ("conda", "pypi", "cran")):
             raise WeftError(
                 "task.invalid",
                 "request must be an eco-tagged dict with at least one of "
-                "conda/pypi/cran", stage="realize",
+                "conda/pypi/cran (or a list of names with lanes= for "
+                "ranked mode)", stage="realize",
                 hints={"got": request if isinstance(request, dict)
                        else type(request).__name__})
+        elif lanes is not None:
+            raise WeftError(
+                "task.invalid",
+                "lanes= ranks a LIST of bare names; an eco-tagged dict "
+                "already names its lanes", stage="realize")
         eff = None
         if verify not in (None, False):
             from .verify import validate_verify
@@ -743,6 +761,9 @@ class SessionManager:
 
         threading.Thread(target=_beat, daemon=True).start()
         try:
+            if ranked:
+                return self._ensure_ranked(session_id, adapter, request,
+                                           lanes, verify, eff)
             return self._ensure_tagged(session_id, adapter, request,
                                        verify, eff)
         finally:
@@ -843,6 +864,134 @@ class SessionManager:
         return {"satisfied": True, "changed": True, "attempts": attempts,
                 "verified": verified, "session_id": session_id,
                 "runtime": runtime}
+
+    def _ensure_ranked(self, session_id: str, adapter: SiteAdapter,
+                       packages: list[str], lanes: list[str], verify,
+                       eff: dict | None) -> dict:
+        """The ranked chain (P4): per-package INDEPENDENT chains over
+        caller-ranked lanes. A lane succeeds only if its postcondition
+        passed (verify-in-loop rides P1's install: a verify-failed lane
+        raised typed, RETRACTED its record, and the chain continues).
+        internal.error and site-scoped infra HALT everything (an outage
+        is not an unavailability verdict); exhaustion of every ranked
+        lane is env.unavailable_in_lanes with every attempt verbatim
+        and NO synthesized suggestion — the attempts are the advice."""
+        import time as _t
+        from .verify import run_grouped, default_checks, usable_want
+        from .spec import split_constraint
+        s = self._get(session_id)
+        attempts: list[dict] = []
+        verified: dict[str, dict] = {}
+        halting: WeftError | None = None
+        satisfied_pkgs: list[str] = []
+        unsatisfied: list[str] = []
+        # step zero per package: satisfaction is CHECKED (first lane's
+        # oracle family answers "does it load/exist at the pin")
+        pre_skip: set[str] = set()
+        if eff is not None:
+            checks = []
+            for pkg in packages:
+                if "/" in pkg.partition("@")[0]:
+                    continue                    # refs never pre-check
+                n, c = split_constraint(pkg)
+                checks += default_checks(
+                    lanes[0], [n],
+                    {n: c.strip()} if usable_want(c) else None)
+            pre = run_grouped(self._verify_exec_fn(s, adapter), checks)
+            verified.update(pre)
+            for pkg in packages:
+                n = split_constraint(pkg)[0] \
+                    if "/" not in pkg.partition("@")[0] else None
+                if n and pre.get(n, {}).get("status") == "passed":
+                    pre_skip.add(pkg)
+                    satisfied_pkgs.append(pkg)
+        installed_count = 0
+        for pkg in packages:
+            if pkg in pre_skip:
+                continue
+            if halting is not None:
+                attempts.append({"lane": lanes[0], "package": pkg,
+                                 "outcome": "skipped",
+                                 "skip_reason": "halted"})
+                self.store.emit("session.ensure_attempt",
+                                session=session_id, lane=lanes[0],
+                                outcome="skipped", code=None)
+                unsatisfied.append(pkg)
+                continue
+            success = False
+            for lane in lanes:
+                if halting is not None:
+                    attempts.append({"lane": lane, "package": pkg,
+                                     "outcome": "skipped",
+                                     "skip_reason": "halted"})
+                    self.store.emit("session.ensure_attempt",
+                                    session=session_id, lane=lane,
+                                    outcome="skipped", code=None)
+                    continue
+                if lane != "cran" and "/" in pkg.partition("@")[0]:
+                    # this lane's grammar cannot speak the spec — a
+                    # skipped lane, not a burned typed failure
+                    attempts.append({"lane": lane, "package": pkg,
+                                     "outcome": "skipped",
+                                     "skip_reason": "grammar"})
+                    self.store.emit("session.ensure_attempt",
+                                    session=session_id, lane=lane,
+                                    outcome="skipped", code=None)
+                    continue
+                t0 = _t.monotonic()
+                try:
+                    out = self.install(session_id, adapter,
+                                       **{lane: [pkg]},
+                                       verify=(verify if eff is not None
+                                               else None))
+                    a = {"lane": lane, "package": pkg,
+                         "outcome": ("installed" if eff is not None
+                                     else "installed_unverified"),
+                         "seconds": round(_t.monotonic() - t0, 2)}
+                    verified.update(out.get("verified") or {})
+                    success = True
+                    installed_count += 1
+                except WeftError as e:
+                    a = {"lane": lane, "package": pkg,
+                         "outcome": ("refused"
+                                     if e.code == "session.cold_base"
+                                     else "failed"),
+                         "error": e.to_dict(),
+                         "seconds": round(_t.monotonic() - t0, 2)}
+                    verified.update((e.hints or {}).get("verified") or {})
+                    if e.code in ("internal.error", "site.unreachable",
+                                  "sched.timeout"):
+                        halting = e
+                attempts.append(a)
+                self.store.emit("session.ensure_attempt",
+                                session=session_id, lane=lane,
+                                outcome=a["outcome"],
+                                code=(a.get("error") or {}).get("error"))
+                if success:
+                    break
+            (satisfied_pkgs if success else unsatisfied).append(pkg)
+        s = self._get(session_id)
+        runtime = self.runtime(s, adapter)
+        self.store.emit("session.ensure_done", session=session_id,
+                        satisfied=halting is None and not unsatisfied,
+                        lanes=[a["lane"] for a in attempts])
+        base_hints = {"attempts": attempts, "verified": verified,
+                      "runtime": runtime,
+                      "satisfied": satisfied_pkgs,
+                      "unsatisfied": unsatisfied}
+        if halting is not None:
+            raise WeftError(halting.code, halting.detail,
+                            stage=halting.stage,
+                            retryable=halting.retryable,
+                            hints={**(halting.hints or {}), **base_hints})
+        if unsatisfied:
+            raise WeftError(
+                "env.unavailable_in_lanes",
+                f"no ranked lane could provide {sorted(unsatisfied)}",
+                stage="realize", hints=base_hints)
+        return {"satisfied": True, "changed": installed_count > 0,
+                "attempts": attempts, "verified": verified,
+                "session_id": session_id, "runtime": runtime}
 
     def _base_cold(self, s: dict, adapter: SiteAdapter) -> bool:
         """Is the base's package cache COLD on this site? An adopted

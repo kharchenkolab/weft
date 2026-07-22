@@ -21,7 +21,13 @@ def test_target_and_request_shapes_refused(tmp_path, pixi_bin):
     for req in ("idna", {}, {"julia": ["X"]}):
         r = w.ensure_available({"session": sid}, req)
         assert r["error"] == "task.invalid", req
-    r = w.ensure_available({"session": sid}, ["idna"], lanes=["conda"])
+    r = w.ensure_available({"session": sid}, {"pypi": ["idna"]},
+                           lanes=["conda"])          # dict + lanes: no
+    assert r["error"] == "task.invalid"
+    r = w.ensure_available({"session": sid}, ["idna"])   # list, no lanes
+    assert r["error"] == "task.invalid" and "ranking" in r["detail"]
+    r = w.ensure_available({"session": sid}, {"pypi": ["idna"]},
+                           probe=True)
     assert r["error"] == "task.invalid" and "later round" in r["detail"]
 
 
@@ -178,3 +184,97 @@ def test_re_ensure_short_circuit_is_cheap(tmp_path, pixi_bin, monkeypatch):
         out = w.ensure_available({"session": sid}, {"pypi": ["idna"]})
         assert out["changed"] is False and out["attempts"] == []
     assert time.monotonic() - t0 < 3.0
+
+
+# ── ranked mode (P4) ───────────────────────────────────────────────────────
+
+def _ranked_rig(monkeypatch, script):
+    """script: {(pkg, lane): 'installed'|WeftError}"""
+    from weft.session import SessionManager
+    calls = []
+
+    def fake_install(self, session_id, adapter, conda=None, pypi=None,
+                     cran=None, verify=None, **kw):
+        lane = "conda" if conda else ("pypi" if pypi else "cran")
+        pkg = (conda or pypi or cran)[0]
+        calls.append((pkg, lane))
+        r = script[(pkg, lane)]
+        if r == "installed":
+            return {"installed": {lane: [pkg]},
+                    "verified": {pkg: {"status": "passed",
+                                       "check": "metadata"}},
+                    "session_id": session_id}
+        raise r
+
+    monkeypatch.setattr(SessionManager, "install", fake_install)
+
+    def fake_exec_fn(self, s, adapter):
+        def run(script_text, timeout):
+            return ShimResult(0, "", "")     # no markers: pre-check unknown
+        return run
+
+    from weft.session import SessionManager as SM
+    monkeypatch.setattr(SM, "_verify_exec_fn", fake_exec_fn)
+    return calls
+
+
+def test_ranked_packages_chain_independently(tmp_path, pixi_bin,
+                                             monkeypatch):
+    """Package A succeeds in lane 1; package B falls through to lane 2;
+    package C exhausts — one call, per-package outcomes, top-level
+    exhaustion with satisfied/unsatisfied discriminated."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    fail = WeftError("env.solve_conflict", "not here", stage="solve")
+    calls = _ranked_rig(monkeypatch, {
+        ("aa", "conda"): "installed",
+        ("bb", "conda"): fail, ("bb", "pypi"): "installed",
+        ("cc", "conda"): fail, ("cc", "pypi"): fail})
+    out = w.ensure_available({"session": sid}, ["aa", "bb", "cc"],
+                             lanes=["conda", "pypi"])
+    assert out["error"] == "env.unavailable_in_lanes"
+    assert out["hints"]["satisfied"] == ["aa", "bb"]
+    assert out["hints"]["unsatisfied"] == ["cc"]
+    assert ("bb", "pypi") in calls and ("aa", "pypi") not in calls
+    assert "suggestion" not in out["hints"]      # attempts ARE the advice
+
+
+def test_ranked_grammar_skip(tmp_path, pixi_bin, monkeypatch):
+    """A github ref in a conda/pypi lane is a SKIPPED lane, not a
+    burned typed failure."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    calls = _ranked_rig(monkeypatch, {("org/widget@v1", "cran"):
+                                      "installed"})
+    out = w.ensure_available({"session": sid}, ["org/widget@v1"],
+                             lanes=["conda", "pypi", "cran"])
+    assert out["satisfied"] is True
+    outcomes = {a["lane"]: a["outcome"] for a in out["attempts"]}
+    assert outcomes["conda"] == "skipped" == outcomes["pypi"]
+    assert out["attempts"][0]["skip_reason"] == "grammar"
+    assert outcomes["cran"] == "installed"
+    assert calls == [("org/widget@v1", "cran")]
+
+
+def test_crash_mid_chain_releases_claim_and_converges(tmp_path, pixi_bin,
+                                                      monkeypatch):
+    """Crash injection: the claim never outlives the ensure; re-ensure
+    converges."""
+    from weft.session import SessionManager
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+
+    def boom(self, *a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(SessionManager, "install", boom)
+    monkeypatch.setattr(
+        SessionManager, "_verify_exec_fn",
+        lambda self, s, ad: lambda sc, t: ShimResult(0, "", ""))
+    with pytest.raises(KeyboardInterrupt):
+        w.sessions.ensure_available(sid, w.adapters["local"], ["aa"],
+                                    lanes=["conda"])
+    assert w.store.session_ensure_claim(sid) is None    # released
+    calls = _ranked_rig(monkeypatch, {("aa", "conda"): "installed"})
+    out = w.ensure_available({"session": sid}, ["aa"], lanes=["conda"])
+    assert out["satisfied"] is True                     # converges

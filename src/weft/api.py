@@ -1191,8 +1191,11 @@ class Weft:
         first (already-proven entries short-circuit and are
         late-recorded); postcondition failures are typed and their
         entries are never recorded. One ensure per session at a time
-        (state.conflict, retryable, names the holder). Ranked mode
-        (lanes=), probe, and env targets arrive in later rounds."""
+        (state.conflict, retryable, names the holder). Ranked mode: pass a LIST
+        of package strings with lanes=[...] — YOUR ranking; per-package
+        independent chains, verify-in-loop, halting on outages,
+        exhaustion = env.unavailable_in_lanes with every attempt.
+        Probe and env targets arrive in later rounds."""
         if not isinstance(target, dict) or not target or \
                 set(target) - {"session", "env"}:
             raise WeftError(

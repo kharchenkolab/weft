@@ -27,6 +27,7 @@ an unchanged failing task more than once.
 | `quota.storage` | site disk pressure | suggest GC / another storage root to the user |
 | `task.invalid` | malformed request | fix your call; hints list valid fields/values |
 | `task.dep_failed` | an `after` dependency failed/vanished — this job never ran | fix + re-run the upstream job (`hints.dependency`), then resubmit this one |
+| `env.unavailable_in_lanes` | every lane YOU ranked ran to a verdict and none provided it | read `hints.attempts` — each attempt carries its own lane's typed error and levers; there is no single fix |
 | `env.evict_blocked` | overlay children or live jobs/sessions/kernels use this env | hints name them: cascade=True for children, cancel/stop for live work |
 
 Session install failures discriminate: a dead package index is
