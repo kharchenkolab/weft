@@ -8,6 +8,7 @@ CAS before anything moves — task chaining then finds them already present.
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -18,6 +19,25 @@ from .ids import canonical_json, sha256_bytes
 from .preview import preview_for
 from .store import Store
 from .task import Task
+
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def _require_digest(digest: str, path: str, site: str) -> str:
+    """Identity comes from a real hash, never a fallback: both sha256
+    tools failing while wc succeeds would otherwise mint dref:<SIZE> as
+    content identity at rc 0 (2026-07 sweep #7)."""
+    if not _HEX64.fullmatch(digest or ""):
+        raise WeftError(
+            "site.bootstrap_failed",
+            f"sha256 tooling on {site} produced no digest for {path}",
+            stage="staging",
+            hints={"got": (digest or "")[:80],
+                   "suggestion": "the site needs a working sha256sum "
+                                 "(coreutils) or shasum (perl) on PATH — "
+                                 "content identity cannot be minted "
+                                 "without one"})
+    return digest
 
 PREVIEW_HEAD_BYTES = 32 * 1024
 LOG_TAIL_LINES = 100
@@ -88,11 +108,18 @@ class DataManager:
             timeout=1800)
         parts = (r.out or "").split()
         if r.rc != 0 or len(parts) < 2:
+            # the probe just PROVED this path exists — a failure here is
+            # unreadability (permissions, vanished mid-flight) or broken
+            # site tooling, and saying "no such file" sends the agent
+            # chasing a path typo that isn't there (sweep #23)
             raise WeftError("data.missing",
-                            f"no such file on {site}: {abs_path}",
+                            f"cannot read {abs_path} on {site} (it exists; "
+                            f"permission, tooling, or a mid-flight removal "
+                            f"— not a wrong path)",
                             stage="staging",
-                            hints={"detail": (r.err or r.out)[-200:]})
+                            hints={"detail": (r.err or r.out)[-300:]})
         digest, size = parts[0], int(parts[1])
+        _require_digest(digest, abs_path, site)
         mtime = int(parts[2]) if len(parts) > 2 else 0
         self._check_expected(abs_path, digest, expected_sha256)
         ref = f"dref:{digest}"
@@ -163,6 +190,7 @@ class DataManager:
                                      "target": digest})
                 continue
             size = int(size)
+            _require_digest(digest, f"{abs_path}/{path}", site)
             tree_entries.append({"path": path, "kind": "file",
                                  "exec": is_exec == "1",
                                  "size": size, "sha256": digest})
@@ -834,6 +862,7 @@ class DataManager:
             if len(rows) == 1 and rows[0].split("\t")[1] == ".":
                 _kind, _p, is_exec, size, digest = rows[0].split("\t")
                 size = int(size)
+                _require_digest(digest, out, adapter.name)
                 file_ref = f"dref:{digest}"
                 self.store.put_dataref(
                     file_ref, "file", size,
@@ -852,6 +881,7 @@ class DataManager:
                     tree_entries.append({"path": path, "kind": "link", "target": digest})
                     continue
                 size = int(size)
+                _require_digest(digest, f"{out}/{path}", adapter.name)
                 tree_entries.append({
                     "path": path, "kind": "file", "exec": is_exec == "1",
                     "size": size, "sha256": digest,

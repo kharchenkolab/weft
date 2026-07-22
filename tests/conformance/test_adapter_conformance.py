@@ -183,3 +183,28 @@ def test_write_file_identical_result_everywhere(tmp_path):
     a, b = (tmp_path / "A/d/f.bin"), (tmp_path / "B/d/f.bin")
     assert a.read_bytes() == b.read_bytes() == b"\x00\x01payload"
     assert (a.stat().st_mode & 0o777) == (b.stat().st_mode & 0o777) == 0o640
+
+
+# ── read_file is bytes-preserving (2026-07 sweep #5) ───────────────────────
+# ssh's decode("replace")/re-encode round trip destroyed binary payloads:
+# the R compile-cache tar was corrupt from BIRTH on ssh transports, so
+# every cache hit failed extraction and silently fell through to a fresh
+# build — the cache was permanently dead weight. read_file returns bytes;
+# that signature is a promise of binary safety, per adapter.
+
+def test_read_file_returns_exact_bytes(raw_adapter):
+    ad, root = raw_adapter
+    payload = bytes(range(256)) * 64 + b"\xff\xfe\x80\x81 not utf-8"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "blob.bin").write_bytes(payload)
+    assert ad.read_file("blob.bin") == payload
+    assert ad.read_file("blob.bin", max_bytes=16) == payload[:16]
+
+
+def test_read_file_missing_is_data_missing(raw_adapter):
+    ad, root = raw_adapter
+    root.mkdir(parents=True, exist_ok=True)
+    from weft.errors import WeftError
+    with pytest.raises(WeftError) as ei:
+        ad.read_file("nope/absent.bin")
+    assert ei.value.code == "data.missing"

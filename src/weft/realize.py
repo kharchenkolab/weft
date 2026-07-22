@@ -12,6 +12,7 @@ same in-process future.
 
 from __future__ import annotations
 
+import re
 import shlex
 import threading
 import uuid as _uuid
@@ -21,6 +22,8 @@ from .adapters.base import SiteAdapter
 from .errors import WeftError
 from .ids import ENVID_SCHEME
 from .store import Store
+
+_HEX64 = re.compile(r"[0-9a-f]{64}")
 
 _BUILD_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 _BUILD_LOCKS_GUARD = threading.Lock()
@@ -156,8 +159,8 @@ def ensure_realization(
                     store.touch_realization(marker["parent"], adapter.name)
                 recorded = marker.get("bin_digest")
                 marked_strategy = marker.get("strategy", strategy)
-                ok = not recorded or recorded == _bin_digest(
-                    adapter, loc, marked_strategy)
+                ok = _fence_ok(recorded, lambda: _bin_digest(
+                    adapter, loc, marked_strategy))
                 # two-deep: an overlay is only as intact as its parent
                 if ok and marker.get("parent"):
                     p_loc = marker.get("parent_location") \
@@ -165,8 +168,9 @@ def ensure_realization(
                     p_strategy = _marker(adapter, p_loc).get("strategy") \
                         or "prefix"
                     ok = (adapter.file_exists(f"{p_loc}/.weft-ready")
-                          and marker.get("parent_bin_digest")
-                          == _bin_digest(adapter, p_loc, p_strategy))
+                          and _fence_ok(marker.get("parent_bin_digest"),
+                                        lambda: _bin_digest(
+                                            adapter, p_loc, p_strategy)))
                     if not ok:
                         store.emit("realize.parent_changed", env_id=env_id,
                                    site=adapter.name, parent=marker["parent"])
@@ -338,8 +342,8 @@ def _adopt_from_ro_roots(env_id: str, env_row: dict, adapter: SiteAdapter,
             continue
         marker = _marker(adapter, loc)
         recorded = marker.get("bin_digest")
-        if recorded and recorded != _bin_digest(
-                adapter, loc, marker.get("strategy", "prefix")):
+        if not _fence_ok(recorded, lambda: _bin_digest(
+                adapter, loc, marker.get("strategy", "prefix"))):
             store.emit("realize.ro_integrity_failed", env_id=env_id,
                        site=adapter.name, location=loc,
                        owner_action=f"the owner of {ro} must re-materialize "
@@ -1098,11 +1102,26 @@ def _bin_digest(adapter: SiteAdapter, rel: str, strategy: str) -> str:
     d = adapter.path(_bin_dir_rel(rel, strategy))
     r = adapter.run_cmd(
         f"test -d {shlex.quote(d)} && cd {shlex.quote(d)} && "
-        f"find . -type f -o -type l | LC_ALL=C sort | sha256sum | "
-        f"cut -d' ' -f1 || echo none",
+        f"find . -type f -o -type l | LC_ALL=C sort | "
+        f"{{ command -v sha256sum >/dev/null 2>&1 && sha256sum "
+        f"|| shasum -a 256; }} | cut -d' ' -f1 || echo unverifiable",
         timeout=60,
     )
-    return r.out.strip().split()[-1] if r.out.strip() else "none"
+    got = r.out.strip().split()[-1] if r.out.strip() else "unverifiable"
+    # only a real digest is evidence; anything else (missing dir, no hash
+    # tool, pipeline failure) must NEVER equal a recorded digest — the
+    # darwin fence was "none"=="none" for its whole life (sweep #6)
+    return got if _HEX64.fullmatch(got) else "unverifiable"
+
+
+def _fence_ok(recorded: str | None, fresh_fn) -> bool:
+    """Integrity-fence comparison, fail-closed: a recorded real digest
+    must be REPRODUCED — a fresh 'unverifiable' fails. Recorded
+    'none'/'unverifiable' carries no information (legacy disarmed fence,
+    hashless site): pass rather than rebuild forever."""
+    if not recorded or recorded in ("none", "unverifiable"):
+        return True
+    return recorded == fresh_fn()
 
 
 def _spot_check_and_mark(

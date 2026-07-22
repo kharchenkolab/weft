@@ -212,10 +212,13 @@ class SSHAdapter(SiteAdapter):
                 break
         return results
 
-    def _run(
+    def _run_bytes(
         self, remote_cmd: str, *, input_bytes: bytes | None = None,
         timeout: float = 120.0,
-    ) -> ShimResult:
+    ) -> tuple[int, bytes, bytes]:
+        """Transport core: rc + RAW stdout/stderr. Transport failures
+        (timeout, ssh rc 255) raise here so every caller — text or
+        binary — gets the same outage discrimination."""
         if self.transport == "local":
             # controller ON the site: same command string, direct shell —
             # what ssh would have handed the remote shell, sh gets here
@@ -231,9 +234,7 @@ class SSHAdapter(SiteAdapter):
                     stage="infra", retryable=True,
                     hints={"command": remote_cmd[:120]},
                 ) from e
-            return ShimResult(proc.returncode,
-                              proc.stdout.decode("utf-8", "replace"),
-                              proc.stderr.decode("utf-8", "replace"))
+            return proc.returncode, proc.stdout, proc.stderr
         try:
             proc = subprocess.run(
                 [*self._ssh_base(), remote_cmd],
@@ -245,8 +246,6 @@ class SSHAdapter(SiteAdapter):
                 stage="infra", retryable=True,
                 hints={"host": self.host, "command": remote_cmd[:120]},
             ) from e
-        out = proc.stdout.decode("utf-8", "replace")
-        err = proc.stderr.decode("utf-8", "replace")
         if proc.returncode == 255:
             # a stale mux master (link died under it) poisons every retry
             # until ControlPersist expires — evict it so the NEXT attempt
@@ -258,11 +257,21 @@ class SSHAdapter(SiteAdapter):
             raise WeftError(
                 "site.unreachable", f"ssh transport to {self.name} failed",
                 stage="infra", retryable=True,
-                hints={"host": self.host, "stderr": err[-500:],
+                hints={"host": self.host,
+                       "stderr": proc.stderr.decode("utf-8", "replace")[-500:],
                        "note": "connection multiplexer reset; a retry "
                                "builds a fresh connection"},
             )
-        return ShimResult(proc.returncode, out, err)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def _run(
+        self, remote_cmd: str, *, input_bytes: bytes | None = None,
+        timeout: float = 120.0,
+    ) -> ShimResult:
+        rc, out, err = self._run_bytes(remote_cmd, input_bytes=input_bytes,
+                                       timeout=timeout)
+        return ShimResult(rc, out.decode("utf-8", "replace"),
+                          err.decode("utf-8", "replace"))
 
     def _env_prefix(self) -> str:
         # shared roots: everything created must be group-usable
@@ -384,11 +393,17 @@ class SSHAdapter(SiteAdapter):
             )
 
     def read_file(self, rel: str, max_bytes: int | None = None) -> bytes:
+        # bytes-preserving on purpose: a decode/re-encode round trip
+        # destroys binary payloads (the R compile-cache tar was corrupt
+        # from birth on ssh transports — 2026-07 sweep #5)
         capped = f"head -c {max_bytes} " if max_bytes else "cat "
-        r = self._run(capped + shlex.quote(self.path(rel)), timeout=120)
-        if r.rc != 0:
-            raise WeftError("data.missing", f"no such file on site: {rel}", stage="infra")
-        return r.out.encode("utf-8", "surrogateescape")
+        rc, out, err = self._run_bytes(capped + shlex.quote(self.path(rel)),
+                                       timeout=120)
+        if rc != 0:
+            raise WeftError(
+                "data.missing", f"no such file on site: {rel}", stage="infra",
+                hints={"stderr": err.decode("utf-8", "replace")[-300:]})
+        return out
 
     def transfer_endpoint(self) -> dict:
         if self.transport == "local":

@@ -67,7 +67,42 @@ def _write_catalog(adapter, tree: str, catalog: dict) -> None:
     tmp = f"{path}.tmp.{uuid.uuid4().hex[:8]}"
     adapter.write_file(tmp, (json.dumps(catalog, indent=1, sort_keys=True)
                              + "\n").encode())
-    adapter.run_cmd(f"mv {shlex.quote(tmp)} {shlex.quote(path)}")
+    r = adapter.run_cmd(f"mv {shlex.quote(tmp)} {shlex.quote(path)}")
+    if r.rc != 0:
+        # sticky/foreign-owned trees refuse the replace — without this
+        # check publish reported success with the catalog UNCHANGED
+        # (2026-07 sweep #10)
+        adapter.run_cmd(f"rm -f {shlex.quote(tmp)}; true")
+        raise WeftError(
+            "data.transfer_failed",
+            f"could not update the publish catalog at {path}",
+            stage="infra",
+            hints={"stderr": (r.err or r.out)[-300:],
+                   "suggestion": "the tree owner must grant write/replace "
+                                 "on the catalog (sticky-bit dirs protect "
+                                 "foreign-owned files), or publish to a "
+                                 "tree you own"})
+
+
+def _ensure_unmounted(adapter, mnt_path: str) -> None:
+    """A BUSY fusermount -u exits 1 silently and leaves a publisher-owned
+    FUSE mount at the published path — EACCES for every other consumer
+    (FUSE hides mounts across users). Verify the mount is actually gone
+    before the catalog says this env is usable (2026-07 sweep #10)."""
+    mnt = shlex.quote(mnt_path)
+    adapter.run_cmd(f"fusermount -u {mnt} 2>/dev/null || "
+                    f"fusermount3 -u {mnt} 2>/dev/null; true")
+    probe = adapter.run_cmd(
+        f"grep -qs ' {mnt_path} ' /proc/mounts && echo live || echo clear")
+    if probe.out.strip() == "live":
+        raise WeftError(
+            "state.conflict",
+            f"a publisher-owned FUSE mount is still live at {mnt_path}; "
+            f"publishing it would EACCES every other consumer",
+            stage="infra", retryable=True,
+            hints={"suggestion": "something still holds the mount "
+                                 "(lsof +D the path); close it and retry "
+                                 "the publish"})
 
 
 def _validate(weft, site: str, tree: str, name: str, version: str) -> tuple:
@@ -196,9 +231,7 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
         _spot_check_and_mark(env_id, env_row, adapter, rel, "squashfs",
                              extra=meta, wrap=wrap)
         if not wrap:
-            mnt = shlex.quote(f"{adapter.path(rel)}/mnt")
-            adapter.run_cmd(f"fusermount -u {mnt} 2>/dev/null || "
-                            f"fusermount3 -u {mnt} 2>/dev/null; true")
+            _ensure_unmounted(adapter, f"{adapter.path(rel)}/mnt")
         meta["build_s"] = round(time.time() - t0, 1)
         if staging_why and "staging" not in meta:
             # honest numbers: say WHERE the churn landed and why

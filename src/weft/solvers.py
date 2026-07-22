@@ -548,6 +548,15 @@ class CranSolver:
                 store.emit("overlay.compile_cache_hit", key=key,
                            packages=[x["name"] for x in recs])
                 return self._r_libs_line(rlib, parent_rlib)
+            # a cached blob that will not extract is corrupt — falling
+            # through to a fresh build is right, but doing it SILENTLY
+            # hides a permanently poisoned cache entry (sweep #5: the
+            # decode-corrupted tars looked exactly like this). Demote the
+            # mapping too: cached_build returns the FIRST key match, so a
+            # poisoned entry would shadow every good re-cache forever.
+            store.emit("overlay.compile_cache_bad", key=key, rc=r.rc,
+                       err_tail=(r.err or r.out)[-300:])
+            store.update_dataref_meta(hit, {"compile_cache": None})
 
         cran_names = [r["name"] for r in recs if not r.get("remote_sha")]
         tarballs = [r["tarball"] for r in recs if r.get("remote_sha")]
@@ -591,19 +600,23 @@ class CranSolver:
             import tempfile
             from pathlib import Path as _P
             tar_rel = f"{env_rel}/rlib-cache.tar"
-            adapter.run_cmd(
+            tarred = adapter.run_cmd(
                 f"tar -cf {shlex.quote(adapter.path(tar_rel))} "
                 f"-C {shlex.quote(rlib)} .", timeout=600)
-            try:
-                data = adapter.read_file(tar_rel)
-                with tempfile.TemporaryDirectory() as td:
-                    p = _P(td) / "rlib.tar"
-                    p.write_bytes(data)
-                    ref = put_cached_build(store, cas, key, p)
-                store.emit("overlay.compile_cached", key=key, ref=ref,
-                           packages=added)
-            except WeftError:
-                pass          # caching is an optimization, never a failure
+            if tarred.rc == 0:
+                # rc unchecked would cache a truncated tar (disk full,
+                # partial write) under a hash of the GARBAGE — valid-
+                # looking, poisoned forever (sweep tar-rc finding)
+                try:
+                    data = adapter.read_file(tar_rel)
+                    with tempfile.TemporaryDirectory() as td:
+                        p = _P(td) / "rlib.tar"
+                        p.write_bytes(data)
+                        ref = put_cached_build(store, cas, key, p)
+                    store.emit("overlay.compile_cached", key=key, ref=ref,
+                               packages=added)
+                except WeftError:
+                    pass      # caching is an optimization, never a failure
             adapter.run_cmd(f"rm -f {shlex.quote(adapter.path(tar_rel))}")
         return self._r_libs_line(rlib, parent_rlib)
 
@@ -887,7 +900,7 @@ class JuliaSolver:
             f"mkdir -p {shlex.quote(depot_site)} && "
             f"tar -xf {shlex.quote(site_tar)} -C {shlex.quote(depot_site)} "
             f"&& JULIA_DEPOT_PATH={shlex.quote(depot_site)} "
-            f"JULIA_OFFLINE=true "
+            f"JULIA_PKG_OFFLINE=true "
             f"julia --project={shlex.quote(env_dir + '/julia')} "
             f"-e 'using Pkg; Pkg.instantiate()'",
             timeout=3600)
@@ -903,7 +916,7 @@ class JuliaSolver:
                                "BinaryBuilder artifacts"})
         return (f'export JULIA_PROJECT="{env_dir}/julia"\n'
                 f'export JULIA_DEPOT_PATH="{depot_site}"\n'
-                'export JULIA_OFFLINE=true')
+                'export JULIA_PKG_OFFLINE=true')
 
     @staticmethod
     def inherit_pins(layer: dict) -> tuple[list[str], dict[str, str]]:
