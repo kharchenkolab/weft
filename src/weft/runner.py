@@ -329,6 +329,13 @@ class JobRunner:
     def _cmd_lines(self, task: Task, spec_env_vars: dict, site: str,
                    job_id_expr: str) -> list[str]:
         lines = [
+            # the control plane runs under LC_ALL=C (parseable tool
+            # output); user jobs must NOT inherit it — a hard C locale
+            # breaks unicode printing in user python (no PEP 538
+            # coercion under LC_ALL). Diagnostics stay classifiable via
+            # LC_MESSAGES alone; task env_vars below can override both.
+            "unset LC_ALL",
+            "export LC_MESSAGES=C",
             f"export WEFT_JOB_ID={job_id_expr}",
             f"export WEFT_CPUS={task.resources.cpus}",
             f"export WEFT_MEM_GB={task.resources.mem_gb}",

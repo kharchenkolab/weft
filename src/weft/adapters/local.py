@@ -36,6 +36,10 @@ class LocalAdapter(SiteAdapter):
 
     def _env(self) -> dict:
         env = dict(os.environ)
+        # C locale for control-plane parsing — same contract as
+        # ssh._env_prefix; job wrappers un-inherit it (_cmd_lines)
+        env["LC_ALL"] = "C"
+        env["LANGUAGE"] = "C"
         env["WEFT_ROOT"] = self.root
         env["PIXI_CACHE_DIR"] = getattr(self, "pixi_cache", None) \
             or self.path("cache/pixi")

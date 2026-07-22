@@ -394,7 +394,11 @@ class SlurmAdapter(SSHAdapter):
         )
         m = re.search(r"to start at (\S+)", r.out)
         if m:
-            return {"estimated_start": m.group(1), "raw": r.out.strip()[:200]}
+            # sbatch prints naive scheduler-local time; consumers on
+            # other machines must not read it as their own zone
+            return {"estimated_start": m.group(1),
+                    "timezone": "scheduler-local (no offset attached)",
+                    "raw": r.out.strip()[:200]}
         return {"estimated_start": None,
                 "note": "scheduler gave no estimate (rejected ask or busy)",
                 "raw": r.out.strip()[:300]}

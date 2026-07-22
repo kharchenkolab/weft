@@ -284,6 +284,12 @@ class SSHAdapter(SiteAdapter):
         ca = (f"SSL_CERT_FILE={shlex.quote(self.path('etc/cacert.pem'))} "
               if _controller_ca_bundle() is not None else "")
         return (("umask 002; " if self.shared else "") +
+            # C locale for every control-plane command: classify
+            # signatures, shim float formatting, and df/stat/rsync
+            # parsing all key on untranslated, point-decimal output
+            # (the mac controller's locale used to ride SendEnv into
+            # remote shells). Job wrappers un-inherit this (_cmd_lines).
+            "LC_ALL=C LANGUAGE=C "
             f"WEFT_ROOT={shlex.quote(self.root)} "
             f"PIXI_CACHE_DIR="
             f"{shlex.quote(self.pixi_cache or self.path('cache/pixi'))} "

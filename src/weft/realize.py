@@ -66,6 +66,17 @@ def module_prelude(modules: list[str], modules_init: str = "") -> str:
             f"module load {shlex.quote(m)} || "
             f"{{ echo 'weft: module load {m} failed' >&2; exit 90; }}"
         )
+        # Tcl Environment Modules 3.x prints errors to stderr and exits
+        # ZERO — the || above is inert there, and the job would run
+        # against host toolchains with the env's name on the manifest.
+        # Demand the load PRODUCT: the module (or a versioned expansion
+        # of it) listed as loaded.
+        pat = shlex.quote(f"^{m}(/|$)")
+        lines.append(
+            f"module list -t 2>&1 | grep -Eq {pat} || "
+            f"{{ echo 'weft: module load {m} left no load product "
+            f"(silent Tcl-EM failure?)' >&2; exit 90; }}"
+        )
     return "\n".join(lines)
 
 
