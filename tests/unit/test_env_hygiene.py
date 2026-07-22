@@ -67,8 +67,12 @@ def test_job_env_vars_override_locale(tmp_path, pixi_bin):
 
 # ── module load: the product is the proof ──────────────────────────────────
 
+# fakes mirror the REAL CLI shape (clip reality): switches precede the
+# subcommand — `module -t list`; Lmod 8.1 reads a trailing -t as a
+# match pattern and lists nothing
 _TCL_EM_SILENT = """
 module() {
+    [ "$1" = -t ] && shift
     if [ "$1" = load ]; then
         echo "ERROR:102: Tcl command execution failed" >&2
         return 0
@@ -80,6 +84,7 @@ module() {
 _HONEST = """
 WEFT_TEST_LOADED=""
 module() {
+    [ "$1" = -t ] && shift
     if [ "$1" = load ]; then
         WEFT_TEST_LOADED="$WEFT_TEST_LOADED $2"
         return 0

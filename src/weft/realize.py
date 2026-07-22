@@ -70,10 +70,13 @@ def module_prelude(modules: list[str], modules_init: str = "") -> str:
         # ZERO — the || above is inert there, and the job would run
         # against host toolchains with the env's name on the manifest.
         # Demand the load PRODUCT: the module (or a versioned expansion
-        # of it) listed as loaded.
+        # of it) listed as loaded. Switch order is `module -t list`
+        # (Lmod 8.1 parses a trailing -t as a MATCH PATTERN — clip
+        # reality find); grep -i because sites re-case names (clip
+        # lists gcc for GCC).
         pat = shlex.quote(f"^{m}(/|$)")
         lines.append(
-            f"module list -t 2>&1 | grep -Eq {pat} || "
+            f"module -t list 2>&1 | grep -iEq {pat} || "
             f"{{ echo 'weft: module load {m} left no load product "
             f"(silent Tcl-EM failure?)' >&2; exit 90; }}"
         )
