@@ -866,6 +866,14 @@ class _SiteLease:
                 f"mkdir {shlex.quote(self.lease)} 2>/dev/null && echo got "
                 f"|| echo busy", timeout=30)
             if "got" in r.out:
+                # the previous holder may have finished BETWEEN our
+                # ready-poll and this mkdir (release-then-acquire
+                # window): re-check while HOLDING the lease — winning
+                # the mkdir after a release must read as "adopt", not
+                # "rebuild an env other users already consume"
+                if self.adapter.file_exists(f"{self.rel}/.weft-ready"):
+                    self.release()
+                    return True
                 self._start_hb()
                 return False
             # another user is building: did they finish?
