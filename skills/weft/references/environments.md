@@ -130,14 +130,30 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   attached pre-install need `kernel_restart` (the install result says
   so). If you never plan to install, skip the session: `kernel_start(
   site, env_id=...)` attaches straight to the realization.
+  - The lane keys on WRITE-NEED, not base temperature: **pypi-only
+    adds become a pylib overlay on ANY base** (zero clone — only the
+    missing dep closure is fetched; two-phase pip: dry-run-resolve
+    with the base visible, then `--no-deps --target`); the clone is
+    reserved for conda-level mutations. `runtime` gains a `pylib`
+    field; the snapshot still mints the citable extends env. Pass
+    `full_clone=true` up front if conda adds are coming.
+  - conda (or an undeclared `run_installer`) AFTER a pylib overlay:
+    refused (`task.invalid`) with levers — `full_clone=true` upgrades
+    in place (clone, replay the pypi delta, strip the overlay;
+    crash-safe — a failed replay leaves the overlay working; result
+    carries `upgrade_note`) or `snapshot`. (`run_installer` with
+    `writes_to=` declared stays a layer run on COLD bases only — the
+    read-only mount fences the base; a warm base is the SHARED
+    realization, so warm installers always get a clone.)
   - COLD base (adopted pack / archive-unpacked: empty package cache):
-    pypi adds become a **pylib overlay** over the mount — only the
-    missing dep closure is fetched (two-phase pip: dry-run-resolve with
-    the base visible, then `--no-deps --target`); conda adds and
-    `run_installer` refuse with `session.cold_base` + levers
-    (`extends_env` / warm-cache site / `full_clone=true`). The base is
-    NEVER silently re-downloaded. `runtime` gains a `pylib` field; the
-    snapshot still mints the citable extends env.
+    conda adds and `run_installer` refuse with `session.cold_base` +
+    levers (`extends_env` / warm-cache site / `full_clone=true`). The
+    base is NEVER silently re-downloaded.
+  - Clone honesty: sessions dir and base on different devices ⇒ CoW
+    can't apply, clone = full copy — `cross_device_note` on the result
+    + `session.cross_device` event. `capabilities.storage.reflink`
+    (`sites_describe`) says whether the root volume CoW-clones
+    (true|false|"unknown") — gate eager pre-warming on it.
   - **R adds**: `session_install(cran=[...])` → a session **rlib**
     composed via `R_LIBS`, delta-only on ANY base (R skips
     base-satisfied deps natively; no clone, mode never flips). Takes

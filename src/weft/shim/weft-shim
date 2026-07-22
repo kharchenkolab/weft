@@ -5,7 +5,8 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=6   # v6: list-tree file roots (fingerprint verb)
+WEFT_SHIM_VERSION=7   # v7: storage.reflink probe
+                      # v6: list-tree file roots (fingerprint verb)
                       # v5: squashfs realization inputs (fuse/squashfuse/
                       # mksquashfs/userns/root fs); host-first glibc
 
@@ -116,6 +117,21 @@ cmd_probe() {
         cands="$cands$csep{\"path\":\"$d\",\"writable\":$(json_bool $wr),\"free_gb\":$cfree,\"total_gb\":$ctotal}"
         csep=","
     done
+    # reflink capability of the weft root's volume: consumers gate
+    # eager pre-warming on it (a CoW clone is ~free; a copy is not).
+    # true/false = cp's own answer; unknown = the probe could not run.
+    rl=unknown
+    rf="$root/.weft-rl.$$"
+    if echo x > "$rf" 2>/dev/null; then
+        if cp --reflink=always "$rf" "$rf.c" 2>/dev/null \
+           || cp -c "$rf" "$rf.c" 2>/dev/null; then
+            rl=true
+        else
+            rl=false
+        fi
+        rm -f "$rf" "$rf.c" 2>/dev/null
+    fi
+    case "$rl" in unknown) rl='"unknown"';; esac
     cat <<EOF
 {"shim_version": $WEFT_SHIM_VERSION,
  "os": "$os", "arch": "$arch", "hostname": "$host",
@@ -129,7 +145,7 @@ cmd_probe() {
               "mksquashfs": "${sq_mk:-}", "userns": $(json_bool $sq_userns),
               "root_fs": "${root_fs:-}"},
  "storage": {"weft_root": "$root", "free_gb": $free_gb, "total_gb": $total_gb,
-             "candidates": [${cands:-}]}}
+             "reflink": $rl, "candidates": [${cands:-}]}}
 EOF
 }
 

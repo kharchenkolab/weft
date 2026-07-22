@@ -81,6 +81,9 @@ def test_storage_candidates_probed(w):
     assert "/tmp" in cands
     assert cands["/tmp"]["writable"] is True
     assert any(c["path"].startswith("/home") for c in cands.values())
+    # reflink capability of the root volume: consumers gate eager
+    # pre-warming on it (aba perf note). tri-state, never absent.
+    assert caps["storage"]["reflink"] in (True, False, "unknown")
 
 
 def test_gpu_ask_routes_to_the_gpu_partition(w):

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json as _json
 import shlex
+import time
 import uuid
 
 from .adapters.base import SiteAdapter
@@ -244,14 +245,19 @@ class SessionManager:
                                f"{adapter.name} — installs will refuse")
         return out
 
-    def _materialize(self, s: dict, adapter: SiteAdapter) -> bool:
+    def _materialize(self, s: dict, adapter: SiteAdapter,
+                     flip: bool = True) -> bool:
         """Clone the writable per-session prefix (manifest + lock from
         the STORE — an overlay realization has no pixi files of its own;
         the install is a hardlink forest from the shared package cache).
         Deferred to the first mutation. Returns True iff this call did
-        the clone."""
+        the clone. flip=False clones WITHOUT flipping the persisted
+        mode — the pylib→clone upgrade needs the clone first and the
+        mode flip LAST (crash anywhere between leaves a session that
+        still composes through the overlay)."""
         if s.get("materialized", True):
             return False
+        _t0 = time.monotonic()
         site_row = self.store.get_site(adapter.name)
         from .capability import compute_view
         if not compute_view((site_row or {}).get("capabilities")
@@ -265,6 +271,28 @@ class SessionManager:
                                      "deliver a packed realization"})
         env_row = self.store.get_env(s["base_env_id"])
         rel = s["location"]
+        # honesty check BEFORE the clone: sessions/ and the package
+        # cache on different mounts silently degrade reflink/hardlink
+        # to a full copy (~10x measured in the field) — say so loudly
+        cache = getattr(adapter, "pixi_cache", None) \
+            or adapter.path("cache/pixi")
+        dev = adapter.run_cmd(
+            f"mkdir -p {shlex.quote(adapter.path(rel))} "
+            f"{shlex.quote(cache)} 2>/dev/null; "
+            f"a=$(stat -c %d {shlex.quote(adapter.path(rel))} 2>/dev/null"
+            f" || stat -f %d {shlex.quote(adapter.path(rel))}); "
+            f"b=$(stat -c %d {shlex.quote(cache)} 2>/dev/null"
+            f" || stat -f %d {shlex.quote(cache)}); "
+            f"[ \"$a\" = \"$b\" ] && echo same || echo cross")
+        if dev.out.strip() == "cross":
+            s["_cross_device_note"] = (
+                "sessions and the package cache sit on DIFFERENT "
+                "devices: reflink/hardlink cannot apply and this clone "
+                "is a full copy (~10x slower) — co-locate them (site "
+                "root / pixi_cache / local_cache_dir)")
+            self.store.emit("session.cross_device",
+                            session=s["session_id"], cache=cache,
+                            location=adapter.path(rel))
         adapter.write_file(f"{rel}/pixi.toml", env_row["manifest"].encode())
         adapter.write_file(f"{rel}/pixi.lock", env_row["native_lock"].encode())
         from .realize import _virtual_pkg_overrides
@@ -279,10 +307,14 @@ class SessionManager:
                 "env.realize_failed", "session clone failed", stage="realize",
                 hints={"log_tail": (r.err or r.out)[-1000:]},
             )
-        self.store.set_session_materialized(s["session_id"])
-        s["materialized"] = True
-        self.store.emit("session.materialized", session=s["session_id"],
-                        base=s["base_env_id"])
+        s["_clone_seconds"] = round(time.monotonic() - _t0, 2)
+        if flip:
+            self.store.set_session_materialized(s["session_id"])
+            s["materialized"] = True
+            self.store.emit("session.materialized",
+                            session=s["session_id"],
+                            base=s["base_env_id"],
+                            seconds=s["_clone_seconds"])
         return True
 
     @staticmethod
@@ -1027,6 +1059,67 @@ class SessionManager:
                 "attempts": attempts, "verified": verified,
                 "session_id": session_id, "runtime": runtime}
 
+    def _remove_overlay_line(self, s: dict, adapter: SiteAdapter,
+                             contains: str) -> None:
+        """Inverse of _ensure_overlay_line: drop lines mentioning a
+        path (atomic rewrite; other layers' lines survive)."""
+        rel = f"{s['location']}/overlay.sh"
+        try:
+            current = adapter.read_file(rel).decode()
+        except WeftError:
+            return
+        kept = [ln for ln in current.splitlines()
+                if contains not in ln]
+        adapter.write_file(rel, ("\n".join(kept) + "\n").encode())
+
+    def _upgrade_pylib_to_clone(self, session_id: str, s: dict,
+                                adapter: SiteAdapter) -> str:
+        """Absorb the pylib layer into a writable clone. ORDERING IS
+        THE CONTRACT: clone (no mode flip) -> replay recorded pypi adds
+        into the prefix -> only then strip the overlay and flip the
+        mode. A crash anywhere before the flip leaves a session that
+        still composes through the overlay — re-running converges."""
+        _t0 = time.monotonic()
+        pypi_rec = list(s.get("added_pypi") or [])
+        s["materialized"] = False
+        self._materialize(s, adapter, flip=False)
+        s["materialized"] = True             # in-memory only; store
+        #                                      still says pylib until
+        #                                      the flip below
+        if pypi_rec:
+            got = self._fast_pypi(s, adapter, pypi_rec)
+            if got is None or "error" in (got or {}):
+                manifest = adapter.path(f"{s['location']}/pixi.toml")
+                r = adapter.run_cmd(
+                    f"{shlex.quote(adapter.pixi_bin)} add --pypi "
+                    f"--manifest-path {shlex.quote(manifest)} "
+                    + " ".join(shlex.quote(_pixi_spec(x))
+                               for x in pypi_rec),
+                    timeout=900)
+                if r.rc != 0:
+                    raise WeftError(
+                        "env.realize_failed",
+                        "pylib->clone upgrade could not replay the "
+                        "recorded pypi adds into the clone — the "
+                        "session STILL WORKS through its overlay; "
+                        "retry or snapshot",
+                        stage="realize",
+                        hints={"replay": pypi_rec,
+                               "log_tail": (r.err or r.out)[-800:]})
+        pylib = adapter.path(f"{s['location']}/pylib")
+        self._remove_overlay_line(s, adapter, "/pylib")
+        adapter.run_cmd(f"rm -rf {shlex.quote(pylib)}")
+        self.store.set_session_materialized(session_id, mode="clone")
+        s["materialize_mode"] = "clone"
+        self.store.emit("session.materialized", session=session_id,
+                        base=s["base_env_id"], mode="clone",
+                        upgraded_from="pylib", replayed=len(pypi_rec),
+                        seconds=round(time.monotonic() - _t0, 2))
+        return (f"pylib layer absorbed into the writable clone "
+                f"({len(pypi_rec)} recorded pypi add(s) replayed); "
+                f"running python kernels switch to the prefix on their "
+                f"next block")
+
     def _base_cold(self, s: dict, adapter: SiteAdapter) -> bool:
         """Is the base's package cache COLD on this site? An adopted
         (read-only) or archive-unpacked (packed) realization was never
@@ -1352,16 +1445,20 @@ class SessionManager:
                                 "R_LIBS — dependencies the base holds "
                                 "were skipped natively; the snapshot's "
                                 "solve pins versions"}
-        # COLD base (adopted/unpacked here — empty package cache): a full
-        # clone re-downloads the entire base, so pypi adds go into a
-        # pylib overlay over the mount and conda adds refuse with levers.
+        # The overlay lane is gated on WRITE-NEED, not base temperature
+        # (aba perf note, measured): a pypi-only add lays a pylib layer
+        # on ANY not-yet-cloned base — the ~10s prefix clone is paid
+        # only by mutations that NEED a writable prefix (conda adds,
+        # or an explicit full_clone). Cold bases additionally refuse
+        # conda adds with levers (cloning would re-download the base).
         mode = s.get("materialize_mode",
                      "clone" if s.get("materialized", True) else "none")
-        if mode != "clone" and not full_clone \
-                and self._base_cold(s, adapter):
-            if conda:
-                raise self._cold_refusal(
-                    s, f"adding conda package(s) {conda}")
+        cold = mode != "clone" and self._base_cold(s, adapter)
+        if cold and conda and not full_clone:
+            raise self._cold_refusal(
+                s, f"adding conda package(s) {conda}")
+        if mode in ("none", "pylib") and pypi and not conda \
+                and not full_clone:
             got = self._materialize_pylib(s, adapter, pypi)
             self.store.session_add_deps(session_id, [], pypi)
             self.store.emit("session.installed", session=session_id,
@@ -1387,12 +1484,22 @@ class SessionManager:
                 out["installed"]["cran"] = rlib_out["installed"]
                 out["rlib"] = rlib_out["rlib"]
             return out
-        if mode == "pylib" and full_clone:
-            raise WeftError(
-                "task.invalid",
-                "this session already materialized as a pylib overlay — "
-                "snapshot it to mint a real env instead of mixing modes",
-                stage="realize")
+        upgrade_note = None
+        if mode == "pylib":
+            if not full_clone:
+                raise WeftError(
+                    "task.invalid",
+                    "this session runs as a pylib overlay; this addition "
+                    "needs a writable prefix",
+                    stage="realize",
+                    hints={"levers": {
+                        "full_clone": "clone the prefix and ABSORB the "
+                                      "pylib layer (recorded pypi adds "
+                                      "are replayed into the clone)",
+                        "snapshot": "mint the env and start a session "
+                                    "on it"}})
+            upgrade_note = self._upgrade_pylib_to_clone(session_id, s,
+                                                        adapter)
         # first mutation pays for mutability: clone the prefix now
         first_clone = self._materialize(s, adapter)
         clone_note = ("writable prefix cloned on this first install; "
@@ -1418,6 +1525,11 @@ class SessionManager:
                                     "solve at add time"}
                 if clone_note:
                     fast_out["materialized_note"] = clone_note
+                if upgrade_note:
+                    fast_out["upgrade_note"] = upgrade_note
+                xdev = s.pop("_cross_device_note", None)
+                if xdev:
+                    fast_out["cross_device_note"] = xdev
                 if rlib_out:
                     fast_out["installed"]["cran"] = rlib_out["installed"]
                     fast_out["rlib"] = rlib_out["rlib"]
@@ -1435,7 +1547,9 @@ class SessionManager:
                 f"{shlex.quote(adapter.pixi_bin)} add --pypi --manifest-path "
                 f"{shlex.quote(manifest)} {' '.join(shlex.quote(_pixi_spec(p)) for p in pypi)}"
             )
+        _t_add = time.monotonic()
         r = adapter.run_cmd(" && ".join(parts), timeout=900)
+        _add_s = round(time.monotonic() - _t_add, 2)
         if r.rc != 0:
             tail = (r.err or r.out)[-1500:]
             code, retryable, why, stg = _pixi_add_failure(tail)
@@ -1449,7 +1563,7 @@ class SessionManager:
                             hints=hints)
         self.store.session_add_deps(session_id, conda, pypi)
         self.store.emit("session.installed", session=session_id,
-                        conda=conda, pypi=pypi)
+                        conda=conda, pypi=pypi, seconds=_add_s)
         out = {"installed": {"conda": conda, "pypi": pypi},
                "session_id": session_id,
                # the flip moment: a caller holding start-time runtime
@@ -1461,6 +1575,11 @@ class SessionManager:
             out["rlib"] = rlib_out["rlib"]
         if clone_note:
             out["materialized_note"] = clone_note
+        if upgrade_note:
+            out["upgrade_note"] = upgrade_note
+        xdev = s.pop("_cross_device_note", None)
+        if xdev:
+            out["cross_device_note"] = xdev
         if fallback_tail:
             out["fast_fallback"] = ("direct install failed; solved the "
                                     "full manifest instead: "
@@ -1515,14 +1634,36 @@ class SessionManager:
         # as the session's own layer: the base is filesystem-read-only
         # anyway (EROFS), weft provisions the layer and points the
         # ecosystem's env at it, and the command runs over the mount.
+        mode = s.get("materialize_mode",
+                     "clone" if s.get("materialized", True) else "none")
         layer_run = False
-        if not full_clone and self._base_cold(s, adapter) \
-                and s.get("materialize_mode", "clone") != "clone":
+        if not full_clone and mode != "clone" \
+                and self._base_cold(s, adapter):
             if writes_to not in ("rlib", "pylib"):
                 raise self._cold_refusal(s, "an undeclared installer")
             layer_run = True
         first_clone = False
+        upgrade_note = None
         if not layer_run:
+            # a pylib-overlay session has NO writable prefix to run the
+            # installer in (and the WARM base underneath is the SHARED
+            # realization — never a write target): same contract as
+            # conda-after-pylib, explicit upgrade or refusal
+            if mode == "pylib":
+                if not full_clone:
+                    raise WeftError(
+                        "task.invalid",
+                        "this session runs as a pylib overlay; a bespoke "
+                        "installer needs a writable prefix",
+                        stage="realize",
+                        hints={"levers": {
+                            "full_clone": "clone the prefix and ABSORB "
+                                          "the pylib layer, then run the "
+                                          "installer in the clone",
+                            "snapshot": "mint the env and start a "
+                                        "session on it"}})
+                upgrade_note = self._upgrade_pylib_to_clone(session_id, s,
+                                                           adapter)
             # an installer mutates the prefix: first mutation clones it
             first_clone = self._materialize(s, adapter)
         captured = None
@@ -1589,6 +1730,11 @@ class SessionManager:
                           "files, or the env will only rebuild on this "
                           "machine")}
         out["runtime"] = self.runtime(s, adapter)
+        if upgrade_note:
+            out["upgrade_note"] = upgrade_note
+        xdev = s.pop("_cross_device_note", None)
+        if xdev:
+            out["cross_device_note"] = xdev
         if layer_run:
             out["writes_to"] = writes_to
             out["note"] += (

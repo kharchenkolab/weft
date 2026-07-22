@@ -439,12 +439,17 @@ def test_cold_base_full_clone_override_routes_to_clone(tmp_path, pixi_bin,
 
 
 def test_kernel_on_cold_session_gets_pylib_hook(tmp_path, pixi_bin):
+    """BOTH forward hooks ride the base lane (perf round): which lane
+    the session takes is decided by its first install's write-need,
+    which may postdate the kernel — pylib serves the overlay lane,
+    prefix takes over after a pylib->clone upgrade. The driver
+    tolerates whichever path never appears."""
     w, sid = _cold_session(tmp_path, pixi_bin)
     k = w.kernel_start("local", "python", session_id=sid)["kernel_id"]
     try:
         act = (tmp_path / "site" / "kernels" / k / "activate.sh").read_text()
         assert "WEFT_SESSION_PYLIB" in act and "overlay.sh" in act
-        assert "WEFT_SESSION_PREFIX" not in act
+        assert "WEFT_SESSION_PREFIX" in act
     finally:
         w.kernel_stop(k)
 

@@ -149,22 +149,23 @@ class KernelManager:
                 real = self.store.get_realization(ns_env_id, site)
                 rel0 = (real or {}).get("location") or env_dir_rel(ns_env_id)
                 activate = f". {shlex.quote(adapter.path(rel0))}/activate.sh"
-                pylib_lane = s_mode == "pylib" or (
-                    self.sessions is not None
-                    and self.sessions._base_cold(s, adapter))
-                if pylib_lane:
-                    pylib = adapter.path(f"{s['location']}/pylib")
-                    activate += (
-                        f" && export WEFT_SESSION_PYLIB="
-                        f"{shlex.quote(pylib)}")
-                else:
-                    prefix = adapter.path(
-                        f"{s['location']}/.pixi/envs/default")
-                    activate += (
-                        f" && export WEFT_SESSION_PREFIX="
-                        f"{shlex.quote(prefix)} && "
-                        f"export PATH={shlex.quote(prefix + '/bin')}:"
-                        f"\"$PATH\"")
+                # arm BOTH forward hooks: which lane the session takes
+                # is decided by its FIRST install (write-need), which
+                # may not have happened yet — a pypi-only add lands as
+                # pylib, a conda add (or upgrade) as the clone prefix.
+                # The driver tolerates the absent one, and after a
+                # pylib->clone upgrade the prefix hook takes over on
+                # the next block (the stripped pylib path goes dead).
+                pylib = adapter.path(f"{s['location']}/pylib")
+                prefix = adapter.path(
+                    f"{s['location']}/.pixi/envs/default")
+                activate += (
+                    f" && export WEFT_SESSION_PYLIB="
+                    f"{shlex.quote(pylib)}"
+                    f" && export WEFT_SESSION_PREFIX="
+                    f"{shlex.quote(prefix)} && "
+                    f"export PATH={shlex.quote(prefix + '/bin')}:"
+                    f"\"$PATH\"")
             overlay = adapter.path(f"{s['location']}/overlay.sh")
             rlib = adapter.path(f"{s['location']}/rlib")
             activate += (

@@ -22,4 +22,5 @@ markers = [
     "docker: needs local docker daemon",
     "solver: needs network access to package indexes",
     "slow: long-running integration test",
+    "bench: measured perf assertions (thresholds 3-5x baseline; prints numbers)",
 ]

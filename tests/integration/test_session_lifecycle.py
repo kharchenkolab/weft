@@ -26,6 +26,9 @@ def w(tmp_path, pixi_bin):
 
 def _session(w, sid="ses_test1", loc="sessions/ses_test1"):
     w.store.put_session(sid, ENV, "local", loc)
+    # these tests pin the fast-solve-into-prefix path, which post-regate
+    # only cloned sessions take (pypi-only on an uncloned base = pylib)
+    w.store.set_session_materialized(sid)
     return sid
 
 

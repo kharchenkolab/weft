@@ -336,25 +336,50 @@ the install result says so. If you never intend to install,
 `kernel_start(site, env_id=...)` attaches to the realization directly
 and needs no session at all.
 
-On an **adopted/imported base** — one that arrived as a read-only pack
-or an unpacked archive rather than being *built* on this site (the
-record calls this a cold base: the site's package cache holds none of
-its packages, a fact fixed at adoption and never re-probed) — cloning
-the manifest would re-download the entire base from the index (1.6 GB
-in the field case; impossible on an egress-restricted node). So there,
-pypi adds materialize a **pylib overlay** instead: the delta is
-resolved *with the base visible* (`pip --dry-run --report`), only the
-missing closure is fetched (`--no-deps --target`), and the layer
-composes over the mount via `PYTHONPATH` (persisted in the session's
-`overlay.sh`; `runtime` carries `pylib` and the composed activation).
-conda adds and bespoke installers there refuse with `session.cold_base`
-and three levers: `extends_env` (mint a real delta env — the citable
-twin of the same composition), run it where the base was *built* (warm
-cache), or `full_clone=true` (fetch the whole base; needs egress). The
-mode is decided once from the base's provenance and recorded on the
-session — every later install takes the SAME lane (each resolve sees
-base + the existing layer), and mode mixing is refused, so mechanisms
-never switch or clash mid-session. On built-here bases nothing changes.
+The materialization lane is chosen by **write-need, not base
+temperature**: a pypi-only add never needs a writable prefix, so it
+lays a **pylib overlay** on ANY base — built-here or adopted — with no
+per-session clone at all (the ~10s CoW clone of a large prefix is
+reserved for installs that actually mutate the prefix). The overlay:
+the delta is resolved *with the base visible* (`pip --dry-run
+--report`), only the missing closure is fetched (`--no-deps
+--target`), and the layer composes over the base via `PYTHONPATH`
+(persisted in the session's `overlay.sh`; `runtime` carries `pylib`
+and the composed activation). conda adds DO need the prefix: on a
+built-here base they clone it (CoW where the volume supports it); on
+an **adopted/imported base** — a read-only pack or unpacked archive
+whose packages the site's cache has never held (a fact fixed at
+adoption and never re-probed) — the clone would re-download the entire
+base from the index (1.6 GB in the field case; impossible on an
+egress-restricted node), so they refuse with `session.cold_base` and
+three levers: `extends_env` (mint a real delta env — the citable twin
+of the same composition), run it where the base was *built* (warm
+cache), or `full_clone=true` (fetch the whole base; needs egress).
+
+A conda add — or a bespoke `session_run_installer` without a
+declared `writes_to` layer — ARRIVING AFTER a pylib overlay refuses
+(`task.invalid`) with two levers rather than silently switching
+mechanisms:
+`full_clone=true` upgrades the session in place — clone the base,
+replay the overlay's recorded pypi delta into the clone, strip the
+overlay — ordered crash-safe (the mode flips to `clone` LAST; if the
+replay fails the typed error says so and the session STILL WORKS
+through its overlay; retry converges). Or `snapshot` + start fresh
+from the minted env. The result carries `upgrade_note` when an
+upgrade absorbed an overlay. Pass `full_clone=true` on the FIRST
+install to skip the overlay and clone up front (e.g. when you know
+conda-level adds are coming).
+
+Two honesty signals on the clone path: if the sessions directory and
+the base sit on **different devices** (st_dev), CoW cannot apply and
+the clone degrades to a full copy — the result carries
+`cross_device_note` and a `session.cross_device` event fires (measured
+~98s vs ~10s for a large prefix; fix: put sessions and the store on
+one volume). And `sites_describe(site)["capabilities"]["storage"]
+["reflink"]` reports whether the site root's volume supports CoW
+clones (`true|false|"unknown"` — probed at registration with a real
+`cp --reflink`/`cp -c` self-test), so consumers can gate eager
+pre-warming on it.
 
 **`ensure_available(target, request, verify=True)`** — the one-verb
 install path: make an eco-tagged delta available in a session, prove
@@ -463,7 +488,12 @@ gone; each unconfirmed poll resends and emits `job.cancel_retry`.
 Lease deaths are `kernel.died` /
 `service.exited`, each carrying `cause`
 ("walltime_exceeded"/"oom"/"cancelled"/"exited"/"lost") and, on
-scheduler sites, the raw `slurm_state`. Unknown kinds should be
+scheduler sites, the raw `slurm_state`. Duration-bearing events carry
+explicit `seconds` (`session.materialized`, upgrade included) or
+per-phase timings (`session.installed`: `seconds`, or
+`resolve_s`/`fetch_s`/`total_s` on the pylib lane) — consumers
+attribute latency from the payload, never by subtracting adjacent
+event timestamps. Unknown kinds should be
 ignored (new kinds are always additive).
 
 ```python

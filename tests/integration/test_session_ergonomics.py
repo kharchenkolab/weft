@@ -65,18 +65,18 @@ def test_bespoke_installer_is_captured_and_carried(w, tmp_path):
 
 
 def test_fast_pypi_add_is_usable_and_snapshot_solves(w):
-    """The interactive hot path (aba note): a one-leaf pypi add lands
-    without re-solving the manifest, is immediately importable, and the
-    snapshot's full solve still mints honest identity from the recorded
-    dep."""
+    """The interactive hot path (aba note, regated on write-need): a
+    one-leaf pypi add on a warm base lands as a pylib overlay — NO
+    manifest re-solve AND no prefix clone — is immediately importable,
+    and the snapshot's full solve still mints honest identity from the
+    recorded dep."""
     s = w.session_start({"name": "hot", "deps": {"conda": ["python =3.12",
                                                            "pip"]}},
                         "local")
     sid = s["session_id"]
     r = w.session_install(sid, pypi=["six"])
-    assert r.get("solved") is False, r        # no solve happened
-    assert r["method"] in ("uv", "pip")
-    assert r["verified_at"] == "snapshot"
+    assert r["mode"] == "pylib", r            # zero-clone lane
+    assert w.store.get_session(sid)["materialize_mode"] == "pylib"
     assert w.session_exec(
         sid, "python -c 'import six; print(six.__version__)'")["rc"] == 0
     snap = w.session_snapshot(sid, name="hot-snap")
