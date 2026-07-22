@@ -68,7 +68,9 @@ def lab(tmp_path_factory, pixi_bin, sshd_site, linux_platforms):
     assert not a.file_exists(r["staging"]["dir"])
     h = py_base["env_id"].rsplit(":", 1)[-1]
     mnt_ls = a.run_cmd(f"ls -A {TREE}/envs/{h}/mnt").out.strip()
-    assert mnt_ls == "", f"tree mountpoint not empty: {mnt_ls!r}"
+    # the mountpoint carries EXACTLY the legibility tombstones (.pixi
+    # shims, shadowed by the mounted image — 5835e4f) and no mount litter
+    assert mnt_ls == ".pixi", f"unexpected mountpoint content: {mnt_ls!r}"
 
     tiny = pub.env_ensure({"name": "lab-tiny", "platforms": linux_platforms,
                            "deps": {"conda": ["xz >=5"]}})

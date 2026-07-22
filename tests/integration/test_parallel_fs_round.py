@@ -659,7 +659,7 @@ def test_cran_rlib_end_to_end_on_adopted_base(tmp_path, pixi_bin):
         out = w.session_install(sid, cran=["praise"])
         assert out["mode"] == "rlib", out
         sdir = tmp_path / "site" / "sessions" / sid
-        assert (sdir / "rlib" / "crayon").is_dir()
+        assert (sdir / "rlib" / "praise").is_dir()
         assert not (sdir / ".pixi").exists()     # no clone
 
         # live-install contract for R: next block, no restart
