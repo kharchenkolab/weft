@@ -158,6 +158,32 @@ def refuse_duplicate_deps(eco: str, deps: list[str],
         seen[key] = dep
 
 
+def _validated_verify(v) -> dict | None:
+    if v is None:
+        return None
+    from .verify import validate_verify
+    out = validate_verify(v)
+    return out or None
+
+
+def merge_verify(parent: dict | None, child: dict | None) -> dict | None:
+    """Postconditions COMPOSE along the identity chain like the layers
+    do (base UNION child; the child's version assertion overrides the
+    base's per package) — else an extended env's realization passes
+    while its inherited claims are broken."""
+    if not parent:
+        return child
+    if not child:
+        return parent
+    out = {"import": list(dict.fromkeys(
+               (parent.get("import") or []) + (child.get("import") or []))),
+           "loads": list(dict.fromkeys(
+               (parent.get("loads") or []) + (child.get("loads") or []))),
+           "versions": {**(parent.get("versions") or {}),
+                        **(child.get("versions") or {})}}
+    return {k: v for k, v in out.items() if v} or None
+
+
 def _merge_deps(parent: list[str], child: list[str],
                 eco: str = "conda") -> list[str]:
     """Child-wins merge, keyed per ECOSYSTEM — keying every lane with
@@ -226,6 +252,12 @@ class EnvSpec:
     # pin. `notes` is free text; `step_notes` annotates post_install by index.
     notes: list[str] = field(default_factory=list)
     step_notes: dict[str, str] = field(default_factory=dict)
+    # realize POSTCONDITION (ensure_available P2): proven every time the
+    # env realizes (build always; adopt per site policy). IDENTITY-
+    # NEUTRAL like notes — a postcondition is a claim ABOUT the
+    # artifact, not part of what it is; it must never fork the EnvID
+    # or enter the hashed canonical.
+    verify: dict | None = None
 
     # -- serialization ------------------------------------------------------
 
@@ -238,7 +270,7 @@ class EnvSpec:
             "container_base", "env_vars", "post_install", "extends",
             "system_requirements", "notes", "step_notes",
             "post_install_inputs", "extends_env",
-            "r_repositories", "r_release_repos",
+            "r_repositories", "r_release_repos", "verify",
         }
         if unknown:
             raise WeftError(
@@ -312,6 +344,7 @@ class EnvSpec:
             notes=[str(n) for n in (d.get("notes") or [])],
             step_notes={str(k): str(v)
                         for k, v in (d.get("step_notes") or {}).items()},
+            verify=_validated_verify(d.get("verify")),
         )
 
     def to_dict(self) -> dict:
@@ -335,9 +368,10 @@ class EnvSpec:
             "r_release_repos": self.r_release_repos,
             "notes": self.notes,
             "step_notes": self.step_notes,
+            **({"verify": self.verify} if self.verify else {}),
         }
 
-    IDENTITY_NEUTRAL = ("notes", "step_notes")
+    IDENTITY_NEUTRAL = ("notes", "step_notes", "verify")
 
     def spec_hash(self) -> str:
         # notes never perturb identity: an agent may annotate a spec
@@ -375,6 +409,7 @@ class EnvSpec:
             modules=parent.modules + [m for m in self.modules if m not in parent.modules],
             container_base=self.container_base or parent.container_base,
             env_vars={**parent.env_vars, **self.env_vars},
+            verify=merge_verify(parent.verify, self.verify),
             post_install=parent.post_install + self.post_install,
             post_install_inputs=parent.post_install_inputs
             + self.post_install_inputs,

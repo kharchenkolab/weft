@@ -130,7 +130,8 @@ def explicit_checks(verify: dict, lane_of: dict[str, str]) -> list[dict]:
     checks += [{"name": n, "kind": "loads", "want": None}
                for n in verify.get("loads", [])]
     for n, spec in verify.get("versions", {}).items():
-        kind = "loads" if lane_of.get(n) == "cran" else "metadata"
+        kind = {"cran": "loads", "conda": "conda_meta"}.get(
+            lane_of.get(n), "metadata")
         checks.append({"name": n, "kind": kind, "want": spec})
     return checks
 
@@ -270,6 +271,21 @@ def run_verify(exec_fn, lane: str, checks: list[dict],
                                       f"{e.code}: {e.detail[:160]}"}
                 for c in checks}
     return parse_verify_output(r.out or "", r.rc, checks)
+
+
+def run_grouped(exec_fn, checks: list[dict],
+                timeout: float = 180.0) -> dict[str, dict]:
+    """Group checks by ORACLE (loads -> R, conda_meta -> sh,
+    metadata/import -> python) and run each group — the one grouping
+    rule for every consumer (session and realize)."""
+    by: dict[str, list] = {"cran": [], "conda": [], "pypi": []}
+    for c in checks:
+        by[{"loads": "cran", "conda_meta": "conda"}.get(
+            c["kind"], "pypi")].append(c)
+    out: dict[str, dict] = {}
+    for lane, group in by.items():
+        out.update(run_verify(exec_fn, lane, group, timeout))
+    return out
 
 
 def _shquote(s: str) -> str:

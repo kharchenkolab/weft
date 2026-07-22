@@ -231,7 +231,9 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
         # where possible, and never leave a mount behind either way
         wrap = "unshare -rm" if squashfs_mode(caps) == "userns" else ""
         _spot_check_and_mark(env_id, env_row, adapter, rel, "squashfs",
-                             extra=meta, wrap=wrap)
+                             extra=meta, wrap=wrap,
+                             verify_block=(weft.store.get_spec(
+                                 env_row["spec_hash"]) or {}).get("verify"))
         if not wrap:
             _ensure_unmounted(adapter, f"{adapter.path(rel)}/mnt")
         meta["build_s"] = round(time.time() - t0, 1)

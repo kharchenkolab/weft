@@ -494,6 +494,13 @@ w.env_why(env_id, "data.table")      # what pulls it in / the locked record
 ```
 
 Missing interpreter → `env.layer_conflict` names exactly what to add.
+A spec may carry a `verify` block (same grammar as session verify=):
+it is IDENTITY-NEUTRAL (never forks the EnvID) and is proven every
+time the env realizes — build-time always (ready MEANS verified;
+failure is `env.realize_failed` with `postcondition: true`),
+adopt-time by default with a site-policy opt-out
+(`policy: {verify_on_adopt: false}`). Verify blocks compose along
+`extends_env` (base ∪ child; the child's version assertion wins).
 A package name listed twice in one lane is refused at intake
 (`task.invalid` naming both entries) — generators that splice a base
 pin with caller packages must deduplicate.

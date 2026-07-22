@@ -97,6 +97,11 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     A contradiction raises `env.layer_conflict` naming the package and the
     lever (`extends` for a free re-solve). This is the right tool
     mid-analysis: "add emcee to what I have" without re-solving the world.
+- **Postconditions**: a spec's `verify` block (same grammar as
+  session verify=) is identity-neutral and proven at every realize —
+  build always (ready means verified), adopt by default
+  (`policy: {verify_on_adopt: false}` opts a site out). Composes
+  along `extends_env` (base ∪ child).
 - **Re-solve only on request:** `env_ensure(spec, update=True)` picks up new
   channel state; the old EnvID stays valid for reproducing old results.
 - **GPU:** `env_gpu_hint(site)` reads the probed driver and returns the

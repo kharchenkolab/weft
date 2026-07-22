@@ -189,6 +189,42 @@ def ensure_realization(
                         store.emit("realize.parent_changed", env_id=env_id,
                                    site=adapter.name, parent=marker["parent"])
                 if ok:
+                    # adopt-time postcondition (default ON, site-policy
+                    # opt-out): adoption of a pre-built realization on a
+                    # new site is where ABI surprises live — the
+                    # installs-but-won't-load class. failed => treated
+                    # exactly like a fence failure (rebuild / RO-report);
+                    # unknown => adopt + event (can't-verify is not
+                    # broken; blocking would rebuild-loop on a flaky
+                    # oracle).
+                    vblock = (store.get_spec(env_row["spec_hash"]) or {}
+                              ).get("verify")
+                    policy = (site_config or {}).get("policy") or {}
+                    if vblock and policy.get("verify_on_adopt", True):
+                        from .capability import squashfs_mode
+                        vwrap = ("unshare -rm"
+                                 if "squashfs" in marked_strategy
+                                 and squashfs_mode(caps or {}) == "userns"
+                                 else "")
+                        try:
+                            v = _realize_postcondition(
+                                env_row, adapter, loc, vblock, wrap=vwrap,
+                                strict_unknown=False)
+                            if any(r["status"] == "unknown"
+                                   for r in v.values()):
+                                store.emit("realize.verify_unknown",
+                                           env_id=env_id,
+                                           site=adapter.name,
+                                           location=loc)
+                        except WeftError as e:
+                            if not (e.hints or {}).get("postcondition"):
+                                raise
+                            store.emit("realize.postcondition_failed",
+                                       env_id=env_id, site=adapter.name,
+                                       location=loc,
+                                       verified=e.hints.get("verified"))
+                            ok = False
+                if ok:
                     return existing
                 if existing.get("read_only"):
                     # verify-and-REPORT: the caller cannot rebuild what it
@@ -329,7 +365,10 @@ def ensure_realization(
             _spot_check_and_mark(env_id, env_row, adapter, rel, strategy,
                                  parent=overlay_parent,
                                  parent_loc=overlay_parent_loc,
-                                 extra=marker_extra, wrap=wrap)
+                                 extra=marker_extra, wrap=wrap,
+                                 verify_block=(store.get_spec(
+                                     env_row["spec_hash"]) or {}
+                                     ).get("verify"))
         except WeftError as e:
             store.set_realization(
                 env_id, adapter.name, strategy, rel, "failed", log=e.detail
@@ -378,6 +417,30 @@ def _adopt_from_ro_roots(env_id: str, env_row: dict, adapter: SiteAdapter,
                        owner_action=f"activation broken; the owner of {ro} "
                                     "must repair it; skipping")
             continue
+        vblock = (store.get_spec(env_row["spec_hash"]) or {}).get("verify")
+        policy = (site_config or {}).get("policy") or {}
+        if vblock and policy.get("verify_on_adopt", True):
+            from .capability import squashfs_mode
+            vwrap = ("unshare -rm"
+                     if "squashfs" in (marker.get("strategy") or "")
+                     and squashfs_mode(caps or {}) == "userns" else "")
+            try:
+                v = _realize_postcondition(env_row, adapter, loc, vblock,
+                                           wrap=vwrap,
+                                           strict_unknown=False)
+                if any(r["status"] == "unknown" for r in v.values()):
+                    store.emit("realize.verify_unknown", env_id=env_id,
+                               site=adapter.name, location=loc)
+            except WeftError as e:
+                if not (e.hints or {}).get("postcondition"):
+                    raise
+                store.emit("realize.ro_integrity_failed", env_id=env_id,
+                           site=adapter.name, location=loc,
+                           verified=e.hints.get("verified"),
+                           owner_action=f"postcondition failed; the owner "
+                                        f"of {ro} must re-materialize; "
+                                        f"skipping")
+                continue
         store.set_realization(env_id, adapter.name,
                               marker.get("strategy") or "prefix",
                               loc, "ready", read_only=True)
@@ -1138,10 +1201,58 @@ def _fence_ok(recorded: str | None, fresh_fn) -> bool:
     return recorded == fresh_fn()
 
 
+def _realize_postcondition(env_row: dict, adapter: SiteAdapter,
+                           rel: str, vblock: dict, wrap: str = "",
+                           strict_unknown: bool = True) -> dict:
+    """The env's OWN postcondition (spec.verify, identity-neutral),
+    proven in the realized runtime before the realization is marked
+    ready — ready MEANS verified. failed => env.realize_failed
+    (postcondition: true). unknown at BUILD => retryable refusal (the
+    build is not marked; re-realizing converges) — a ready marker over
+    an unproven claim is the false-ready class this exists to kill.
+    Adopt callers pass strict_unknown=False (can't-verify is not
+    broken; they emit an event instead)."""
+    from .verify import explicit_checks, run_grouped
+    lane_of: dict[str, str] = {}
+    for plat_records in (env_row.get("canonical", {})
+                         .get("platforms") or {}).values():
+        for r in plat_records:
+            lane_of.setdefault(r.get("name", ""), r.get("kind", ""))
+    checks = explicit_checks(vblock, lane_of)
+
+    def exec_fn(script: str, timeout: float):
+        full = f". {shlex.quote(adapter.path(rel))}/activate.sh && "                f"( {script} )"
+        if wrap:
+            full = _ns_wrap_cmd(full)
+        return adapter.run_activated(full, timeout=timeout)
+
+    verified = run_grouped(exec_fn, checks)
+    failed = {n: r for n, r in verified.items() if r["status"] == "failed"}
+    unknown = {n: r for n, r in verified.items()
+               if r["status"] == "unknown"}
+    if failed:
+        raise WeftError(
+            "env.realize_failed",
+            f"realize postcondition failed for {sorted(failed)} — the "
+            f"environment built but does not hold its own claims",
+            stage="realize",
+            hints={"postcondition": True, "verified": verified})
+    if unknown and strict_unknown:
+        raise WeftError(
+            "env.realize_failed",
+            f"realize postcondition could not be VERIFIED for "
+            f"{sorted(unknown)} (oracle could not run) — not marked "
+            f"ready; re-realizing converges",
+            stage="realize", retryable=True,
+            hints={"postcondition": True, "verified": verified})
+    return verified
+
+
 def _spot_check_and_mark(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str, strategy: str,
     parent: str | None = None, parent_loc: str | None = None,
     extra: dict | None = None, wrap: str = "",
+    verify_block: dict | None = None,
 ) -> None:
     """Activation succeeds; interpreter runs if present; then fence-mark
     (with the bin inventory fingerprint for later integrity checks).
@@ -1162,6 +1273,8 @@ def _spot_check_and_mark(
             stage="realize",
             hints={"log_tail": (spot.err or spot.out)[-1000:], "retryable": True},
         )
+    if verify_block:
+        _realize_postcondition(env_row, adapter, rel, verify_block, wrap)
     import json as _json
     marker = {"strategy": strategy, **(extra or {})}
     if parent:

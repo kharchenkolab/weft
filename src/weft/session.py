@@ -563,8 +563,7 @@ class SessionManager:
         unknown-only => success with the packages unrecorded (re-install
         converges: late-record)."""
         from .spec import parse_cran_dep, split_constraint
-        from .verify import (default_checks, explicit_checks, run_verify,
-                             usable_want)
+        from .verify import default_checks, explicit_checks, usable_want
         s = self._get(session_id)
         requested = {"conda": conda, "pypi": pypi, "cran": cran}
         lanes: dict[str, tuple[list, dict, dict]] = {}
@@ -608,15 +607,9 @@ class SessionManager:
             for eco in ("conda", "pypi", "cran"):
                 nm, pn, _ = lanes[eco]
                 checks += default_checks(eco, nm, pn)
-        by_oracle: dict[str, list] = {"cran": [], "conda": [], "pypi": []}
-        for c in checks:
-            oracle = {"loads": "cran", "conda_meta": "conda"}.get(
-                c["kind"], "pypi")
-            by_oracle[oracle].append(c)
+        from .verify import run_grouped
         fn = self._verify_exec_fn(s, adapter)
-        verified: dict[str, dict] = {}
-        for oracle, group in by_oracle.items():
-            verified.update(run_verify(fn, oracle, group))
+        verified = run_grouped(fn, checks)
 
         not_passed = {n for n, r in verified.items()
                       if r["status"] != "passed"}
@@ -1256,7 +1249,7 @@ class SessionManager:
         if verify not in (None, False):
             # a bespoke cmd has no derivable defaults — weft cannot know
             # what it was supposed to produce; EXPLICIT checks only
-            from .verify import (explicit_checks, run_verify,
+            from .verify import (explicit_checks, run_grouped,
                                  validate_verify)
             eff = validate_verify(verify)
             if not eff:
@@ -1272,12 +1265,7 @@ class SessionManager:
             lane_of = {n: "cran" for n in eff.get("loads", [])}
             checks = explicit_checks(eff, lane_of)
             fn = self._verify_exec_fn(s, adapter)
-            verified: dict = {}
-            for oracle in ("cran", "pypi"):
-                group = [c for c in checks
-                         if ({"loads": "cran"}.get(c["kind"], "pypi")
-                             == oracle)]
-                verified.update(run_verify(fn, oracle, group))
+            verified = run_grouped(fn, checks)
             out["verified"] = verified
             failed = {n: r for n, r in verified.items()
                       if r["status"] == "failed"}
