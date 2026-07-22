@@ -17,6 +17,7 @@ says so instead of half-working.
 
 from __future__ import annotations
 
+import json as _json
 import shlex
 import uuid
 
@@ -39,8 +40,40 @@ def _r_install_failure(text: str) -> tuple[str, bool, str]:
         return ("env.solve_conflict", False,
                 "requested package(s) not present in the configured "
                 "repositories/snapshot")
+    if "cannot open URL" in text and "api.github.com" in text:
+        # standalone remotes prints BYTE-IDENTICAL text for a missing
+        # repo and a dead network (probed 2026-07-22) — the caller
+        # disambiguates with a controller-side github resolve
+        return ("env.solve_failed", True,
+                "a github fetch failed on the site — missing repo and "
+                "unreachable github look identical from remotes")
     return ("env.realize_failed", False,
             "installing the R delta into the session layer failed")
+
+
+def _pixi_add_failure(text: str) -> tuple[str, bool, str, str]:
+    """(code, retryable, why, stage) for a failed session `pixi add`,
+    keyed on lock.py's field-verified pixi markers. This was the last
+    undiscriminated catch-all wearing env.solve_conflict (2026-07 sweep
+    A2) — a manifest parse failure, an index outage, and a pip build
+    failure all landed there wearing 'your packages conflict'."""
+    from .lock import (_CACHE_MARKERS, _CONFLICT_MARKERS, _NETWORK_MARKERS,
+                       _PARSE_RE)
+    low = text.lower()
+    if "duplicate key" in low or _PARSE_RE.search(text):
+        return ("internal.error", False,
+                "the session manifest no longer parses — not a package "
+                "problem", "realize")
+    if any(m.lower() in low for m in _CONFLICT_MARKERS):
+        return ("env.solve_conflict", False,
+                "the requested packages cannot be added to the session "
+                "as pinned", "solve")
+    if any(m in low for m in _NETWORK_MARKERS + _CACHE_MARKERS):
+        return ("env.solve_failed", True,
+                "pixi could not reach or read its indexes from this "
+                "site", "solve")
+    return ("env.realize_failed", False,
+            "incremental install failed in session", "realize")
 
 
 def _pip_failure(text: str, default: str = "env.realize_failed",
@@ -343,7 +376,10 @@ class SessionManager:
             "cran_repos", "https://cloud.r-project.org")
         repo_urls = list(dict.fromkeys(
             list(extra_repos or []) + [default_repo]))
-        repos_vec = ", ".join(f'"{u}"' for u in repo_urls)
+        # every caller string entering R code goes through json.dumps —
+        # the same parity solvers.py keeps; a bare quote in a name/url/
+        # ref would otherwise break OUT of the R string (injection sweep)
+        repos_vec = ", ".join(_json.dumps(u) for u in repo_urls)
         # ONE vocabulary — the same strings deps.cran takes: plain names,
         # "name ==X.Y.Z" (pin asserted at the snapshot's solve), and
         # "owner/repo@ref" github sources (the solver SHA-pins those)
@@ -353,7 +389,7 @@ class SessionManager:
                 refs.append(c)
             else:
                 plain.append(c.split("==")[0].split()[0])
-        vec = ", ".join(f'"{n}"' for n in plain)
+        vec = ", ".join(_json.dumps(n) for n in plain)
         # CRAN routinely compiles: bring weft's toolchain like the
         # overlay build does (best-effort — pure-R needs none)
         prelude = ""
@@ -383,7 +419,8 @@ class SessionManager:
                 # removed), the marker is the positive confirmation the
                 # verification below keys on
                 parts.append(
-                    f'.nm <- remotes::install_github("{ref}", lib="{rlib}", '
+                    f'.nm <- remotes::install_github({_json.dumps(ref)}, '
+                    f'lib={_json.dumps(rlib)}, '
                     f'upgrade="never", repos=repos); '
                     'cat("\nWEFT-INSTALLED ", '
                     'paste(.nm, collapse=" "), "\n", sep="")')
@@ -433,7 +470,7 @@ class SessionManager:
         verify_names = plain + ref_installed
         v_rc, v_out = 0, ""
         if verify_names and r.rc == 0:
-            vvec = ", ".join(f'"{n}"' for n in verify_names)
+            vvec = ", ".join(_json.dumps(n) for n in verify_names)
             vcmd = (f'missing <- setdiff(c({vvec}), '
                     f'basename(list.dirs("{rlib}", recursive=FALSE))); '
                     f'if (length(missing)) {{ '
@@ -456,6 +493,33 @@ class SessionManager:
                      "script_tail": rcmd[-400:]}
             if missing_line:
                 hints["missing"] = missing_line
+            if (code == "env.solve_failed" and refs
+                    and "api.github.com" in r.out + r.err):
+                # the ambiguous github-fetch shape: resolve each ref from
+                # the CONTROLLER, which does see HTTP statuses — a
+                # missing repo becomes a spec verdict, a live repo proves
+                # the failure was the site's egress
+                from .solvers import CranSolver
+                hints["checked_from_controller"] = True
+                for ref in refs:
+                    p = CranSolver._parse(ref)
+                    try:
+                        CranSolver._github_resolve(p["repo"], p["ref"])
+                    except WeftError as ge:
+                        if ge.code == "env.solve_conflict":
+                            code, retryable = "env.solve_conflict", False
+                            why = (f"github ref {ref!r} does not resolve "
+                                   "(verified from the controller) — the "
+                                   "fetch failure was the missing "
+                                   "repo/ref, not the network")
+                            hints["bad_ref"] = ref
+                        else:
+                            why += ("; the controller cannot reach "
+                                    "github either")
+                        break
+                else:
+                    why += ("; every ref resolves from the controller — "
+                            "the SITE's github egress failed")
             raise WeftError(code, why, stage="realize",
                             retryable=retryable, hints=hints)
         self._ensure_overlay_line(
@@ -722,6 +786,14 @@ class SessionManager:
         cran = list(cran or [])
         if not conda and not pypi and not cran:
             raise WeftError("task.invalid", "nothing to install", stage="realize")
+        # same intake contract as env specs: a name twice in ONE call is
+        # a malformed request, refused before any tool sees it (each
+        # ecosystem otherwise fails its own way — R tolerates silently,
+        # pip errors in its own words). Re-adding across CALLS stays fine.
+        from .spec import refuse_duplicate_deps
+        refuse_duplicate_deps("conda", conda, where="install")
+        refuse_duplicate_deps("pypi", pypi, where="install")
+        refuse_duplicate_deps("cran", cran, where="install")
         # cran is ORTHOGONAL to the prefix modes: R composes via
         # R_LIBS on any base (frozen or built-here), so it never clones,
         # never flips the session's mode, and works the same everywhere
@@ -830,13 +902,16 @@ class SessionManager:
             )
         r = adapter.run_cmd(" && ".join(parts), timeout=900)
         if r.rc != 0:
-            raise WeftError(
-                "env.solve_conflict",
-                "incremental install failed in session",
-                stage="realize",
-                hints={"log_tail": (r.err or r.out)[-1500:],
-                       "requested": conda + pypi},
-            )
+            tail = (r.err or r.out)[-1500:]
+            code, retryable, why, stg = _pixi_add_failure(tail)
+            hints = {"log_tail": tail, "requested": conda + pypi}
+            if code == "internal.error":
+                hints["suggestion"] = ("the session manifest is corrupt "
+                                       "(crashed earlier add?) — snapshot "
+                                       "what you can and start a fresh "
+                                       "session")
+            raise WeftError(code, why, stage=stg, retryable=retryable,
+                            hints=hints)
         self.store.session_add_deps(session_id, conda, pypi)
         self.store.emit("session.installed", session=session_id,
                         conda=conda, pypi=pypi)

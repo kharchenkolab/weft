@@ -8,10 +8,13 @@ a different site or with a bigger memory ask is the same computation.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .errors import WeftError
 from .ids import task_id
+
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 @dataclass
@@ -119,6 +122,17 @@ class Task:
             from .adapters.slurm import validate_directives
             validate_directives(self.resources.scheduler_directives,
                                 "resources.scheduler_directives")
+        for k in self.env_vars:
+            # KEYS are spliced into cmd.sh as `export {k}=...` — the value
+            # is shlex-quoted but a key can only be quoted by refusing
+            # anything that is not a NAME (a newline in a key would run
+            # as its own shell line — 2026-07 injection sweep, silent)
+            if not _ENV_KEY_RE.fullmatch(k):
+                raise WeftError(
+                    "task.invalid",
+                    f"env_vars key {k!r} is not a valid shell identifier",
+                    stage="submit",
+                    hints={"rule": "[A-Za-z_][A-Za-z0-9_]*"})
         if len(self.label) > 200:
             raise WeftError(
                 "task.invalid",
@@ -131,6 +145,15 @@ class Task:
                 raise WeftError(
                     "task.invalid",
                     f"paths must be sandbox-relative without '..': {mount!r}",
+                    stage="submit",
+                )
+            if "\t" in mount or "\n" in mount:
+                # these paths travel in TSV plans (inputs.tsv) — a tab or
+                # newline corrupts the row, and the failure would come
+                # back wearing a transfer/verify code
+                raise WeftError(
+                    "task.invalid",
+                    f"paths must not contain tab/newline: {mount!r}",
                     stage="submit",
                 )
         if self.array is not None and self.array < 1:

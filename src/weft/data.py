@@ -23,6 +23,25 @@ from .task import Task
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
 
+def _tsv_row(line: str, where: str) -> tuple[str, str, str, int, str]:
+    """Strict 5-field hash-tree row. A filename carrying a TAB or
+    NEWLINE shreds the row — that is a refusable input, not broken site
+    tooling (the shapes it used to surface as: internal.error at
+    collect, site.bootstrap_failed from the empty digest)."""
+    try:
+        kind, path, is_exec, size, digest = line.split("\t")
+        return kind, path, is_exec, int(size), digest
+    except ValueError:
+        raise WeftError(
+            "task.invalid",
+            f"unparseable listing row from {where} — filenames must not "
+            f"contain tab or newline characters",
+            stage="staging",
+            hints={"row": line[:160],
+                   "suggestion": "rename the offending file; weft's "
+                                 "transfer plans are tab-separated"})
+
+
 def _require_digest(digest: str, path: str, site: str) -> str:
     """Identity comes from a real hash, never a fallback: both sha256
     tools failing while wc succeeds would otherwise mint dref:<SIZE> as
@@ -184,12 +203,12 @@ class DataManager:
                 stage="staging", retryable=True)
         tree_entries, ingest_rows, total = [], [], 0
         for line in listing.out.splitlines():
-            kind, path, is_exec, size, digest = line.split("\t")
+            kind, path, is_exec, size, digest = _tsv_row(
+                line, f"hash-tree of {abs_path}")
             if kind == "link":
                 tree_entries.append({"path": path, "kind": "link",
                                      "target": digest})
                 continue
-            size = int(size)
             _require_digest(digest, f"{abs_path}/{path}", site)
             tree_entries.append({"path": path, "kind": "file",
                                  "exec": is_exec == "1",
@@ -876,11 +895,11 @@ class DataManager:
                 continue
             tree_entries = []
             for line in listing.out.splitlines():
-                kind, path, is_exec, size, digest = line.split("\t")
+                kind, path, is_exec, size, digest = _tsv_row(
+                    line, f"collection of {out!r}")
                 if kind == "link":
                     tree_entries.append({"path": path, "kind": "link", "target": digest})
                     continue
-                size = int(size)
                 _require_digest(digest, f"{out}/{path}", adapter.name)
                 tree_entries.append({
                     "path": path, "kind": "file", "exec": is_exec == "1",

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import shlex
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -40,6 +41,16 @@ class HttpFetcher:
                         break
                     h.update(chunk)
                     f.write(chunk)
+        except urllib.error.HTTPError as e:
+            # 4xx is the SERVER'S final answer about this URL — retrying
+            # a 404 forever is not a strategy (429/5xx stay retryable)
+            raise WeftError(
+                "data.transfer_failed", f"fetch failed: {url}",
+                stage="staging",
+                retryable=e.code >= 500 or e.code == 429,
+                hints={"source": url, "http_status": e.code,
+                       "detail": str(e)[-300:]},
+            ) from e
         except Exception as e:
             raise WeftError(
                 "data.transfer_failed", f"fetch failed: {url}",

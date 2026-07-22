@@ -794,6 +794,28 @@ def _topo_order(records: list[dict]) -> list[dict]:
     return out
 
 
+def _julia_solve_error(msg: str, deps: list) -> WeftError:
+    """Pkg.add does network work (registry update, git clones) — only
+    its resolver's own verdict is a CONFLICT; everything else branded
+    "unsatisfiable" fed envman's soft-pin relaxation a mislabeled
+    conflict (2026-07 sweep A1). Marker is Pkg's documented resolver
+    prefix (no julia conda build for this controller's platform to
+    probe — recorded in tool_honesty.md)."""
+    if "Unsatisfiable requirements detected" in msg:
+        return WeftError(
+            "env.solve_conflict",
+            "julia layer is unsatisfiable as pinned",
+            stage="solve",
+            hints={"ecosystem": "julia", "user_pins": deps,
+                   "solver_message": msg})
+    return WeftError(
+        "env.solve_failed",
+        "julia solve failed before a resolver verdict (registry/network/"
+        "git or a missing Manifest) — the pins are not implicated",
+        stage="solve", retryable=True,
+        hints={"ecosystem": "julia", "solver_message": msg})
+
+
 class JuliaSolver:
     """Julia dependencies via Pkg — the easy ecosystem: Manifest.toml IS
     a content-addressed lockfile (git-tree-sha1 per package). Solving runs
@@ -872,12 +894,7 @@ class JuliaSolver:
             env={**__import__("os").environ,
                  "JULIA_DEPOT_PATH": str(depot)})
         if r.returncode != 0 or not (workdir / "Manifest.toml").exists():
-            raise WeftError(
-                "env.solve_conflict",
-                "julia layer is unsatisfiable as pinned",
-                stage="solve",
-                hints={"ecosystem": "julia", "user_pins": deps,
-                       "solver_message": (r.stderr or r.stdout)[-1200:]})
+            raise _julia_solve_error((r.stderr or r.stdout)[-1200:], deps)
         import tomllib
         man = tomllib.loads((workdir / "Manifest.toml").read_text())
         records = []

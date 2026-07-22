@@ -66,6 +66,15 @@ remotes, removable in one command.
   ratifies miscoding as spec.
 - External tools: new invocation => row in misc/tool_honesty.md +
   compensating check (positive markers over rc-trust).
+- Malformed input is a test lane: intake boundaries (spec from_dict,
+  verb list args) get hostile cases — duplicates, case collisions,
+  container-breaking strings — asserting the REFUSAL payload; anything
+  weft renders for an external parser (TOML/TSV/R/shell) gets the pair
+  (refuse at intake; internal.error, no pin advice, if it still fails
+  to parse). Callers are generators with their own bugs; testing only
+  author-written inputs ratifies the happy path (field note #5: a
+  spliced duplicate key rode a valid-input-only test suite straight
+  into env.solve_conflict).
 - Computed defaults get property tests (concrete, UTC-derived,
   published); never derive a default from local wall-clock for a
   resource keyed on someone else's clock. Cross-clock comparisons

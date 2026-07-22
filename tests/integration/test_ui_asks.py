@@ -45,13 +45,17 @@ def test_site_unregister_guardrails_and_forgetting(w, tmp_path):
     assert r["job_id"] in out["hints"]["jobs"]
     w.task_cancel(r["job_id"], why="test teardown")
     import time
-    for _ in range(50):
+    # cancel is confirm-then-unregister (Round A): it takes TWO poller
+    # ticks, and under full-lane load 10s was marginal (flake ledger
+    # 2026-07-22) — wait generously and assert the state loudly
+    for _ in range(150):
         if w.store.get_job(r["job_id"])["state"] == "CANCELLED":
             break
         time.sleep(0.2)
+    assert w.store.get_job(r["job_id"])["state"] == "CANCELLED"
 
     out = w.site_unregister("local")
-    assert out["state"] == "unregistered"
+    assert out.get("state") == "unregistered", out
     assert all(s["name"] != "local" for s in w.sites_list())
     assert "local" not in w.adapters
     assert w.store.routes_for("local") == []

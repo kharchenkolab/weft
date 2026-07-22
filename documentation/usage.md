@@ -483,6 +483,9 @@ w.env_why(env_id, "data.table")      # what pulls it in / the locked record
 ```
 
 Missing interpreter → `env.layer_conflict` names exactly what to add.
+A package name listed twice in one lane is refused at intake
+(`task.invalid` naming both entries) — generators that splice a base
+pin with caller packages must deduplicate.
 Unknown deps key → the registered-solver list. Adding an ecosystem =
 one Solver class + one registry entry (`solvers.default_solvers`).
 

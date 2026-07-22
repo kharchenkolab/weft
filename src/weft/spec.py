@@ -68,6 +68,51 @@ def relax_dep(dep: str) -> str:
     return split_constraint(dep)[0]
 
 
+_ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# conda platform subdirs: linux-64, osx-arm64, win-64, linux-aarch64,
+# noarch... — anything else (dots, brackets, quotes) would land RAW in a
+# pixi.toml [target.<plat>.dependencies] header: a `]` breaks the parse,
+# a `.` silently nests a valid-but-WRONG table (2026-07 injection sweep)
+_PLATFORM_RE = re.compile(r"[a-z0-9]+(-[a-z0-9_]+)*")
+
+
+def _dep_key(eco: str, dep: str) -> str:
+    """Collision key for one dep within a lane. conda names are
+    case-insensitive; pypi normalizes per PEP 503; cran/julia/... are
+    case-SENSITIVE ecosystems (Matrix != matrix), so their key is the
+    exact name — and a github ref is its whole string."""
+    if eco == "conda":
+        return split_constraint(dep)[0]
+    if eco == "pypi":
+        return re.sub(r"[-_.]+", "-", split_constraint(dep)[0])
+    d = strip_soft(dep).strip()
+    return d if "/" in d else d.split()[0]
+
+
+def refuse_duplicate_deps(eco: str, deps: list[str],
+                          where: str = "deps") -> None:
+    """A name listed twice in one lane is a malformed REQUEST — refuse
+    it here, before any solver runs. Unchecked, the duplicate reached
+    pixi's TOML parser and came back wearing env.solve_conflict with a
+    soft-pin suggestion that cannot work (2026-07 field note #5)."""
+    seen: dict[str, str] = {}
+    for dep in deps:
+        key = _dep_key(eco, dep)
+        if key in seen:
+            raise WeftError(
+                "task.invalid",
+                f"duplicate package {key!r} in {where}.{eco}: "
+                f"{seen[key]!r} and {dep!r}",
+                stage="solve",
+                hints={"ecosystem": eco,
+                       "duplicates": [seen[key], dep],
+                       "suggestion": "one entry per package — the spec "
+                                     "generator spliced the same name "
+                                     "twice; keep the constraint you "
+                                     "mean and drop the other"})
+        seen[key] = dep
+
+
 def _merge_deps(parent: list[str], child: list[str]) -> list[str]:
     merged = list(parent)
     index = {split_constraint(d)[0]: i for i, d in enumerate(merged)}
@@ -161,14 +206,43 @@ class EnvSpec:
             plat: {"conda": list(v.get("conda", [])), "pypi": list(v.get("pypi", []))}
             for plat, v in (d.get("variants") or {}).items()
         }
+        conda = [str(x) for x in deps.get("conda", [])]
+        pypi = [str(x) for x in deps.get("pypi", [])]
+        deps_extra = {k: [str(x) for x in v] for k, v in deps.items()
+                      if k not in ("conda", "pypi") and v}
+        # duplicates refused HERE, before anything solves: unchecked they
+        # reached pixi's TOML parser and came back as a spec "conflict"
+        refuse_duplicate_deps("conda", conda)
+        refuse_duplicate_deps("pypi", pypi)
+        for eco, lst in deps_extra.items():
+            refuse_duplicate_deps(eco, lst)
+        for plat, v in variants.items():
+            refuse_duplicate_deps("conda", v["conda"],
+                                  where=f"variants.{plat}")
+            refuse_duplicate_deps("pypi", v["pypi"],
+                                  where=f"variants.{plat}")
+        platforms = list(d.get("platforms") or DEFAULT_PLATFORMS)
+        for p in platforms + list(variants):
+            if not _PLATFORM_RE.fullmatch(p):
+                raise WeftError(
+                    "task.invalid",
+                    f"not a platform name: {p!r}", stage="solve",
+                    hints={"examples": ["linux-64", "osx-arm64",
+                                        "linux-aarch64", "win-64"]})
+        for k in (d.get("env_vars") or {}):
+            if not _ENV_KEY_RE.fullmatch(str(k)):
+                raise WeftError(
+                    "task.invalid",
+                    f"env_vars key {k!r} is not a valid shell identifier",
+                    stage="solve",
+                    hints={"rule": "[A-Za-z_][A-Za-z0-9_]*"})
         return cls(
             name=d.get("name", "unnamed"),
-            platforms=list(d.get("platforms") or DEFAULT_PLATFORMS),
+            platforms=platforms,
             channels=list(d.get("channels") or DEFAULT_CHANNELS),
-            conda=[str(x) for x in deps.get("conda", [])],
-            pypi=[str(x) for x in deps.get("pypi", [])],
-            deps_extra={k: [str(x) for x in v] for k, v in deps.items()
-                        if k not in ("conda", "pypi") and v},
+            conda=conda,
+            pypi=pypi,
+            deps_extra=deps_extra,
             variants=variants,
             modules=list(d.get("modules") or []),
             container_base=d.get("container_base"),

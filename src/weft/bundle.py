@@ -111,7 +111,7 @@ def export_bundle(weft, job_id: str, out_path: str,
             if inp.get("ref"):
                 refs.add(inp["ref"])
 
-    missing, blobs, trees = [], {}, {}
+    missing, unreachable, blobs, trees = [], [], {}, {}
     queue = sorted(refs)
     seen = set()
     while queue:
@@ -129,7 +129,18 @@ def export_bundle(weft, job_id: str, out_path: str,
                     weft.data_fetch(ref, f"{td}/blob")
                 kind = weft.cas.kind_of(ref)
                 assert kind is not None
-            except (WeftError, AssertionError):
+            except WeftError as e:
+                # a blob on a site that is DOWN is not a blob that is
+                # GONE — lumping them sent agents re-running expensive
+                # producers when the fix was "wait for the site"
+                # (2026-07 sweep B1)
+                if e.code in ("site.unreachable", "data.transfer_failed",
+                              "sched.timeout") or e.retryable:
+                    unreachable.append(ref)
+                else:
+                    missing.append(ref)
+                continue
+            except AssertionError:
                 missing.append(ref)
                 continue
         if kind == "tree":
@@ -147,6 +158,16 @@ def export_bundle(weft, job_id: str, out_path: str,
                 blobs[cd] = p
             else:
                 missing.append(ref)
+    if unreachable:
+        raise WeftError(
+            "site.unreachable",
+            f"{len(unreachable)} ref(s) live on sites weft cannot reach "
+            f"right now — the bundle would have holes",
+            stage="staging", retryable=True,
+            hints={"unreachable": unreachable[:10],
+                   **({"missing": missing[:10]} if missing else {}),
+                   "suggestion": "retry when the holding site is back; "
+                                 "these refs are NOT evicted"})
     if missing:
         raise WeftError(
             "data.missing",

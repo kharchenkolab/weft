@@ -218,6 +218,13 @@ _CONFLICT_MARKERS = (
 )
 _NETWORK_MARKERS = ("connection", "timed out", "dns", "network", "fetch repodata")
 
+# pixi failed READING the manifest — nothing was solved. Probed verbatim
+# against real pixi: dup-key says "duplicate key"; every parse error
+# carries a miette span citing the manifest with line:col (a shape solver
+# conflicts never produce). Field note #5: this came back wearing
+# env.solve_conflict + a soft-pin suggestion that cannot work.
+_PARSE_RE = re.compile(r"pixi\.toml:\d+:\d+")
+
 # deterministic local-cache breakage (netfs file locking), NOT a network
 # fault — checked BEFORE the network heuristic. Captured verbatim from
 # cbe.next (netfs-only: NFS home, BeeGFS /tmp): "failed to fetch
@@ -256,6 +263,19 @@ def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi") -> LockResult:
         err = (proc.stderr or proc.stdout).strip()
         tail = "\n".join(err.splitlines()[-30:])
         low = err.lower()
+        if "duplicate key" in low or _PARSE_RE.search(err):
+            # after intake validation, a manifest pixi cannot parse is
+            # weft's own renderer bug — not a statement about the
+            # dependency graph, and the caller's pins are NOT implicated
+            raise WeftError(
+                "internal.error",
+                f"weft rendered a manifest pixi could not parse for "
+                f"spec '{spec.name}' — a weft bug, not a spec conflict",
+                stage="solve",
+                hints={"stderr_tail": tail,
+                       "suggestion": "nothing was solved; do not edit "
+                                     "pins — report this with the spec"},
+            )
         if any(m in low for m in _CACHE_MARKERS):
             raise WeftError(
                 "env.solve_failed",
