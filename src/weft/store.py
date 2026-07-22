@@ -97,6 +97,13 @@ class Store:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN queue_reason TEXT")
         if "superseded_by" not in cols:
             self._conn.execute("ALTER TABLE jobs ADD COLUMN superseded_by TEXT")
+        if "submitted_at" not in cols:
+            # walltime/queue-wait anchor: created_at predates realize+
+            # staging by up to hours — reconcile re-anchoring there
+            # charged staging time against the run (false walltime kills
+            # post-restart; 2026-07 sweep S3)
+            self._conn.execute(
+                "ALTER TABLE jobs ADD COLUMN submitted_at REAL")
         if "driver_nonce" not in cols:
             # double-driver guard (#71): who is DRIVING this job right
             # now (staging is not idempotent under concurrency — the
@@ -604,8 +611,11 @@ class Store:
         sched_handle: str | None = None, error: dict | None = None,
         manifest: dict | None = None, queue_reason: str | None = None,
         task: dict | None = None, task_hash: str | None = None,
+        submitted_at: float | None = None,
     ) -> None:
         sets, vals = ["updated_at=?"], [time.time()]
+        if submitted_at is not None:
+            sets.append("submitted_at=?"); vals.append(submitted_at)
         if state is not None:
             sets.append("state=?"); vals.append(state)
         if task is not None:
@@ -672,6 +682,8 @@ class Store:
             "queue_reason": r["queue_reason"] if "queue_reason" in keys else None,
             "superseded_by": r["superseded_by"]
             if "superseded_by" in keys else None,
+            "submitted_at": r["submitted_at"]
+            if "submitted_at" in keys else None,
         }
 
     def detach_from_group(self, job_id: str) -> None:

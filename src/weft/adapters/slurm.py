@@ -197,10 +197,21 @@ class SlurmAdapter(SSHAdapter):
         # (partition, features, ...), so each feature-defined node CLASS
         # carries its own count ("how big is this partition" was
         # unanswerable from the record; weft-ui #2)
+        # NO pipeline: sort's rc would eat sinfo's, and a failed probe
+        # would be recorded as the permanent fact "this cluster has no
+        # partitions" — resource asks then validate against the LOGIN
+        # node (2026-07 sweep S4). Probe failure fails the probe.
         r = self.run_cmd(
-            "sinfo -h -o '%R|%l|%c|%m|%a|%G|%f|%D' 2>/dev/null | sort -u",
-            timeout=30)
-        partitions = parse_partition_rows(r.out)
+            "sinfo -h -o '%R|%l|%c|%m|%a|%G|%f|%D'", timeout=30)
+        if r.rc != 0:
+            raise WeftError(
+                "site.unreachable",
+                "sinfo failed during partition probe — refusing to "
+                "record an empty partition list as fact",
+                stage="infra", retryable=True,
+                hints={"stderr": (r.err or r.out)[-300:]})
+        rows = "\n".join(sorted(set(r.out.splitlines())))
+        partitions = parse_partition_rows(rows)
         # scontrol has the partition facts sinfo cannot show: who may use
         # which QOS, defaults, priority — the "am I allowed" half
         detail = self._partition_detail()
@@ -599,10 +610,31 @@ class SlurmAdapter(SSHAdapter):
             )
         return f"slurm:{m.group(1)}"
 
+    def _sched_query(self, cmd: str, timeout: float):
+        """squeue/scontrol with the OUTAGE DISCRIMINATOR (2026-07 sweep
+        S1, probed on real slurm): an unknown/purged job exits 1 with
+        'Invalid job id' — the routine departed-job answer (mixed
+        batches exit 0 with valid rows intact). ANY other nonzero rc is
+        the control plane itself (slurmctld restart, socket timeout) —
+        silently treating that as empty output made ctld outages
+        byte-identical to 'job departed' and produced false
+        node_failure/kernel.died verdicts while jobs ran. Raising
+        site.unreachable routes it to the poller's outage machinery:
+        backoff, jobs untouched, one event."""
+        r = self.run_cmd(cmd, timeout=timeout)
+        if r.rc != 0 and "Invalid job id" not in (r.err + r.out):
+            raise WeftError(
+                "site.unreachable",
+                "scheduler query failed (control plane, not the jobs)",
+                stage="running", retryable=True,
+                hints={"command": cmd[:80],
+                       "stderr": (r.err or r.out)[-300:]})
+        return r
+
     def poll_job(self, handle: str, jobdir_rel: str) -> dict:
         jid = handle.split(":", 1)[1]
-        r = self.run_cmd(
-            f"squeue -h -j {shlex.quote(jid)} -o %T 2>/dev/null; true",
+        r = self._sched_query(
+            f"squeue -h -j {shlex.quote(jid)} -o %T",
             timeout=self.poll_timeout,
         )
         state = r.out.strip().split()[0] if r.out.strip() else ""
@@ -611,8 +643,8 @@ class SlurmAdapter(SSHAdapter):
         if state in _RUNNING:
             return {"state": "running", "slurm": state}
 
-        rc = self.run_cmd(
-            f"scontrol show job {shlex.quote(jid)} -o 2>/dev/null; true",
+        rc = self._sched_query(
+            f"scontrol show job {shlex.quote(jid)} -o",
             timeout=self.poll_timeout,
         )
         m = re.search(r"JobState=(\S+)", rc.out)
@@ -663,8 +695,8 @@ class SlurmAdapter(SSHAdapter):
         jids = list(by_jid)
         for i in range(0, len(jids), self._CHUNK):
             chunk = ",".join(jids[i : i + self._CHUNK])
-            r = self.run_cmd(
-                f"squeue -h -j {shlex.quote(chunk)} -o '%i|%T|%r' 2>/dev/null; true",
+            r = self._sched_query(
+                f"squeue -h -j {shlex.quote(chunk)} -o '%i|%T|%r'",
                 timeout=self.poll_timeout,
             )
             for line in r.out.splitlines():
@@ -681,8 +713,8 @@ class SlurmAdapter(SSHAdapter):
         ctl_state: dict[str, str] = {}
         for i in range(0, len(departed), self._CHUNK):
             chunk = ",".join(departed[i : i + self._CHUNK])
-            r = self.run_cmd(
-                f"scontrol show job {shlex.quote(chunk)} -o 2>/dev/null; true",
+            r = self._sched_query(
+                f"scontrol show job {shlex.quote(chunk)} -o",
                 timeout=self.poll_timeout,
             )
             for block in r.out.splitlines():

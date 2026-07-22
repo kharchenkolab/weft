@@ -43,6 +43,7 @@ class Watch:
     last_reason: str = ""        # last scheduler pending-reason recorded
     lost_strikes: int = 0
     cancelled: bool = False
+    cancel_sent: bool = False
     lease: str | None = None     # "kernel"|"service": report deaths, not results
 
 
@@ -171,7 +172,22 @@ class SitePoller:
 
     def _transition(self, w: Watch, status: dict) -> None:
         if w.cancelled:
-            self.adapter.cancel(w.handle, w.jobdir_rel)
+            # CONFIRM before unregistering: scancel is fire-and-forget on
+            # the scheduler side — a swallowed failure left the job
+            # running on the cluster while weft said CANCELLED (2026-07
+            # sweep S6). Watch until the scheduler agrees; resend + emit
+            # if it still reports the job alive.
+            if not w.cancel_sent:
+                self.adapter.cancel(w.handle, w.jobdir_rel)
+                w.cancel_sent = True
+                return
+            if status.get("state") in ("queued", "running"):
+                self.adapter.cancel(w.handle, w.jobdir_rel)
+                self.runner.store.emit(
+                    "job.cancel_retry", job_id=w.job_id,
+                    note="scheduler still reports the job after cancel; "
+                         "resent")
+                return
             self._unregister(w.job_id)
             return
         state = status.get("state")

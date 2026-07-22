@@ -178,6 +178,10 @@ if [ -z "\$WEFT_BASH" ] && command -v bash >/dev/null 2>&1; then
 fi
 cd "$jobdir"
 echo \$\$ > pid.real
+# node-clock epoch for alive()'s pid-reuse guard: comparing the FS
+# server's mtime against /proc times false-killed healthy jobs on
+# clock-skewed shared filesystems (2026-07 sweep, cross-clock S1)
+date +%s > pid.epoch
 hostname > node 2>/dev/null || true
 [ -f activate.sh ] && . ./activate.sh
 start=\$(date +%s)
@@ -219,15 +223,23 @@ alive() {
     [ -r /proc/stat ] || return 0
     btime=$(awk '/^btime/{print $2}' /proc/stat 2>/dev/null)
     [ -n "$btime" ] || return 0
-    ref_t=$(stat -c %Y "$a_ref" 2>/dev/null || echo 0)
+    # same-clock reference when available: pid.epoch is stamped by the
+    # runner with the NODE's date +%s. The stat-mtime fallback is the
+    # FS SERVER's clock — hence the wide 120s margins (a reused pid
+    # within 2 minutes of the file write is not a real scenario; a 5s
+    # margin against a skewed NFS server very much was)
+    ref_t=$(cat "${a_ref%.real}.epoch" 2>/dev/null)
+    case "$ref_t" in ''|*[!0-9]*)
+        ref_t=$(stat -c %Y "$a_ref" 2>/dev/null || echo 0);;
+    esac
     [ "$ref_t" -gt 0 ] || return 0
-    [ "$ref_t" -lt "$btime" ] && return 1
+    [ $((btime - ref_t)) -gt 120 ] && return 1
     if [ -r "/proc/$a_pid/stat" ]; then
         clk=$(getconf CLK_TCK 2>/dev/null || echo 100)
         st=$(sed 's/^[^)]*) //' "/proc/$a_pid/stat" 2>/dev/null | awk '{print $20}')
         case "$st" in ''|*[!0-9]*) return 0;; esac
         pstart=$((btime + st / clk))
-        [ $((pstart - ref_t)) -gt 5 ] && return 1
+        [ $((pstart - ref_t)) -gt 120 ] && return 1
     fi
     return 0
 }

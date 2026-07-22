@@ -619,7 +619,8 @@ class JobRunner:
         if self._cancelled(job_id):
             return
         handle = adapter.submit(jobdir_rel, task.to_dict())
-        self.store.update_job(job_id, sched_handle=handle)
+        self.store.update_job(job_id, sched_handle=handle,
+                              submitted_at=time.time())
         scheduler = scheduler_type(
             (self.store.get_site(job["site"]) or {}).get("capabilities") or {}
         ) != "none"
@@ -1017,7 +1018,10 @@ class JobRunner:
                 self.poller_for(job["site"]).register(Watch(
                     job_id=job_id, handle=job["sched_handle"],
                     jobdir_rel=f"jobs/{job_id}", task=task,
-                    started_at=job["created_at"], scheduler=scheduler,
+                    # the SUBMIT moment, not creation: created_at
+                    # predates realize+staging (false walltime kills)
+                    started_at=job.get("submitted_at")
+                    or job["created_at"], scheduler=scheduler,
                     array_group=job.get("array_group"),
                     last_state=job["state"],
                 ))

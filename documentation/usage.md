@@ -419,7 +419,10 @@ column on the row (often null for non-job events), NOT a payload key.
 Terminal job transitions arrive as THREE kinds, not one: `job.done`,
 `job.failed` (payloads differ — manifest summary vs error dict), and
 CANCELLED as `job.state` with `state="CANCELLED"`. There is no
-`job.state` with DONE/FAILED. Lease deaths are `kernel.died` /
+`job.state` with DONE/FAILED. Cancels are confirm-then-settle: after
+`task_cancel` the job stays live until the scheduler agrees it is
+gone; each unconfirmed poll resends and emits `job.cancel_retry`.
+Lease deaths are `kernel.died` /
 `service.exited`, each carrying `cause`
 ("walltime_exceeded"/"oom"/"cancelled"/"exited"/"lost") and, on
 scheduler sites, the raw `slurm_state`. Unknown kinds should be

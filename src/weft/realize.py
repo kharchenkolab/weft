@@ -735,14 +735,40 @@ class _SiteLease:
     lock shared roots need (in-process locks only cover one controller).
     Stale leases (holder crashed) are taken over after STALE_MIN."""
 
-    STALE_MIN = 30
+    STALE_MIN = 30       # dir-mtime fallback (holders without a beat)
     WAIT_S = 2.0
     MAX_WAIT_S = 3600.0
+    HB_S = 60.0          # holder heartbeat period
+    HB_STALE_S = 900     # takeover when the beat is this old
 
     def __init__(self, adapter: SiteAdapter, rel: str):
         self.adapter = adapter
         self.rel = rel
         self.lease = adapter.path(f"{rel}.lease")
+        self._hb_stop = None
+
+    def _beat_once(self) -> None:
+        # epoch CONTENT, not mtime: login nodes are NTP-tight with each
+        # other; the FS server's mtime clock is not (2026-07 sweep S2)
+        self.adapter.run_cmd(
+            f"date +%s > {shlex.quote(self.lease)}/hb 2>/dev/null; true",
+            timeout=30)
+
+    def _start_hb(self) -> None:
+        """Legitimate builds run HOURS (cran source builds ~20 min/pkg);
+        a fixed 30-min staleness stole the lease from LIVE builders and
+        double-built. The beat decouples takeover from build length."""
+        self._beat_once()
+        self._hb_stop = threading.Event()
+
+        def beat():
+            while not self._hb_stop.wait(self.HB_S):
+                try:
+                    self._beat_once()
+                except Exception:
+                    pass
+
+        threading.Thread(target=beat, daemon=True).start()
 
     def acquire_or_adopt(self) -> bool:
         """Returns True if the env became ready while we waited (adopt it
@@ -759,14 +785,21 @@ class _SiteLease:
                 f"mkdir {shlex.quote(self.lease)} 2>/dev/null && echo got "
                 f"|| echo busy", timeout=30)
             if "got" in r.out:
+                self._start_hb()
                 return False
             # another user is building: did they finish?
             if self.adapter.file_exists(f"{self.rel}/.weft-ready"):
                 return True
             stale = self.adapter.run_cmd(
-                f"find {shlex.quote(self.lease)} -maxdepth 0 "
+                f"hb={shlex.quote(self.lease)}/hb; "
+                f"if [ -f \"$hb\" ]; then "
+                f"age=$(( $(date +%s) - $(cat \"$hb\" 2>/dev/null "
+                f"|| echo 0) )); "
+                f"[ \"$age\" -gt {int(self.HB_STALE_S)} ] "
+                f"&& echo stale || echo live; "
+                f"else find {shlex.quote(self.lease)} -maxdepth 0 "
                 f"-mmin +{self.STALE_MIN} 2>/dev/null | grep -q . && "
-                f"echo stale || true", timeout=30)
+                f"echo stale || echo live; fi", timeout=30)
             if "stale" in stale.out:
                 self.adapter.run_cmd(f"rm -rf {shlex.quote(self.lease)}")
                 continue
@@ -781,6 +814,8 @@ class _SiteLease:
             _t.sleep(self.WAIT_S)
 
     def release(self) -> None:
+        if self._hb_stop is not None:
+            self._hb_stop.set()
         self.adapter.run_cmd(f"rm -rf {shlex.quote(self.lease)} 2>/dev/null; true")
 
 

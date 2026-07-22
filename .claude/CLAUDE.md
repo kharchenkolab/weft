@@ -54,6 +54,22 @@ remotes, removable in one command.
   test, write a one-line hypothesis in the ledger (percent-level races
   look exactly like flakes) — and READ the captured failure output
   before writing the hypothesis.
+- Field bug => CLASS SWEEP before closing: generalize the defect and
+  sweep the codebase for siblings (subagents; see
+  misc/sweep_findings_2026-07.md — 4 field bugs generalized to ~35).
+  Fixing instances one at a time is how the same class returns.
+- Failure payloads are contracts: a raise with N trigger paths gets N
+  tests asserting the DISCRIMINATING fields are true per path (never a
+  bare hint whose provenance is ambiguous — install_rc vs verify_rc).
+  Pick the error code from the CODES registry MEANING before reading
+  the implementation; a test asserting the implementation's code
+  ratifies miscoding as spec.
+- External tools: new invocation => row in misc/tool_honesty.md +
+  compensating check (positive markers over rc-trust).
+- Computed defaults get property tests (concrete, UTC-derived,
+  published); never derive a default from local wall-clock for a
+  resource keyed on someone else's clock. Cross-clock comparisons
+  (FS-server vs node vs controller) need explicit margins.
 - Reality runs sweep VERBS, not just the demo path: validating feature
   F on topology T drives every mutation verb of F (a session reality =
   start+exec+INSTALL+snapshot+stop). "Read works" says nothing about

@@ -145,14 +145,20 @@ def test_controller_walltime_on_interactive_sites(rig):
 
 
 def test_cancel_notification(rig):
+    """Cancel is confirm-then-unregister: the watch stays until the
+    scheduler agrees the job is gone (an unconfirmed scancel is not
+    CANCELLED)."""
     w, adapter, poller, _ = rig
     watch = _watch(w)
     poller.register(watch)
     poller.notify_cancel(watch.job_id)
-    adapter.script = [{watch.handle: {"state": "running"}}]
+    adapter.script = [{watch.handle: {"state": "running"}},
+                      {watch.handle: {"state": "cancelled"}}]
     poller._tick([watch])
     assert adapter.cancelled == [watch.handle]
-    assert not poller.watching(watch.job_id)
+    assert poller.watching(watch.job_id)      # sent, not yet confirmed
+    poller._tick([watch])
+    assert not poller.watching(watch.job_id)  # scheduler agreed
 
 
 def test_collect_parks_job_during_outage(rig, monkeypatch):

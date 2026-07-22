@@ -14,7 +14,10 @@ plan + job_id; drain `events_poll(cursor)` on your turns.
   An output that is neither file nor directory at collection fails the
   job with "was not produced".
 - `task_cancel(job_id)` — works queued or running; external `scancel`
-  is detected and recorded as CANCELLED.
+  is detected and recorded as CANCELLED. Cancels are confirmed against
+  the scheduler before the job settles: if a poll still shows it live,
+  the cancel is resent (`job.cancel_retry` event) — expect a short lag,
+  not an instant CANCELLED.
 - Monitoring is batched per site (one scheduler query per tick regardless
   of job count) — submit thousands of elements without guilt; per-site
   `policy.poll_interval_s` controls cadence.
