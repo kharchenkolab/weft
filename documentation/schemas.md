@@ -111,3 +111,17 @@ re-derivation proof, and re-exporting an imported bundle does NOT carry
 an old envelope forward — the envelope belongs to the caller of each
 export. Capped at 64 MB: it carries context, not data (data belongs in
 blobs, where it is content-addressed and verified).
+
+
+## ensure_available envelope (pinned contract)
+
+The result envelope of `ensure_available` is a PINNED cross-repo
+contract: `documentation/ensure_envelope.schema.json` (versioned;
+currently 1). weft guards it with tests/conformance/test_envelope.py
+validating REAL envelopes; consumers (aba) mirror the guard in their
+conformance suite. Changes are deliberate, versioned events — additive
+values only within a version. Success: {satisfied, changed, attempts,
+verified, runtime, session_id | env_id}. Failure: the standard error
+envelope with attempts/verified/runtime riding hints. Attempt lanes:
+conda|pypi|cran|installer|extends_env; outcomes: installed|
+installed_unverified|failed|refused|skipped|solved.

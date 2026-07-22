@@ -108,6 +108,17 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   `cuda-version` pin + note. Packages with CPU/GPU builds need the GPU
   variant forced: `pytorch-gpu` metapackage or `"pytorch 2.* *cuda*"`
   build selector. Apple Silicon needs nothing (MPS is in default builds).
+- **ensure_available** — the one-verb install path:
+  `ensure_available({"session": sid}, {"pypi": [...], "cran": [...]})`
+  (tagged) or `ensure_available({"session": sid}, ["Name"],
+  lanes=["conda", "cran"])` (ranked — YOUR lane order; the substrate
+  speaks each lane's dialect and records the spelling; a lane succeeds
+  only if its postcondition passes; outages HALT; exhaustion is
+  `env.unavailable_in_lanes` and each attempt carries its own levers).
+  Satisfaction is CHECKED first (`changed: false` short-circuit);
+  `probe=True` returns per-lane availability facts (unknown is never
+  false); `{"env": env_id}` targets run the one-solve extends path.
+  One ensure per session at a time (retryable state.conflict).
 - **Sessions (interactive):** `session_start(spec_or_env_id, site)` → a
   scratch env, cloned LAZILY: start attaches to the base realization in
   place (including an adopted read-only squashfs pack — no per-session
