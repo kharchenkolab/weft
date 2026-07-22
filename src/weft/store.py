@@ -64,6 +64,12 @@ _SESSION_MIGRATIONS = [
     # snapshot emits them as the spec's r_repositories
     ("added_cran_repos",
      "ALTER TABLE sessions ADD COLUMN added_cran_repos TEXT"),
+    # ensure_available P3: one ensure per session at a time (two chains
+    # interleaving installs into one prefix is the double-driver race
+    # in a new costume); heartbeat like drive claims — staleness is
+    # judged on BEAT AGE, never chain duration (chains run 45 min)
+    ("ensure_nonce", "ALTER TABLE sessions ADD COLUMN ensure_nonce TEXT"),
+    ("ensure_hb", "ALTER TABLE sessions ADD COLUMN ensure_hb REAL"),
 ]
 
 
@@ -243,6 +249,38 @@ class Store:
         self._write(
             "UPDATE jobs SET driver_nonce=NULL, driver_hb=NULL "
             "WHERE job_id=? AND driver_nonce=?", (job_id, nonce))
+
+    def claim_session_ensure(self, session_id: str, nonce: str,
+                             stale_s: float = 90.0) -> bool:
+        """One ensure per session — same arbiter shape as drive
+        claims; wins iff unclaimed or the holder's BEAT is stale."""
+        now = time.time()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE sessions SET ensure_nonce=?, ensure_hb=? "
+                "WHERE session_id=? AND (ensure_nonce IS NULL "
+                "OR ensure_hb IS NULL OR ensure_hb < ?)",
+                (nonce, now, session_id, now - stale_s))
+            return cur.rowcount > 0
+
+    def heartbeat_session_ensure(self, session_id: str,
+                                 nonce: str) -> None:
+        self._write(
+            "UPDATE sessions SET ensure_hb=? "
+            "WHERE session_id=? AND ensure_nonce=?",
+            (time.time(), session_id, nonce))
+
+    def release_session_ensure(self, session_id: str, nonce: str) -> None:
+        self._write(
+            "UPDATE sessions SET ensure_nonce=NULL, ensure_hb=NULL "
+            "WHERE session_id=? AND ensure_nonce=?", (session_id, nonce))
+
+    def session_ensure_claim(self, session_id: str) -> dict | None:
+        r = self._row("SELECT ensure_nonce, ensure_hb FROM sessions "
+                      "WHERE session_id=?", (session_id,))
+        if not r or not r["ensure_nonce"]:
+            return None
+        return {"nonce": r["ensure_nonce"], "hb": r["ensure_hb"]}
 
     def job_drive_claim(self, job_id: str) -> dict | None:
         r = self._row("SELECT driver_nonce, driver_hb FROM jobs "

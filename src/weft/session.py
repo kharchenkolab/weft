@@ -28,6 +28,74 @@ from .realize import env_dir_rel
 from .store import Store
 
 
+def _request_checks(requested: dict, eff: dict,
+                    resolved: list | None = None) -> tuple[list, dict]:
+    """ONE derivation from request entries to verify checks — the
+    pre-check and the postcondition must ask the same question or
+    'satisfied' and 'verified' drift apart. Returns (checks,
+    {eco: (names, pins, by_name)}); a github ref's by_name maps its
+    RESOLVED name back to the original entry (None = coarse: any ref
+    failure implicates all refs)."""
+    from .spec import parse_cran_dep, split_constraint
+    from .verify import default_checks, explicit_checks, usable_want
+    lanes: dict[str, tuple[list, dict, dict]] = {}
+    for eco in ("conda", "pypi"):
+        names, pins, by_name = [], {}, {}
+        for e in requested.get(eco) or []:
+            n, c = split_constraint(e)
+            names.append(n)
+            by_name[n] = e
+            if usable_want(c):
+                pins[n] = c.strip()
+        lanes[eco] = (names, pins, by_name)
+    names, pins, by_name = [], {}, {}
+    refs = []
+    for e in requested.get("cran") or []:
+        pr = parse_cran_dep(e)
+        if pr["kind"] == "github":
+            refs.append(e)
+            continue
+        names.append(pr["name"])
+        by_name[pr["name"]] = e
+        if pr["version"]:
+            pins[pr["name"]] = f'=={pr["version"]}'
+    res = list(resolved or [])
+    if refs and len(res) == len(refs):
+        for rname, rentry in zip(res, refs):
+            names.append(rname)
+            by_name[rname] = rentry         # verify keys on RESOLVED name
+    else:
+        names += res                        # coarse mapping
+        for rname in res:
+            by_name[rname] = None
+    lanes["cran"] = (names, pins, by_name)
+    if eff:
+        lane_of = {n: "cran" for n in lanes["cran"][0]}
+        lane_of.update({n: "conda" for n in lanes["conda"][0]})
+        checks = explicit_checks(eff, lane_of)
+    else:
+        checks = []
+        for eco in ("conda", "pypi", "cran"):
+            nm, pn, _ = lanes[eco]
+            checks += default_checks(eco, nm, pn)
+    return checks, lanes
+
+
+def _keep_transport_code(e: "WeftError", context: str,
+                         **extra_hints) -> "WeftError":
+    """Wrap a lane's transport failure WITHOUT laundering the code: a
+    dead transport reported as env.realize_failed hid the outage from
+    every consumer that keys on site.unreachable (the ensure halting
+    rule, the poller's backoff reasoning — P3 test caught it live)."""
+    if e.code in ("site.unreachable", "sched.timeout"):
+        return WeftError(e.code, f"{context}: {e.detail}",
+                         stage="realize", retryable=True,
+                         hints={**(e.hints or {}), **extra_hints})
+    return WeftError("env.realize_failed", context, stage="realize",
+                     retryable=True,
+                     hints={"detail": e.detail, **extra_hints})
+
+
 def _r_install_failure(text: str) -> tuple[str, bool, str]:
     """Map an R install failure to WHICH of three different problems it
     was — they pull three different agent levers (2026-07 field note).
@@ -454,11 +522,9 @@ class SessionManager:
         try:
             r = adapter.run_activated(wrap(script), timeout=3600)
         except WeftError as e:
-            raise WeftError(
-                "env.realize_failed",
-                "fetching/compiling the R delta stalled or timed out",
-                stage="realize", retryable=True,
-                hints={"requested": cran, "detail": e.detail}) from e
+            raise _keep_transport_code(
+                e, "fetching/compiling the R delta stalled or timed out",
+                requested=cran) from e
         # install.packages WARNS but exits 0 on failure — verify by
         # presence, or a broken add would report success (R's trap)
         ref_installed: list[str] = []
@@ -562,51 +628,10 @@ class SessionManager:
         window. failed => typed error (the caller asked for proof);
         unknown-only => success with the packages unrecorded (re-install
         converges: late-record)."""
-        from .spec import parse_cran_dep, split_constraint
-        from .verify import default_checks, explicit_checks, usable_want
         s = self._get(session_id)
         requested = {"conda": conda, "pypi": pypi, "cran": cran}
-        lanes: dict[str, tuple[list, dict, dict]] = {}
-        for eco in ("conda", "pypi"):
-            names, pins, by_name = [], {}, {}
-            for e in requested[eco]:
-                n, c = split_constraint(e)
-                names.append(n)
-                by_name[n] = e
-                if usable_want(c):
-                    pins[n] = c.strip()
-            lanes[eco] = (names, pins, by_name)
-        names, pins, by_name = [], {}, {}
-        refs = []
-        for e in requested["cran"]:
-            p = parse_cran_dep(e)
-            if p["kind"] == "github":
-                refs.append(e)
-                continue
-            names.append(p["name"])
-            by_name[p["name"]] = e
-            if p["version"]:
-                pins[p["name"]] = f'=={p["version"]}'
-        resolved = list(out.get("resolved") or [])
-        if refs and len(resolved) == len(refs):
-            for rname, rentry in zip(resolved, refs):
-                names.append(rname)
-                by_name[rname] = rentry     # verify keys on RESOLVED name
-        else:
-            names += resolved               # coarse: any ref failure
-            for rname in resolved:          # retracts all refs below
-                by_name[rname] = None
-        lanes["cran"] = (names, pins, by_name)
-
-        if eff:
-            lane_of = {n: "cran" for n in lanes["cran"][0]}
-            lane_of.update({n: "conda" for n in lanes["conda"][0]})
-            checks = explicit_checks(eff, lane_of)
-        else:
-            checks = []
-            for eco in ("conda", "pypi", "cran"):
-                nm, pn, _ = lanes[eco]
-                checks += default_checks(eco, nm, pn)
+        checks, lanes = _request_checks(requested, eff,
+                                        resolved=out.get("resolved"))
         from .verify import run_grouped
         fn = self._verify_exec_fn(s, adapter)
         verified = run_grouped(fn, checks)
@@ -662,6 +687,162 @@ class SessionManager:
                 f"not run) and are NOT recorded — re-running the install "
                 f"converges once verification succeeds (late-record)")
         return out
+
+    def ensure_available(self, session_id: str, adapter: SiteAdapter,
+                         request: dict, verify=True, lanes=None,
+                         probe: bool = False) -> dict:
+        """ensure_available, TAGGED mode (P3): make an eco-tagged delta
+        available in the session, prove it, report the envelope
+        {satisfied, changed, attempts, verified, runtime}. Pre-check
+        first (satisfaction is CHECKED, not assumed): already-proven
+        entries short-circuit and are LATE-RECORDED if missing from the
+        session record. One ensure per session (heartbeated claim);
+        site-scoped infra failures HALT the lane loop (an outage is not
+        an unavailability verdict)."""
+        import threading
+        import time as _t
+        if probe or lanes is not None:
+            raise WeftError(
+                "task.invalid",
+                "ranked mode (lanes=) and probe arrive in a later round "
+                "— pass an eco-tagged request dict",
+                stage="realize",
+                hints={"request": {"conda": ["..."], "pypi": ["..."],
+                                   "cran": ["..."]}})
+        if not isinstance(request, dict) or \
+                set(request) - {"conda", "pypi", "cran"} or \
+                not any(request.get(k) for k in ("conda", "pypi", "cran")):
+            raise WeftError(
+                "task.invalid",
+                "request must be an eco-tagged dict with at least one of "
+                "conda/pypi/cran", stage="realize",
+                hints={"got": request if isinstance(request, dict)
+                       else type(request).__name__})
+        eff = None
+        if verify not in (None, False):
+            from .verify import validate_verify
+            eff = validate_verify(verify)
+        s = self._get(session_id)
+        nonce = uuid.uuid4().hex
+        if not self.store.claim_session_ensure(session_id, nonce):
+            held = self.store.session_ensure_claim(session_id) or {}
+            raise WeftError(
+                "state.conflict",
+                f"another ensure is already running on {session_id}",
+                stage="realize", retryable=True,
+                hints={"holder_beat_age_s": round(
+                           _t.time() - held.get("hb", _t.time()), 1),
+                       "suggestion": "one ensure per session — wait and "
+                                     "retry; a dead holder's claim goes "
+                                     "stale in 90s"})
+        stop = threading.Event()
+
+        def _beat():
+            while not stop.wait(30.0):
+                self.store.heartbeat_session_ensure(session_id, nonce)
+
+        threading.Thread(target=_beat, daemon=True).start()
+        try:
+            return self._ensure_tagged(session_id, adapter, request,
+                                       verify, eff)
+        finally:
+            stop.set()
+            self.store.release_session_ensure(session_id, nonce)
+
+    def _ensure_tagged(self, session_id: str, adapter: SiteAdapter,
+                       request: dict, verify, eff: dict | None) -> dict:
+        import time as _t
+        s = self._get(session_id)
+        remaining = {k: list(request.get(k) or [])
+                     for k in ("conda", "pypi", "cran")}
+        pre: dict[str, dict] = {}
+        if eff is not None:
+            # step zero: satisfaction is CHECKED, not assumed — and
+            # passing entries missing from the record are LATE-RECORDED
+            # (the unknown-withheld convergence path). github refs never
+            # pre-check (their package name needs a resolve).
+            from .verify import run_grouped
+            checks, lanes_map = _request_checks(remaining, eff)
+            fn = self._verify_exec_fn(s, adapter)
+            pre = run_grouped(fn, checks)
+            late: dict[str, list] = {"conda": [], "pypi": [], "cran": []}
+            recorded = {"conda": set(s.get("added_conda") or []),
+                        "pypi": set(s.get("added_pypi") or []),
+                        "cran": set(s.get("added_cran") or [])}
+            for eco in ("conda", "pypi", "cran"):
+                names, _, by_name = lanes_map[eco]
+                keep = []
+                for e in remaining[eco]:
+                    ename = next((n for n, ent in by_name.items()
+                                  if ent == e), None)
+                    if ename and pre.get(ename, {}).get(
+                            "status") == "passed":
+                        if e not in recorded[eco]:
+                            late[eco].append(e)
+                    else:
+                        keep.append(e)
+                remaining[eco] = keep
+            if any(late.values()):
+                self.store.session_add_deps(session_id, late["conda"],
+                                            late["pypi"], late["cran"])
+            if not any(remaining.values()):
+                return {"satisfied": True, "changed": False,
+                        "attempts": [], "verified": pre,
+                        "session_id": session_id,
+                        "runtime": self.runtime(s, adapter)}
+        attempts: list[dict] = []
+        verified: dict[str, dict] = dict(pre)
+        first_error: WeftError | None = None
+        halted = False
+        for eco in ("conda", "pypi", "cran"):
+            entries = remaining[eco]
+            if not entries:
+                continue
+            if halted:
+                attempts.append({"lane": eco, "outcome": "skipped",
+                                 "skip_reason": "halted"})
+                continue
+            t0 = _t.monotonic()
+            try:
+                out = self.install(session_id, adapter, **{eco: entries},
+                                   verify=(verify if eff is not None
+                                           else None))
+                a = {"lane": eco,
+                     "outcome": ("installed" if eff is not None
+                                 else "installed_unverified"),
+                     "seconds": round(_t.monotonic() - t0, 2),
+                     "mutations": [out.get("mode") or "prefix"]}
+                verified.update(out.get("verified") or {})
+            except WeftError as e:
+                a = {"lane": eco, "outcome": "failed",
+                     "error": e.to_dict(),
+                     "seconds": round(_t.monotonic() - t0, 2)}
+                verified.update((e.hints or {}).get("verified") or {})
+                if first_error is None:
+                    first_error = e
+                if e.code in ("internal.error", "site.unreachable",
+                              "sched.timeout"):
+                    # a weft bug / dead transport is not a lane verdict
+                    halted = True
+            attempts.append(a)
+            self.store.emit("session.ensure_attempt", session=session_id,
+                            lane=eco, outcome=a["outcome"],
+                            code=(a.get("error") or {}).get("error"))
+        s = self._get(session_id)
+        runtime = self.runtime(s, adapter)
+        self.store.emit("session.ensure_done", session=session_id,
+                        satisfied=first_error is None,
+                        lanes=[a["lane"] for a in attempts])
+        if first_error is not None:
+            raise WeftError(
+                first_error.code, first_error.detail,
+                stage=first_error.stage, retryable=first_error.retryable,
+                hints={**(first_error.hints or {}),
+                       "attempts": attempts, "verified": verified,
+                       "runtime": runtime})
+        return {"satisfied": True, "changed": True, "attempts": attempts,
+                "verified": verified, "session_id": session_id,
+                "runtime": runtime}
 
     def _base_cold(self, s: dict, adapter: SiteAdapter) -> bool:
         """Is the base's package cache COLD on this site? An adopted
@@ -751,12 +932,9 @@ class SessionManager:
                       f"{shlex.quote(adapter.path(report_rel))} {specs}"),
                 timeout=600)
         except WeftError as e:
-            raise WeftError(
-                "env.realize_failed",
-                "resolving the pypi delta stalled or timed out",
-                stage="realize", retryable=True,
-                hints={"likely": "stalled index/CDN transfer from this "
-                                 "node", "detail": e.detail}) from e
+            raise _keep_transport_code(
+                e, "resolving the pypi delta stalled or timed out",
+                requested=pypi) from e
         resolve_s = round(_t.monotonic() - t0, 2)
         missing: list[str] = []
         if ra.rc != 0 and ("no such option" in (ra.err + ra.out)
@@ -809,12 +987,9 @@ class SessionManager:
                     rb = adapter.run_activated(wrap(fetch_cmd),
                                                timeout=1800)
                 except WeftError as e:
-                    raise WeftError(
-                        "env.realize_failed",
-                        "fetching the pypi delta stalled or timed out",
-                        stage="realize", retryable=True,
-                        hints={"missing": missing,
-                               "detail": e.detail}) from e
+                    raise _keep_transport_code(
+                        e, "fetching the pypi delta stalled or timed out",
+                        missing=missing) from e
                 if rb.rc != 0:
                     # phase B is --no-deps at exact pins: by construction
                     # NO resolution happens here — "unsatisfiable spec"

@@ -1,0 +1,28 @@
+{
+  "$comment": "ensure_available result envelope v1 — the PINNED cross-repo contract (aba guards it consumer-side; tests/conformance/test_envelope.py guards it here). Changes are deliberate, versioned events.",
+  "envelope_version": 1,
+  "success": {
+    "satisfied": "bool (true)",
+    "changed": "bool — false = pre-check short-circuit, nothing mutated",
+    "attempts": "list[attempt] — [] when satisfied at pre-check",
+    "verified": "dict[name -> {status: passed|failed|unknown, check, want?, got?, reason?}]",
+    "runtime": "the session runtime contract block",
+    "session_id": "str"
+  },
+  "error_hints": {
+    "$comment": "failures use the standard error envelope {error, stage, detail, hints, retryable, meaning}; these keys ride hints",
+    "attempts": "list[attempt] — every lane that ran or was skipped",
+    "verified": "dict as above (may be partial)",
+    "runtime": "present even on failure — mutations may have landed"
+  },
+  "attempt": {
+    "lane": "conda|pypi|cran|installer",
+    "outcome": "installed|installed_unverified|failed|refused|skipped",
+    "seconds": "float (absent on skipped)",
+    "error": "the lane's typed error dict VERBATIM (outcome=failed/refused)",
+    "mutations": "list[str] (outcome=installed*)",
+    "skip_reason": "halted|budget|grammar (outcome=skipped)",
+    "verify": "per-lane got/want when a postcondition failed in-loop (ranked mode)",
+    "spelling": "the lane-dialect spelling actually used (ranked mode)"
+  }
+}

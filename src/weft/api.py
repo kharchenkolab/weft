@@ -1180,6 +1180,39 @@ class Weft:
             session_id, self._session_adapter(session_id), cmd, note, source,
             full_clone=full_clone, writes_to=writes_to, verify=verify)
 
+    def ensure_available(self, target: dict, request: dict,
+                         lanes=None, verify=True,
+                         probe: bool = False) -> dict:
+        """Make REQUEST available in TARGET, prove it, and report one
+        typed envelope: {satisfied, changed, attempts, verified,
+        runtime}. Tagged mode: request is an eco-tagged delta
+        ({"conda": [...], "pypi": [...], "cran": [...]}) — the lanes
+        are the request's own vocabulary. Satisfaction is CHECKED
+        first (already-proven entries short-circuit and are
+        late-recorded); postcondition failures are typed and their
+        entries are never recorded. One ensure per session at a time
+        (state.conflict, retryable, names the holder). Ranked mode
+        (lanes=), probe, and env targets arrive in later rounds."""
+        if not isinstance(target, dict) or not target or \
+                set(target) - {"session", "env"}:
+            raise WeftError(
+                "task.invalid",
+                'target must be {"session": <session_id>} '
+                '(env targets arrive in a later round)',
+                stage="realize")
+        if "env" in target:
+            raise WeftError(
+                "task.invalid",
+                "env targets arrive in a later round — the spec's own "
+                "verify block already enforces realize postconditions "
+                "today", stage="realize",
+                hints={"suggestion": "put verify in the env SPEC "
+                                     "(identity-neutral) and realize it"})
+        sid = target["session"]
+        return self.sessions.ensure_available(
+            sid, self._session_adapter(sid), request, verify=verify,
+            lanes=lanes, probe=probe)
+
     def session_snapshot(self, session_id: str, name: str | None = None,
                          notes: list[str] | None = None,
                          verify: bool = True) -> dict:
@@ -2032,6 +2065,7 @@ PUBLIC_TOOLS = [
     "env_evict", "site_footprint",
     "session_start", "session_exec", "session_install", "session_snapshot",
     "session_run_installer", "session_stop", "session_runtime",
+    "ensure_available",
     "list_sessions",
     "kernel_start", "kernel_exec", "kernel_poll", "kernel_peek",
     "kernel_status",

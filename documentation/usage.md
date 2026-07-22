@@ -356,6 +356,18 @@ session — every later install takes the SAME lane (each resolve sees
 base + the existing layer), and mode mixing is refused, so mechanisms
 never switch or clash mid-session. On built-here bases nothing changes.
 
+**`ensure_available(target, request, verify=True)`** — the one-verb
+install path: make an eco-tagged delta available in a session, prove
+it, and report a single typed envelope `{satisfied, changed, attempts,
+verified, runtime}` (shape pinned in
+documentation/ensure_envelope.schema.json). Satisfaction is CHECKED
+first — already-proven entries short-circuit (`changed: false`,
+`attempts: []`) and are late-recorded; per-lane failures ride
+`hints.attempts` verbatim; a site outage HALTS remaining lanes and the
+verdict is the outage, never unavailability. One ensure per session at
+a time (`state.conflict`, retryable, heartbeat-stale claims are taken
+over). Ranked lane fallback and probe arrive in a later round.
+
 `session_install(..., verify=...)` runs a POSTCONDITION in the
 composed runtime after the install — `verify=True` proves presence (and
 any `==`/`>=` pins) with per-ecosystem defaults; an explicit dict
