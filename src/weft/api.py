@@ -8,6 +8,7 @@ JSON-serializable data — this class *is* the MCP tool set, minus transport.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import time  # noqa: F401  (site_load cache timestamps)
@@ -53,17 +54,50 @@ class Weft:
     """One instance per workspace. The UI and the agent share this state."""
 
     def __init__(self, workspace: Path, pixi_bin: str | None = None,
-                 pixi_pack: str | None = None, default_actor: str = "agent"):
+                 pixi_pack: str | None = None, default_actor: str = "agent",
+                 state_dir: Path | str | None = None):
         """default_actor names who acts through THIS instance in the audit
         trail ("agent" unless the embedder — a UI serving a human, a
         notebook — says otherwise). Deliberately constructor-only: a
         per-call actor on the tools would let an agent write someone
         else's name into the trail. Registration-class actions always
-        audit as "user" (they are user-confirmed by doctrine)."""
+        audit as "user" (they are user-confirmed by doctrine).
+
+        state_dir (or WEFT_STATE_DIR) relocates state.db — sqlite is
+        latency-critical and belongs on a LOCAL disk when the workspace
+        lives on NFS (field-measured 28x per-query penalty). The CAS
+        and everything content-addressed stay in the workspace. CAVEAT:
+        state.db is the system of record — on purgeable scratch, a
+        purge orphans every run/env/session this workspace knows about.
+        A marker pins the directory to ONE workspace; sharing it across
+        workspaces would silently merge their state and is refused."""
         self.workspace = Path(workspace)
         data_dir = self.workspace / ".weft"
         data_dir.mkdir(parents=True, exist_ok=True)
-        self.store = Store(data_dir / "state.db")
+        state_dir = state_dir or os.environ.get("WEFT_STATE_DIR")
+        if state_dir:
+            sdir = Path(state_dir).expanduser()
+            sdir.mkdir(parents=True, exist_ok=True)
+            marker = sdir / ".weft-workspace"
+            mine = str(self.workspace.resolve())
+            if marker.exists():
+                owner = marker.read_text().strip()
+                if owner != mine:
+                    raise WeftError(
+                        "task.invalid",
+                        "state_dir already belongs to another workspace "
+                        "— sharing one state.db would silently merge "
+                        "their state",
+                        stage="infra",
+                        hints={"state_dir": str(sdir), "owner": owner,
+                               "this_workspace": mine,
+                               "suggestion": "one state_dir per "
+                               "workspace (subdirectory per project)"})
+            else:
+                marker.write_text(mine + "\n")
+            self.store = Store(sdir / "state.db")
+        else:
+            self.store = Store(data_dir / "state.db")
         self.store.audit_actor = default_actor
         self.cas = LocalCAS(data_dir / "cas")
         self.pixi_bin = pixi_bin or "pixi"
@@ -1890,9 +1924,11 @@ class Weft:
         from .bundle import import_bundle
         return import_bundle(self, path)
 
-    def run_inventory(self, target: str, glob: str | None = None,
+    def run_inventory(self, target: str | None = None,
+                      glob: str | None = None,
                       min_bytes: int = 0, max_entries: int = 5000,
-                      live: bool = False) -> dict:
+                      live: bool = False,
+                      targets: list[str] | None = None) -> dict:
         """What a finished run LEFT BEHIND (recorded at terminal state,
         stat-only, budgeted): {path, bytes, mtime} per file — the
         triage facts for retention. Knowledge, not holdings: survives
@@ -1903,7 +1939,37 @@ class Weft:
         same shape, flagged {"live": true}, never persisted (the durable
         receipt is still written at terminal state). One schema for a
         run card whether the run is mid-flight or settled. Fails
-        data.missing once the sandbox is swept — use the receipt then."""
+        data.missing once the sandbox is swept — use the receipt then.
+
+        targets=[...] batches recorded receipts for a whole panel:
+        {"inventories": {target: result | typed error}} — one absent
+        receipt doesn't fail the batch (its entry carries the error).
+        live=True is per-run site work and doesn't batch."""
+        if targets is not None:
+            if target is not None or live:
+                raise WeftError(
+                    "task.invalid",
+                    "targets=[...] batches RECORDED receipts only — "
+                    "no target= alongside, and live=True is per-run "
+                    "site work (call it per target)", stage="infra")
+            if not isinstance(targets, list) or not targets or \
+                    not all(isinstance(x, str) and x for x in targets):
+                raise WeftError("task.invalid",
+                                "targets must be a non-empty list of "
+                                "run ids", stage="infra")
+            out = {}
+            for tgt in dict.fromkeys(targets):
+                try:
+                    out[tgt] = self.run_inventory(
+                        tgt, glob=glob, min_bytes=min_bytes,
+                        max_entries=max_entries)
+                except WeftError as e:
+                    out[tgt] = e.to_dict()
+            return {"inventories": out}
+        if target is None:
+            raise WeftError("task.invalid",
+                            "pass target= or targets=[...]",
+                            stage="infra")
         if live:
             kind, row, jobdir_rel = self.retains._target_row(target)
             try:
@@ -1967,11 +2033,23 @@ class Weft:
         return self.retains.retain(target, include, exclude, dest, max_gb,
                                    label, background, layout=layout)
 
-    def run_file_stat(self, target: str, rel: str) -> dict:
+    def run_file_stat(self, target: str, rel: str | None = None,
+                      rels: list[str] | None = None) -> dict:
         """Existence + size + mtime by the (run, relpath) KEY — resolved
         against the sandbox, then the run's keep (retention2.md), with
         `at` saying which answered. Inventory says what EXISTED; this
-        says what's still on disk, wherever it now is."""
+        says what's still on disk, wherever it now is.
+
+        rels=[...] batches: one target resolution, one keep lookup, ONE
+        stat invocation for everything — {"files": {rel: answer}}.
+        A polling panel should always batch (2N store queries + N
+        subprocesses collapse to O(1); aba store/NFS note)."""
+        if (rel is None) == (rels is None):
+            raise WeftError("task.invalid",
+                            "pass exactly one of rel= or rels=[...]",
+                            stage="infra")
+        if rels is not None:
+            return self.retains.file_stat_many(target, rels)
         return self.retains.file_stat(target, rel)
 
     def run_file_read(self, target: str, rel: str,

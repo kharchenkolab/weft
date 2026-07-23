@@ -1,9 +1,11 @@
 """Durable state: one SQLite database + an in-process event bus (doc 01 §6).
 
-Single-writer by design. WAL mode; a process-wide RLock serializes *all*
-access (reads included — CPython's sqlite3 does not tolerate concurrent
-cursor use on one connection across threads). Remote state is the source
-of truth for running jobs — rows here are reconciled snapshots.
+Single-writer by design: one write connection behind a process-wide
+RLock. READS take a separate per-thread connection lane (WAL snapshots)
+and never touch the lock — a UI poll must not queue behind an agent
+turn's writes (field-measured: on NFS every lock hold is a multi-ms
+round trip). Remote state is the source of truth for running jobs —
+rows here are reconciled snapshots.
 """
 
 from __future__ import annotations
@@ -77,18 +79,68 @@ def _j(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True)
 
 
+class _ReaderRef:
+    """Weakref-able holder (sqlite3.Connection itself is not): the
+    thread-local keeps the only strong ref, so a dead thread's
+    connection deallocates (and closes) with its holder."""
+    __slots__ = ("conn", "__weakref__")
+
+    def __init__(self, conn: sqlite3.Connection):
+        self.conn = conn
+
+
 class Store:
     def __init__(self, path: Path | str):
         self.path = str(path)
         self._lock = threading.RLock()
+        # ONE write connection behind the RLock: sqlite is single-writer
+        # anyway, and multi-statement write transactions stay atomic
+        # under one lock hold. READS never touch it (see _read_conn) —
+        # WAL exists so readers proceed during a write, and a shared
+        # connection gives that away (field note: on NFS every lock
+        # hold is a multi-ms round trip, so one poll loop serialized
+        # a whole controller).
         self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         with self._lock, self._conn:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA synchronous=NORMAL")
+            # a second PROCESS on the same workspace (CLI beside the
+            # controller) must wait briefly, not eat SQLITE_BUSY raw
+            self._conn.execute("PRAGMA busy_timeout=5000")
+            # checkpoints don't truncate the WAL by default; bound it
+            self._conn.execute("PRAGMA journal_size_limit=8388608")
             self._conn.executescript(_SCHEMA)
             self._migrate()
+        # per-thread PERSISTENT reader connections (opens are the
+        # expensive part on network filesystems). query_only guards the
+        # lane: a write smuggled through a reader is a bug, loudly.
+        self._local = threading.local()
+        # WEAK registry: a dead thread's local dict drops the only
+        # strong ref, GC closes the connection — a strong list here
+        # would leak one fd per short-lived thread (weft spawns
+        # driver/heartbeat threads per job)
+        self._readers: list = []          # list[weakref.ref]
+        self._readers_guard = threading.Lock()
         self._subscribers: list[Callable[[dict], None]] = []
+
+    def _read_conn(self) -> sqlite3.Connection:
+        ref = getattr(self._local, "reader", None)
+        if ref is None:
+            # check_same_thread=False so close() can reach it from
+            # another thread; USE stays per-thread via threading.local
+            c = sqlite3.connect(self.path, check_same_thread=False)
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA busy_timeout=5000")
+            c.execute("PRAGMA query_only=ON")
+            ref = _ReaderRef(c)
+            self._local.reader = ref
+            import weakref
+            with self._readers_guard:
+                self._readers.append(weakref.ref(ref))
+                self._readers = [r for r in self._readers
+                                 if r() is not None]
+        return ref.conn
 
     def _migrate(self) -> None:
         """Additive migrations for stores created by older versions."""
@@ -290,8 +342,9 @@ class Store:
         return {"nonce": r["driver_nonce"], "hb": r["driver_hb"]}
 
     def _rows(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
-        with self._lock:
-            return self._conn.execute(sql, params).fetchall()
+        # reader lane: no lock — WAL snapshots make this safe, and the
+        # write lock must never gate a poll
+        return self._read_conn().execute(sql, params).fetchall()
 
     def _row(self, sql: str, params: tuple = ()) -> sqlite3.Row | None:
         rows = self._rows(sql, params)
@@ -830,7 +883,7 @@ class Store:
         )
 
     def kernel_blocks(self, kernel_id: str) -> list[dict]:
-        return [dict(r) for r in self._conn.execute(
+        return [dict(r) for r in self._rows(
             "SELECT * FROM kernel_blocks WHERE kernel_id=? ORDER BY block",
             (kernel_id,))]
 
@@ -880,7 +933,7 @@ class Store:
                 conds.append(f"{col}=?"); vals.append(v)
         if conds:
             q += " WHERE " + " AND ".join(conds)
-        return [dict(r) for r in self._conn.execute(
+        return [dict(r) for r in self._rows(
             q + " ORDER BY retained_at", vals)]
 
     def delete_retained(self, target: str) -> None:
@@ -1105,3 +1158,12 @@ class Store:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+        with self._readers_guard:
+            for wr in self._readers:
+                holder = wr()
+                if holder is not None:
+                    try:
+                        holder.conn.close()
+                    except sqlite3.Error:
+                        pass
+            self._readers.clear()

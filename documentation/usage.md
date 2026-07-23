@@ -156,6 +156,25 @@ Files are addressed by the (run, relpath) KEY everywhere:
 answered (`at`); task inputs accept `{"run": ..., "rel": ...,
 "mount_as": ...}` (resolved to the output's ref — no rehash for
 declared outputs); `data_register(run=, rel=)` re-enters explicitly.
+Panels and pollers must BATCH: `run_file_stat(target, rels=[...])`
+answers N files with one target resolution, one keep lookup and ONE
+stat invocation (per-file answers under `files`; a `../` entry
+refuses the whole call); `run_inventory(targets=[...])` returns
+recorded receipts per target with per-entry typed errors (an absent
+receipt never fails the batch). The per-file forms cost two store
+queries and a subprocess EACH — a 50-file poll loop through them is
+the measured NFS-stall shape.
+
+**Store locality**: `Weft(ws, state_dir=...)` (or `WEFT_STATE_DIR`)
+relocates `state.db` to fast local disk when the workspace lives on
+NFS (field-measured 28x per-query penalty); the CAS and all
+content-addressed data stay in the workspace. state.db is the SYSTEM
+OF RECORD — on purgeable scratch a purge orphans every run, env and
+session the workspace knows about. One state_dir per workspace (a
+marker refuses sharing — merged state would be silent corruption).
+Reads take per-thread WAL connections and never wait on writers;
+cross-process writers wait out contention (busy_timeout) instead of
+erroring.
 Keeps of declared outputs anchor their refs: after cache eviction,
 fetch and staging re-obtain the bytes from the keep, hash-verified.
 

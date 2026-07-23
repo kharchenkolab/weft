@@ -19,6 +19,11 @@ project workspace); every method returns plain JSON-able data.
 ```python
 from weft.api import Weft
 w = Weft(workspace_dir)          # pixi/pixi-pack auto-found next to pixi_bin
+# workspace on NFS? put state.db on local disk (28x per-query penalty
+# measured): state_dir= or WEFT_STATE_DIR. CAVEAT: state.db is the
+# system of record — never purgeable scratch. One state_dir per
+# workspace (sharing is refused).
+w = Weft(workspace_dir, state_dir="~/.cache/weft-state/proj")
 ```
 
 ## The mental model (5 objects)

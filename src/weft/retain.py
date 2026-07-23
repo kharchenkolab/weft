@@ -610,6 +610,105 @@ class RetainManager:
                         "at": cand["at"], "abs_path": cand["path"], **st}
         return {"target": target, "path": rel, "exists": False}
 
+    _STAT_BATCH_CAP = 1000
+
+    def file_stat_many(self, target: str, rels: list) -> dict:
+        """Batched file_stat (aba store/NFS note): ONE target
+        resolution, ONE keep lookup, ONE shell invocation per adapter —
+        a panel asking about N files pays O(1) store queries and one
+        subprocess, not 2N queries and N spawns. Same per-file answer
+        shape as file_stat; sandbox confinement refuses the WHOLE call
+        naming the escaping entry (malformed-input lane)."""
+        if not isinstance(rels, list) or not rels or \
+                not all(isinstance(r, str) and r for r in rels):
+            raise WeftError("task.invalid",
+                            "rels must be a non-empty list of relative "
+                            "paths", stage="infra")
+        if len(rels) > self._STAT_BATCH_CAP:
+            raise WeftError(
+                "task.invalid",
+                f"{len(rels)} rels in one call (cap "
+                f"{self._STAT_BATCH_CAP}) — chunk the request",
+                stage="infra")
+        kind, row, jobdir_rel = self._target_row(target)     # once
+        adapter = self.adapters.get(row["site"])
+        if adapter is None:
+            raise WeftError("task.invalid",
+                            f"site {row['site']!r} not registered",
+                            stage="infra",
+                            hints={"suggestion": "register_site first — "
+                                                 "this is not an outage"})
+        root = adapter.path(jobdir_rel)
+        kept = self.store.get_retained(target)               # once
+        cands: dict[str, list] = {}
+        for rel in dict.fromkeys(rels):          # de-dup, keep order
+            joined = os.path.normpath(os.path.join(root, rel))
+            if not joined.startswith(root.rstrip("/") + "/"):
+                raise WeftError("task.invalid",
+                                f"path escapes the run sandbox: {rel!r}",
+                                stage="infra")
+            lst = [{"at": "sandbox", "adapter": adapter, "path": joined}]
+            if kept and kept["state"] == "done" \
+                    and kept.get("moved") != 0:
+                norm = os.path.normpath(
+                    os.path.join(kept["location"], rel))
+                if norm.startswith(os.path.normpath(kept["location"])):
+                    lst.append({"at": "retained",
+                                "adapter": adapter if kept["in_place"]
+                                else None, "path": norm})
+            cands[rel] = lst
+        # ONE script for every adapter-side candidate; per-path
+        # POSITIVE markers ("<idx> <bytes> <mtime>" / "<idx> ABSENT") —
+        # a missing marker is a broken probe, never a file verdict
+        paths = [c["path"] for lst in cands.values() for c in lst
+                 if c["adapter"] is not None]
+        stats: dict[str, dict | None] = {}
+        if paths:
+            lines = []
+            for i, p in enumerate(paths):
+                q = shlex.quote(p)
+                lines.append(
+                    f'if [ -f {q} ]; then printf "%s " {i}; '
+                    f'(stat -c "%s %Y" {q} 2>/dev/null || '
+                    f'stat -f "%z %m" {q}); '
+                    f'else echo "{i} ABSENT"; fi')
+            r = adapter.run_cmd("\n".join(lines), timeout=120)
+            got: dict[int, list] = {}
+            for ln in (r.out or "").splitlines():
+                parts = ln.split()
+                if len(parts) >= 2 and parts[0].isdigit():
+                    got[int(parts[0])] = parts[1:]
+            missing = [i for i in range(len(paths)) if i not in got]
+            if missing:
+                raise WeftError(
+                    "internal.error",
+                    "stat batch produced no marker for "
+                    f"{len(missing)} path(s) — probe trouble, not a "
+                    "file verdict",
+                    stage="infra", retryable=True,
+                    hints={"rc": r.rc,
+                           "log_tail": (r.err or r.out)[-500:]})
+            for i, p in enumerate(paths):
+                g = got[i]
+                stats[p] = (None if g[0] == "ABSENT"
+                            else {"bytes": int(g[0]),
+                                  "mtime": int(g[1])})
+        out: dict[str, dict] = {}
+        for rel, lst in cands.items():
+            entry: dict = {"target": target, "path": rel,
+                           "exists": False}
+            for c in lst:
+                st = (stats.get(c["path"])
+                      if c["adapter"] is not None
+                      else self._stat_one(c))
+                if st is not None:
+                    entry = {"target": target, "path": rel,
+                             "exists": True, "at": c["at"],
+                             "abs_path": c["path"], **st}
+                    break
+            out[rel] = entry
+        return {"target": target, "files": out}
+
     def file_read(self, target: str, rel: str,
                   max_bytes: int = 1 << 20) -> dict:
         max_bytes = min(max_bytes, self._READ_HARD_CAP)
