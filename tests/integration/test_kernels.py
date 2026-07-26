@@ -132,6 +132,17 @@ def test_r_kernel_with_env(wk):
 
     k = wk.kernel_start("local", "r", env_id=env["env_id"])["kernel_id"]
     assert wk.kernel_exec(k, "x <- 40", timeout=60)["rc"] == 0
+    # THE mendel incident, verbatim shape: dir.create + setwd killed
+    # two kernels in a row (driver protocol paths were cwd-relative).
+    # The kernel must survive, keep state, and keep executing.
+    r = wk.kernel_exec(
+        k, 'work_dir <- file.path(tempdir(), "geo_data", "deep")\n'
+           'dir.create(work_dir, showWarnings = FALSE, recursive = TRUE)\n'
+           'setwd(work_dir)', timeout=60)
+    assert r["rc"] == 0, r
+    r = wk.kernel_exec(k, "cat(basename(getwd()))", timeout=60)
+    assert r["rc"] == 0 and r["out"].strip() == "deep"   # cwd persisted
+    assert wk.kernel_status(k)["state"] == "running"
     r = wk.kernel_exec(k, "x <- x + 2\ncat(x)", timeout=60)
     assert r["rc"] == 0 and r["out"].strip() == "42"
     bad = wk.kernel_exec(k, "stop('bad fit')", timeout=60)

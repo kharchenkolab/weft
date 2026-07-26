@@ -5,7 +5,9 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=9   # v9: read-from --with-size (atomic SIZE/ABSENT);
+WEFT_SHIM_VERSION=10  # v10: runner re-anchors cwd after sourced
+                      #      activation/prelude (exit record safety)
+                      # v9: read-from --with-size (atomic SIZE/ABSENT);
                       #     read-multi (batched member reads)
                       # v8: read-from --root/--base64 (ranged read)
                       # v7: storage.reflink probe
@@ -203,12 +205,17 @@ echo \$\$ > pid.real
 date +%s > pid.epoch
 hostname > node 2>/dev/null || true
 [ -f activate.sh ] && . ./activate.sh
+# activation and site_prelude are SOURCED — a prelude that chdirs
+# (module inits do) must not orphan the exit record; same class as the
+# kernel-driver cwd incident. Re-anchor, and write the record by
+# absolute path regardless.
+cd "$jobdir"
 start=\$(date +%s)
-$timer $sigreset sh cmd.sh >> log 2>&1
+$timer $sigreset sh cmd.sh >> "$jobdir/log" 2>&1
 rc=\$?
 end=\$(date +%s)
-echo "\$((end - start))" > wall_s
-echo "\$rc" > exit_code.tmp && mv exit_code.tmp exit_code
+echo "\$((end - start))" > "$jobdir/wall_s"
+echo "\$rc" > "$jobdir/exit_code.tmp" && mv "$jobdir/exit_code.tmp" "$jobdir/exit_code"
 EOF
     chmod +x "$jobdir/runner.sh"
     : > "$jobdir/log"

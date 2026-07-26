@@ -1,11 +1,15 @@
 # Weft julia kernel driver — same file protocol as driver.py.
+# the jobdir, captured BEFORE any user code: a block's cd() persists
+# (session state) but cannot orphan the driver's protocol files
+const JOBDIR = pwd()
+jp(rel) = joinpath(JOBDIR, rel)
 n = 0
 while true
-    if isfile("kernel.stop")
+    if isfile(jp("kernel.stop"))
         exit(0)
     end
-    rc_f = "blocks/" * lpad(n, 4, '0') * ".rc"
-    code_f = "blocks/" * lpad(n, 4, '0') * ".code"
+    rc_f = jp("blocks/" * lpad(n, 4, '0') * ".rc")
+    code_f = jp("blocks/" * lpad(n, 4, '0') * ".code")
     if isfile(rc_f)
         global n += 1
         continue
@@ -14,15 +18,15 @@ while true
         sleep(0.2)
         continue
     end
-    write("current_block", string(n))
-    art = "blocks/" * lpad(n, 4, '0') * ".artifacts"
+    write(jp("current_block"), string(n))
+    art = jp("blocks/" * lpad(n, 4, '0') * ".artifacts")
     mkpath(art)
     ENV["WEFT_BLOCK_DIR"] = art
     rc = 0
     # real files from block start, flushed on a timer: a controller
     # tailing them streams output while the block runs
-    out = open("blocks/" * lpad(n, 4, '0') * ".out", "w")
-    err = open("blocks/" * lpad(n, 4, '0') * ".err", "w")
+    out = open(jp("blocks/" * lpad(n, 4, '0') * ".out"), "w")
+    err = open(jp("blocks/" * lpad(n, 4, '0') * ".err"), "w")
     flusher = Timer(0.5; interval=0.5) do _
         try flush(out); flush(err) catch end
     end
@@ -39,6 +43,6 @@ while true
     end
     write(rc_f * ".tmp", string(rc))
     mv(rc_f * ".tmp", rc_f, force=true)
-    rm("current_block", force=true)
+    rm(jp("current_block"), force=true)
     global n += 1
 end

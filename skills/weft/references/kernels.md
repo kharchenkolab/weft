@@ -99,3 +99,7 @@ Mind the partition's walltime cap: an over-long ask is REFUSED upfront
 forever. The file-block protocol needs no ports; the shared filesystem is
 the channel, and `node_exec`-style diagnostics reach the same allocation.
 Interactive sessions want SHORT walltimes and a restart, not a day hold.
+
+- Blocks may chdir freely: cwd PERSISTS across blocks (session state);
+  the driver's protocol files and $WEFT_BLOCK_DIR stay anchored to the
+  sandbox — a chdir cannot kill the kernel or scatter artifacts.

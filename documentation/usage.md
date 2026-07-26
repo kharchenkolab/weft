@@ -609,6 +609,13 @@ attribute latency from the payload, never by subtracting adjacent
 event timestamps. Unknown kinds should be
 ignored (new kinds are always additive).
 
+Kernel blocks may freely `os.chdir`/`setwd` — the working directory
+persists across blocks (session state) while the driver's protocol
+files and `$WEFT_BLOCK_DIR` are anchored to the sandbox (absolute),
+so an ordinary chdir can neither kill the kernel nor scatter saved
+artifacts. Likewise a `site_prelude`/activation that chdirs cannot
+orphan a job's exit record (runner re-anchors).
+
 ```python
 w.array_status(r["group"])                  # counts + FAILURE BUCKETS (by
                                             # log signature, sample indices)

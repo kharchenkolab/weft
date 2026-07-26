@@ -96,4 +96,12 @@ remotes, removable in one command.
   never warm).
 - Reality scripts assert COST budgets (bytes moved, seconds), not just
   correctness — a 1.6 GB re-download looks green without them.
+- Hostile-ambient-state battery: every surface that executes USER
+  CODE inside a weft-owned process (kernel drivers; anything sourced
+  into runner.sh — activation, site_prelude) gets a battery mutating
+  the process globals the bookkeeping relies on (cwd, stdio, WEFT_*
+  env, signals). Cooperative-only corpora ratify the happy path —
+  the setwd incident killed kernels with an ordinary idiom while
+  every kernel test used clean blocks (field note #5's lesson,
+  re-learned on the least-validated input surface).
 - No biological examples in specs, tests, or docs.

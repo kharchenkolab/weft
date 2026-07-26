@@ -81,28 +81,41 @@ class _LiveFile(io.TextIOBase):
             pass
 
 
+# the jobdir, captured BEFORE any user code runs: every protocol path
+# is built from it, so a block that os.chdir's (an ordinary idiom)
+# cannot orphan the driver's own bookkeeping — the block gets whatever
+# cwd it asked for and KEEPS it across blocks (session state); the
+# driver keeps writing where it must (field incident: a setwd killed
+# two kernels in a row and the error named the epilogue, not the cause)
+_JOBDIR = os.getcwd()
+
+
+def _p(rel):
+    return os.path.join(_JOBDIR, rel)
+
+
 def main():
-    os.makedirs("blocks", exist_ok=True)
+    os.makedirs(_p("blocks"), exist_ok=True)
     globals_ns = {"__name__": "__main__"}
     n = 0
     while True:
-        if os.path.exists("kernel.stop"):
+        if os.path.exists(_p("kernel.stop")):
             return 0
-        rc_f = f"blocks/{n:04d}.rc"
-        code_f = f"blocks/{n:04d}.code"
+        rc_f = _p(f"blocks/{n:04d}.rc")
+        code_f = _p(f"blocks/{n:04d}.code")
         if os.path.exists(rc_f):        # done earlier (or driver restarted)
             n += 1
             continue
         if not os.path.exists(code_f):
             time.sleep(0.2)
             continue
-        with open("current_block", "w") as f:
+        with open(_p("current_block"), "w") as f:
             f.write(str(n))
-        art = f"blocks/{n:04d}.artifacts"
+        art = _p(f"blocks/{n:04d}.artifacts")
         os.makedirs(art, exist_ok=True)
         os.environ["WEFT_BLOCK_DIR"] = art
-        out = _LiveFile(f"blocks/{n:04d}.out")
-        err = _LiveFile(f"blocks/{n:04d}.err")
+        out = _LiveFile(_p(f"blocks/{n:04d}.out"))
+        err = _LiveFile(_p(f"blocks/{n:04d}.err"))
         rc = 0
         try:
             if _SESSION_PREFIX:
@@ -126,7 +139,7 @@ def main():
         open(tmp, "w").write(str(rc))
         os.replace(tmp, rc_f)
         try:
-            os.remove("current_block")
+            os.remove(_p("current_block"))
         except FileNotFoundError:
             pass
         n += 1
