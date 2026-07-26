@@ -589,23 +589,8 @@ class RetainManager:
 
     @staticmethod
     def _stat_one(cand: dict) -> dict | None:
-        path = cand["path"]
-        if cand["adapter"] is None:
-            p = Path(path)
-            if not p.is_file():
-                return None
-            st = p.stat()
-            return {"bytes": st.st_size, "mtime": int(st.st_mtime)}
-        r = cand["adapter"].run_cmd(
-            f'[ -f {shlex.quote(path)} ] && '
-            f'(stat -c "%s %Y" {shlex.quote(path)} 2>/dev/null || '
-            f'stat -f "%z %m" {shlex.quote(path)}) || echo ABSENT',
-            timeout=60)
-        out = (r.out or "").strip()
-        if r.rc != 0 or out == "ABSENT" or not out:
-            return None
-        parts = out.split()
-        return {"bytes": int(parts[0]), "mtime": int(parts[1])}
+        from .fileio import stat_candidate
+        return stat_candidate(cand)
 
     def file_stat(self, target: str, rel: str) -> dict:
         for cand in self.resolve_key(target, rel):
@@ -662,42 +647,12 @@ class RetainManager:
                                 "adapter": adapter if kept["in_place"]
                                 else None, "path": norm})
             cands[rel] = lst
-        # ONE script for every adapter-side candidate; per-path
-        # POSITIVE markers ("<idx> <bytes> <mtime>" / "<idx> ABSENT") —
-        # a missing marker is a broken probe, never a file verdict
+        # ONE invocation, positive markers — fileio.stat_batch (the
+        # shared engine; a missing marker raises, never reads as absent)
+        from .fileio import stat_batch
         paths = [c["path"] for lst in cands.values() for c in lst
                  if c["adapter"] is not None]
-        stats: dict[str, dict | None] = {}
-        if paths:
-            lines = []
-            for i, p in enumerate(paths):
-                q = shlex.quote(p)
-                lines.append(
-                    f'if [ -f {q} ]; then printf "%s " {i}; '
-                    f'(stat -c "%s %Y" {q} 2>/dev/null || '
-                    f'stat -f "%z %m" {q}); '
-                    f'else echo "{i} ABSENT"; fi')
-            r = adapter.run_cmd("\n".join(lines), timeout=120)
-            got: dict[int, list] = {}
-            for ln in (r.out or "").splitlines():
-                parts = ln.split()
-                if len(parts) >= 2 and parts[0].isdigit():
-                    got[int(parts[0])] = parts[1:]
-            missing = [i for i in range(len(paths)) if i not in got]
-            if missing:
-                raise WeftError(
-                    "internal.error",
-                    "stat batch produced no marker for "
-                    f"{len(missing)} path(s) — probe trouble, not a "
-                    "file verdict",
-                    stage="infra", retryable=True,
-                    hints={"rc": r.rc,
-                           "log_tail": (r.err or r.out)[-500:]})
-            for i, p in enumerate(paths):
-                g = got[i]
-                stats[p] = (None if g[0] == "ABSENT"
-                            else {"bytes": int(g[0]),
-                                  "mtime": int(g[1])})
+        stats: dict[str, dict | None] = stat_batch(adapter, paths)
         out: dict[str, dict] = {}
         for rel, lst in cands.items():
             entry: dict = {"target": target, "path": rel,
@@ -749,116 +704,25 @@ class RetainManager:
     # a TRANSPORT tier (unlike file_read's preview): serve a byte range
     # of any contained artifact without moving the whole file. The cap
     # bounds ONE call, not the file — callers stream in cap-sized reads.
-    _RANGE_READ_CAP = 16 << 20                       # default; see below
-
-    def _range_read_cap(self) -> int:
-        """WEFT_RANGE_READ_CAP is read PER CALL (an env var honored
-        only before import is a silent no-op for embedders); malformed
-        values refuse loudly — accept-and-mangle is the tested
-        failure."""
-        raw = os.environ.get("WEFT_RANGE_READ_CAP")
-        if raw is None:
-            return self._RANGE_READ_CAP
-        try:
-            cap = int(raw)
-            if cap <= 0:
-                raise ValueError
-        except ValueError:
-            raise WeftError(
-                "task.invalid",
-                f"WEFT_RANGE_READ_CAP must be a positive integer, got "
-                f"{raw!r}", stage="infra") from None
-        return cap
+    _RANGE_READ_CAP = 16 << 20      # per-call default; the env
+                                    # override lives in fileio.range_cap
 
     def file_read_range(self, target: str, rel: str, offset: int = 0,
                         length: int | None = None) -> dict:
         """`length` bytes at `offset` from (run, relpath), served WITHOUT
-        transferring the whole file — direct pread on a local-transport
-        site, the shim's `read-from` lane on ssh. Same containment as
-        file_read/file_stat (resolve_key), re-asserted remote-side.
-
-        Returns {target, path, at, offset, nbytes, size, eof, capped,
-        bytes_b64}. offset past EOF is not an error: empty payload,
-        eof=True, and `size` lets the caller answer 416. `length` above
-        the per-call cap clamps (capped=True); `length=None` reads to the
-        cap."""
-        cap = self._range_read_cap()
-        if not isinstance(offset, int) or offset < 0:
-            raise WeftError("task.invalid",
-                            f"offset must be a non-negative int, got "
-                            f"{offset!r}", stage="infra")
-        if length is None:
-            length = cap
-        if not isinstance(length, int) or length < 0:
-            raise WeftError("task.invalid",
-                            f"length must be a non-negative int, got "
-                            f"{length!r}", stage="infra")
-        capped = length > cap
-        want = min(length, cap)                      # controller-side clamp
-        import base64 as _b64
-        for cand in self.resolve_key(target, rel):   # confines controller-side
-            st = self._stat_one(cand)
-            if st is None:
-                continue
-            size = st["bytes"]
-            from .adapters.local import LocalAdapter
-            is_local = (cand["adapter"] is None
-                        or isinstance(cand["adapter"], LocalAdapter)
-                        or getattr(cand["adapter"], "transport",
-                                   None) == "local")
-            if is_local:
-                # POSITIVE local signal only — an adapter without a
-                # transport attribute (cloud wraps an inner ssh) must
-                # take the shim lane, never a controller-side pread of
-                # a remote path (best case untyped ENOENT; worst case a
-                # same-named LOCAL file answers with wrong bytes)
-                try:
-                    with Path(cand["path"]).open("rb") as f:
-                        f.seek(offset)
-                        data = f.read(want)
-                except OSError as e:
-                    raise WeftError(
-                        "data.missing",
-                        f"file vanished between stat and read: {rel!r}",
-                        stage="infra", retryable=True,
-                        hints={"os_error": str(e)[:200]}) from e
-            else:
-                r = cand["adapter"].shim(
-                    ["read-from", "--file", cand["path"],
-                     "--offset", str(offset), "--max", str(want),
-                     "--root", cand["root"], "--base64"], timeout=300)
-                if r.rc == 3:
-                    raise WeftError(
-                        "task.invalid",
-                        f"path escapes its root remote-side: {rel!r}",
-                        stage="infra")
-                if r.rc != 0:
-                    raise WeftError(
-                        "data.missing",
-                        f"range read failed: {(r.err or '')[:200]}",
-                        stage="infra", retryable=True)
-                data = _b64.b64decode("".join(r.out.split()))
-                if not data and want > 0 and offset < size:
-                    # the shim's [ -f ] || exit 0 answers rc 0 with an
-                    # empty payload when the file vanished between the
-                    # stat and the read — a 0-byte eof=False success
-                    # would spin a chunk-streaming consumer forever
-                    raise WeftError(
-                        "data.missing",
-                        f"file vanished between stat and read: {rel!r}",
-                        stage="infra", retryable=True)
-            return {"target": target, "path": rel, "at": cand["at"],
-                    "offset": offset, "nbytes": len(data), "size": size,
-                    "eof": offset + len(data) >= size, "capped": capped,
-                    "bytes_b64": _b64.b64encode(data).decode()}
-        raise WeftError("data.missing",
-                        f"no such file in the run sandbox or its keep: "
-                        f"{rel}",
-                        stage="infra",
-                        hints={"note": "run_inventory shows what the "
-                                       "run produced; the sandbox may "
-                                       "have been swept and the keep "
-                                       "forgotten"})
+        transferring the whole file — the shared fileio.range_read
+        engine over resolve_key's candidates (sandbox, then keep). See
+        the engine for the range semantics (past-EOF, cap clamp, vanish
+        guard); this wrapper owns only the run addressing."""
+        from .fileio import range_cap, range_read
+        got = range_read(
+            self.resolve_key(target, rel), offset, length,
+            cap=range_cap(self._RANGE_READ_CAP),
+            stat_fn=self._stat_one, what=repr(rel),
+            missing_hints={"note": "run_inventory shows what the run "
+                                   "produced; the sandbox may have "
+                                   "been swept and the keep forgotten"})
+        return {"target": target, "path": rel, **got}
 
     # -- GC: the other half ---------------------------------------------------
 

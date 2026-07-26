@@ -75,6 +75,17 @@ w.run_file_read_range(t, rel, offset=, length=)
                                        # whole-file move; past-EOF =
                                        # empty+eof+size (416 shape);
                                        # capped=true -> loop; 16 MiB/call
+w.data_read_range(ref, rel=, offset=, length=)
+                                       # SAME tier by CONTENT REF (one
+                                       # engine, identical semantics);
+                                       # tree refs take rel= (a member
+                                       # path — the chunked-store shape)
+w.data_stat(ref | refs=[...])          # live vs record: where the bytes
+                                       # ACTUALLY sit (workspace/homes/
+                                       # site CAS); divergent flags
+                                       # mismatch; NON-MUTATING (staging
+                                       # demotes, this testifies); trees
+                                       # sampled (flagged)
 w.run_forget(target=...)               # the INVERSE of retain: removes
                                        # what retain created — the pin
                                        # always; copies only if a move

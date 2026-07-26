@@ -8,6 +8,7 @@ CAS before anything moves — task chaining then finds them already present.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -546,6 +547,215 @@ class DataManager:
             for loc in self.store.locations_of(ref)
         ]
         return row
+
+    # -- observation (the ref-addressed tier: fileio engine) ----------------
+
+    def _ref_target(self, ref: str, rel: str | None) -> tuple[dict, str, int | None]:
+        """(dataref row, target blob hex, recorded size) for a ref or a
+        tree member. Tree refs REQUIRE rel= (a member path); file refs
+        refuse it — loudly, both ways."""
+        row = self.store.get_dataref(ref)
+        if not row:
+            raise WeftError("data.missing", f"unknown ref: {ref}",
+                            stage="staging")
+        if row["kind"] == "tree":
+            if not rel:
+                raise WeftError(
+                    "task.invalid",
+                    "tree refs need rel= — a member path inside the "
+                    "tree", stage="staging",
+                    hints={"kind": "tree", "bytes": row["bytes"]})
+            entry = next((e for e in self.cas.tree_manifest(ref)
+                          if e["path"] == rel), None)
+            if entry is None:
+                raise WeftError(
+                    "data.missing",
+                    f"no such member in the tree: {rel!r}",
+                    stage="staging")
+            if entry["kind"] != "file":
+                raise WeftError(
+                    "task.invalid",
+                    f"tree member {rel!r} is a {entry['kind']}, not a "
+                    f"file", stage="staging")
+            return row, entry["sha256"], entry.get("size")
+        if rel:
+            raise WeftError(
+                "task.invalid",
+                "rel= addresses a member of a TREE ref; this ref is a "
+                f"{row['kind']}", stage="staging")
+        return row, ref[len("dref:"):], row["bytes"]
+
+    def ref_candidates(self, ref: str, rel: str | None, adapters: dict,
+                       site: str | None = None) -> list[dict]:
+        """fileio candidates for a ref's bytes (or a tree member's), in
+        preference order: the workspace CAS copy first (bytes are
+        content-addressed — identical everywhere, and a local pread
+        beats any transport), then each recorded site location
+        (reference-in-place home, or the site CAS blob). site= narrows
+        the REMOTE candidates only."""
+        row, hexdigest, _ = self._ref_target(ref, rel)
+        cands: list[dict] = []
+        bp = self.cas._blob_path(hexdigest)
+        if bp.exists():
+            cands.append({"at": "workspace", "adapter": None,
+                          "path": str(bp), "root": str(self.cas.root)})
+        locs = list(self.store.locations_of(ref))
+        if row["kind"] == "tree":
+            locs += self.store.locations_of(f"dref:{hexdigest}")
+        seen: set[tuple] = set()
+        for loc in locs:
+            if site and loc["site"] != site:
+                continue
+            adapter = adapters.get(loc["site"])
+            if adapter is None:
+                continue                # unregistered site: not reachable
+            lpath = str(loc["path"])
+            if lpath.startswith("external:"):
+                home = lpath[len("external:"):]
+                if row["kind"] == "tree":
+                    joined = os.path.normpath(os.path.join(home, rel))
+                    if not joined.startswith(
+                            os.path.normpath(home) + "/"):
+                        raise WeftError(
+                            "task.invalid",
+                            f"member path escapes the external home: "
+                            f"{rel!r}", stage="staging")
+                    cand = {"at": loc["site"], "via": "external-home",
+                            "adapter": adapter, "path": joined,
+                            "root": os.path.normpath(home)}
+                else:
+                    cand = {"at": loc["site"], "via": "external-home",
+                            "adapter": adapter, "path": home,
+                            "root": os.path.dirname(home.rstrip("/"))}
+            else:
+                cand = {"at": loc["site"], "via": "site-cas",
+                        "adapter": adapter,
+                        "path": f"{lpath}/{hexdigest[:2]}/{hexdigest}",
+                        "root": lpath}
+            key = (cand["at"], cand["path"])
+            if key not in seen:
+                seen.add(key)
+                cands.append(cand)
+        return cands
+
+    def read_range(self, ref: str, adapters: dict, rel: str | None = None,
+                   offset: int = 0, length: int | None = None,
+                   site: str | None = None) -> dict:
+        """The ref-addressed range tier — same engine, same semantics as
+        run_file_read_range (one transport engine, two addressings).
+        NOTE: a range slice is unverifiable in ANY scheme (you cannot
+        check a sha256 from a slice) — a viewing tier; computation
+        inputs keep going through whole-content verified fetch."""
+        from .fileio import range_read
+        got = range_read(
+            self.ref_candidates(ref, rel, adapters, site=site),
+            offset, length,
+            what=f"{ref}" + (f"/{rel}" if rel else ""),
+            missing_hints={"note": "no live copy at the workspace or "
+                                   "any registered location; data_stat "
+                                   "shows where the record thinks the "
+                                   "bytes are"})
+        out = {"ref": ref, **got}
+        if rel:
+            out["rel"] = rel
+        return out
+
+    def stat_ref(self, ref: str, adapters: dict,
+                 site: str | None = None, sample: int = 20) -> dict:
+        """Live observation vs the record: where does this ref's data
+        actually sit RIGHT NOW. Non-mutating — divergence is reported,
+        never acted on (staging's verify fence stays the sole authority
+        that demotes locations; doctor/reconcile mutate). Trees are
+        observed by SAMPLE (first `sample` members, said honestly) —
+        an exact tree audit is data_fingerprint's job."""
+        from .fileio import stat_batch, stat_candidate
+        row = self.store.get_dataref(ref)
+        if not row:
+            raise WeftError("data.missing", f"unknown ref: {ref}",
+                            stage="staging")
+        kind = row["kind"]
+        recorded = {"kind": kind, "bytes": row["bytes"],
+                    "trust": (row["meta"] or {}).get("trust")}
+        members: list[dict] = []
+        if kind == "tree":
+            members = [e for e in self.cas.tree_manifest(ref)
+                       if e["kind"] == "file"]
+            recorded["files"] = len(members)
+            probe = members[:max(0, sample)]
+        # workspace observation (local Path checks — cheap)
+        if kind == "tree":
+            present = sum(
+                1 for e in probe
+                if self.cas._blob_path(e["sha256"]).exists())
+            workspace = {"present": present == len(probe) and bool(probe),
+                         "members_checked": len(probe),
+                         "members_present": present,
+                         "sampled": len(probe) < len(members)}
+        else:
+            st = stat_candidate({"adapter": None,
+                                 "path": str(self.cas._blob_path(
+                                     ref[len("dref:"):]))})
+            workspace = ({"present": True, **st} if st
+                         else {"present": False})
+        sites = []
+        # divergence = a RECORDED location observes absent, or no live
+        # copy is observable anywhere. Workspace absence alone is NOT
+        # divergence — the record never claims workspace presence (a
+        # reference-in-place ref legitimately has no local copy).
+        site_divergent = False
+        any_live = workspace.get("present") is True
+        any_unknown = False
+        for loc in self.store.locations_of(ref):
+            if loc["site"] == "@workspace":
+                continue        # the workspace block above IS this row
+            if site and loc["site"] != site:
+                continue
+            adapter = adapters.get(loc["site"])
+            entry: dict = {"site": loc["site"],
+                           "verified_at": loc["verified_at"]}
+            if adapter is None:
+                entry["present"] = "unknown"
+                entry["reason"] = "site not registered in this workspace"
+                any_unknown = True
+                sites.append(entry)
+                continue
+            lpath = str(loc["path"])
+            external = lpath.startswith("external:")
+            entry["via"] = "external-home" if external else "site-cas"
+            if kind == "tree":
+                if external:
+                    home = lpath[len("external:"):]
+                    paths = [os.path.normpath(os.path.join(home,
+                                                           e["path"]))
+                             for e in probe]
+                else:
+                    paths = [f"{lpath}/{e['sha256'][:2]}/{e['sha256']}"
+                             for e in probe]
+                got = stat_batch(adapter, paths)
+                present = sum(1 for v in got.values() if v is not None)
+                entry.update(members_checked=len(probe),
+                             members_present=present,
+                             present=present == len(probe)
+                             and bool(probe),
+                             sampled=len(probe) < len(members))
+            else:
+                hexd = ref[len("dref:"):]
+                path = (lpath[len("external:"):] if external
+                        else f"{lpath}/{hexd[:2]}/{hexd}")
+                st = stat_candidate({"adapter": adapter, "path": path})
+                entry.update({"present": True, **st} if st
+                             else {"present": False})
+            if entry.get("present") is False:
+                site_divergent = True
+            elif entry.get("present") is True:
+                any_live = True
+            sites.append(entry)
+        divergent = site_divergent or (not any_live and not any_unknown)
+        return {"ref": ref, "recorded": recorded, "workspace": workspace,
+                "sites": sites, "divergent": divergent,
+                "note": "observation only — nothing was demoted; "
+                        "staging's verify fence acts on divergence "
+                        "(doctor/reconcile mutate)"}
 
     # -- staging ------------------------------------------------------------
 

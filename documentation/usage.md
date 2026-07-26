@@ -156,6 +156,38 @@ Files are addressed by the (run, relpath) KEY everywhere:
 answered (`at`); task inputs accept `{"run": ..., "rel": ...,
 "mount_as": ...}` (resolved to the output's ref — no rehash for
 declared outputs); `data_register(run=, rel=)` re-enters explicitly.
+**The observation principle**: *identity gates movement; observation
+follows the bytes; every address vocabulary gets both tiers.* Moving
+bytes (fetch, staging, task inputs) always goes through content refs
+— hash-verified on arrival, so an input's name IS its content. But
+OBSERVING bytes (list/stat/read/range) works wherever they sit, under
+whichever vocabulary names them: run keys (`run_inventory`,
+`run_file_stat/read/read_range`), raw site paths (`data_fingerprint`),
+and content refs (`data_stat`, `data_read_range`). Note on previews:
+refs have no preview verb by design — declared outputs already carry
+previews in the result manifest at collection. (In the run verbs,
+`target` is the run id: a job id or kernel id.)
+
+`data_stat(ref | refs=[...], site=)` is live observation versus the
+record: where the bytes actually sit right now — workspace CAS, each
+registered location (reference-in-place home or site CAS) — with
+`divergent` flagging record/reality mismatch. NON-MUTATING: it
+testifies, it never demotes (staging's verify fence acts on
+divergence; doctor/reconcile mutate). Trees are observed by SAMPLE
+(first `sample` members, flagged `sampled`); the exact tree audit is
+`data_fingerprint`.
+
+`data_read_range(ref, rel=, offset=, length=, site=)` is the
+ref-addressed range read — the SAME engine as `run_file_read_range`
+(conformance-pinned), so identical semantics: past-EOF is empty +
+`eof` + `size`, cap clamps with `capped`, a vanish is `data.missing`
+retryable. Tree refs take `rel=` (a member path — the chunked-store
+shape); file refs take none. Resolution prefers the workspace copy
+(local pread), then registered locations; `site=` narrows the remote
+candidates. A range slice is unverifiable by construction in any
+scheme — a viewing tier; computation inputs go through whole-content
+verified fetch.
+
 `run_file_read_range(target, rel, offset=, length=)` is the
 TRANSPORT tier (vs `run_file_read`'s preview): a byte range served
 without moving the whole file — pread on local sites, the shim's

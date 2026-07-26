@@ -1017,6 +1017,57 @@ class Weft:
                 "note": "stat-only facts over LISTED entries; identity "
                         "is data_register's job"}
 
+    def data_stat(self, ref: str | None = None,
+                  site: str | None = None,
+                  refs: list[str] | None = None,
+                  sample: int = 20) -> dict:
+        """Live observation for a ref: where do the bytes ACTUALLY sit
+        right now, versus the record — workspace CAS, each registered
+        location (reference-in-place home or site CAS), with
+        `divergent` flagging record/reality mismatch. NON-MUTATING:
+        nothing is demoted (staging's verify fence acts; this verb
+        testifies). Trees are observed by SAMPLE (first `sample`
+        members, flagged `sampled`) — an exact tree audit is
+        data_fingerprint's job. refs=[...] batches with per-entry
+        typed errors."""
+        if (ref is None) == (refs is None):
+            raise WeftError("task.invalid",
+                            "pass exactly one of ref= or refs=[...]",
+                            stage="staging")
+        if refs is not None:
+            if not isinstance(refs, list) or not refs or \
+                    not all(isinstance(x, str) and x for x in refs):
+                raise WeftError("task.invalid",
+                                "refs must be a non-empty list of "
+                                "dref ids", stage="staging")
+            out = {}
+            for r in dict.fromkeys(refs):
+                try:
+                    out[r] = self.dataman.stat_ref(
+                        r, self.adapters, site=site, sample=sample)
+                except WeftError as e:
+                    out[r] = e.to_dict()
+            return {"refs": out}
+        return self.dataman.stat_ref(ref, self.adapters, site=site,
+                                     sample=sample)
+
+    def data_read_range(self, ref: str, rel: str | None = None,
+                        offset: int = 0, length: int | None = None,
+                        site: str | None = None) -> dict:
+        """Ranged read by CONTENT REF — the ref-addressed sibling of
+        run_file_read_range (one transport engine, identical range
+        semantics: past-EOF = empty+eof+size, cap clamps with
+        capped=true, vanish = data.missing retryable). Tree refs take
+        rel= (a member path — the chunked-store shape); file refs take
+        none. Resolution: workspace CAS copy first (local pread), then
+        registered locations (reference-in-place home / site CAS);
+        site= narrows the remote candidates. A range slice is
+        UNVERIFIABLE by construction — a viewing tier; computation
+        inputs go through whole-content verified fetch."""
+        return self.dataman.read_range(ref, self.adapters, rel=rel,
+                                       offset=offset, length=length,
+                                       site=site)
+
     def data_fetch(self, ref: str, to_path: str) -> dict:
         return self.dataman.fetch(ref, to_path, self.adapters, self.transfers)
 
@@ -2290,6 +2341,7 @@ PUBLIC_TOOLS = [
     "env_gpu_hint", "env_revise", "env_find_near",
     "env_publish", "env_adopt", "env_unpublish", "env_published",
     "data_register", "data_describe", "data_fetch", "data_fingerprint",
+    "data_stat", "data_read_range",
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_elements", "array_result", "array_retry",
     "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",
