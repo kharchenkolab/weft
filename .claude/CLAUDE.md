@@ -34,6 +34,12 @@ remotes, removable in one command.
 - Per-round OODA: tests first-run where possible; docs
   (documentation/) and the agent skill (skills/weft/) updated with
   every surface change; round entry in misc/report.md.
+- Pace protocol: TARGETED green (new tests + touched files' suites +
+  red-proofs + reality spots) => commit+push immediately; the full
+  fast lane runs in BACKGROUND after the push (failures triage per
+  the flake ledger; real breakage = immediate fix-forward commit).
+  Exception, flagged explicitly: high-blast-radius changes (store/
+  engine refactors touching everything) still gate on the full lane.
 - misc/ is gitignored (ledger, designs, specs, handoff);
   misc/HANDOFF.md is the session-to-session index — read it first.
 - Test lanes: fast `pixi run pytest -q -m "not solver and not docker"`;
