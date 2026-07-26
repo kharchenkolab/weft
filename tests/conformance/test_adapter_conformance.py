@@ -163,6 +163,12 @@ def test_write_file_existence_is_completeness(raw_adapter):
                     caught.append(p.read_bytes())
                     return
                 if stop.is_set():
+                    # one FINAL existence check: stop is set right
+                    # after the write lands, and returning on a stale
+                    # false exists-check misses the catch (the watcher
+                    # racing its own exit, not the contract failing)
+                    if p.exists():
+                        caught.append(p.read_bytes())
                     return
 
         t = threading.Thread(target=watch)
