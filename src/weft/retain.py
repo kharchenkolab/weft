@@ -749,8 +749,26 @@ class RetainManager:
     # a TRANSPORT tier (unlike file_read's preview): serve a byte range
     # of any contained artifact without moving the whole file. The cap
     # bounds ONE call, not the file — callers stream in cap-sized reads.
-    _RANGE_READ_CAP = int(os.environ.get("WEFT_RANGE_READ_CAP",
-                                         str(16 << 20)))   # 16 MiB
+    _RANGE_READ_CAP = 16 << 20                       # default; see below
+
+    def _range_read_cap(self) -> int:
+        """WEFT_RANGE_READ_CAP is read PER CALL (an env var honored
+        only before import is a silent no-op for embedders); malformed
+        values refuse loudly — accept-and-mangle is the tested
+        failure."""
+        raw = os.environ.get("WEFT_RANGE_READ_CAP")
+        if raw is None:
+            return self._RANGE_READ_CAP
+        try:
+            cap = int(raw)
+            if cap <= 0:
+                raise ValueError
+        except ValueError:
+            raise WeftError(
+                "task.invalid",
+                f"WEFT_RANGE_READ_CAP must be a positive integer, got "
+                f"{raw!r}", stage="infra") from None
+        return cap
 
     def file_read_range(self, target: str, rel: str, offset: int = 0,
                         length: int | None = None) -> dict:
@@ -764,7 +782,7 @@ class RetainManager:
         eof=True, and `size` lets the caller answer 416. `length` above
         the per-call cap clamps (capped=True); `length=None` reads to the
         cap."""
-        cap = self._RANGE_READ_CAP
+        cap = self._range_read_cap()
         if not isinstance(offset, int) or offset < 0:
             raise WeftError("task.invalid",
                             f"offset must be a non-negative int, got "
@@ -783,12 +801,27 @@ class RetainManager:
             if st is None:
                 continue
             size = st["bytes"]
-            if cand["adapter"] is None or \
-                    getattr(cand["adapter"], "transport", "local") == "local":
-                # local transport / workspace copy: direct pread, no shim
-                with Path(cand["path"]).open("rb") as f:
-                    f.seek(offset)
-                    data = f.read(want)
+            from .adapters.local import LocalAdapter
+            is_local = (cand["adapter"] is None
+                        or isinstance(cand["adapter"], LocalAdapter)
+                        or getattr(cand["adapter"], "transport",
+                                   None) == "local")
+            if is_local:
+                # POSITIVE local signal only — an adapter without a
+                # transport attribute (cloud wraps an inner ssh) must
+                # take the shim lane, never a controller-side pread of
+                # a remote path (best case untyped ENOENT; worst case a
+                # same-named LOCAL file answers with wrong bytes)
+                try:
+                    with Path(cand["path"]).open("rb") as f:
+                        f.seek(offset)
+                        data = f.read(want)
+                except OSError as e:
+                    raise WeftError(
+                        "data.missing",
+                        f"file vanished between stat and read: {rel!r}",
+                        stage="infra", retryable=True,
+                        hints={"os_error": str(e)[:200]}) from e
             else:
                 r = cand["adapter"].shim(
                     ["read-from", "--file", cand["path"],
@@ -805,6 +838,15 @@ class RetainManager:
                         f"range read failed: {(r.err or '')[:200]}",
                         stage="infra", retryable=True)
                 data = _b64.b64decode("".join(r.out.split()))
+                if not data and want > 0 and offset < size:
+                    # the shim's [ -f ] || exit 0 answers rc 0 with an
+                    # empty payload when the file vanished between the
+                    # stat and the read — a 0-byte eof=False success
+                    # would spin a chunk-streaming consumer forever
+                    raise WeftError(
+                        "data.missing",
+                        f"file vanished between stat and read: {rel!r}",
+                        stage="infra", retryable=True)
             return {"target": target, "path": rel, "at": cand["at"],
                     "offset": offset, "nbytes": len(data), "size": size,
                     "eof": offset + len(data) >= size, "capped": capped,

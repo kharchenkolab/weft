@@ -70,6 +70,11 @@ w.run_file_stat(t, rels=[...])         # BATCH — panels/pollers use this:
                                        # O(1) store reads ({"files": ...})
 w.run_inventory(targets=[...])         # batched receipts, per-entry
                                        # typed errors; live never batches
+w.run_file_read_range(t, rel, offset=, length=)
+                                       # TRANSPORT tier: byte range, no
+                                       # whole-file move; past-EOF =
+                                       # empty+eof+size (416 shape);
+                                       # capped=true -> loop; 16 MiB/call
 w.run_forget(target=...)               # the INVERSE of retain: removes
                                        # what retain created — the pin
                                        # always; copies only if a move

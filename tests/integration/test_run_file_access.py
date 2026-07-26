@@ -317,3 +317,108 @@ def test_shim_read_from_root_rejects_escape(w, tmp_path):
     r = ad.shim(["read-from", "--file", f"{root}/../secret.txt",
                  "--root", str(root), "--offset", "0", "--max", "64"])
     assert r.rc == 3
+
+
+# ── review fixes: dispatch fail-safe, vanish race, call-time cap ───────────
+
+def _fake_remote_adapter(sandbox_path, payload_b64):
+    """An adapter with NO transport attribute (the CloudAdapter shape:
+    wraps an inner ssh). Records shim calls; preads must never happen."""
+    from weft.adapters.base import ShimResult
+
+    class FakeRemote:
+        name = "fakecloud"
+
+        def __init__(self):
+            self.shim_calls = []
+
+        def path(self, rel):
+            return rel if rel.startswith("/") else f"{sandbox_path}/{rel}"
+
+        def run_cmd(self, script, timeout=120.0):
+            # _stat_one: answer a fixed size for any stat
+            return ShimResult(0, "10 1700000000", "")
+
+        def shim(self, argv, *, timeout=60.0):
+            self.shim_calls.append(argv)
+            return ShimResult(0, payload_b64, "")
+
+    return FakeRemote()
+
+
+def test_range_read_attributeless_adapter_takes_the_shim_lane(w,
+                                                              monkeypatch):
+    """The dispatch fail-safe: no transport attribute (cloud shape) =>
+    the SHIM lane, never a controller-side pread of a remote path — a
+    same-named local file answering with wrong bytes is the worst-case
+    failure this pins against."""
+    import base64 as b64
+    jid = _mk_run(w, "printf 0123456789 > chunk.bin")
+    fake = _fake_remote_adapter(f"jobs/{jid}",
+                                b64.b64encode(b"0123456789").decode())
+    row = w.store.get_job(jid)
+    monkeypatch.setitem(w.adapters, row["site"], fake)
+    got = w.run_file_read_range(jid, "chunk.bin", offset=0, length=10)
+    assert fake.shim_calls, "attribute-less adapter must use the shim lane"
+    argv = fake.shim_calls[0]
+    assert argv[0] == "read-from" and "--base64" in argv and "--root" in argv
+    assert base64.b64decode(got["bytes_b64"]) == b"0123456789"
+
+
+def test_range_read_local_adapter_preads_no_shim(w, monkeypatch):
+    jid = _mk_run(w, "printf abcdef > local.bin")
+    ad = w.adapters["local"]
+    calls = []
+    monkeypatch.setattr(
+        ad, "shim",
+        lambda argv, timeout=60.0: calls.append(argv))
+    got = w.run_file_read_range(jid, "local.bin", offset=1, length=3)
+    assert base64.b64decode(got["bytes_b64"]) == b"bcd"
+    assert not calls, "local reads must pread, not subprocess"
+
+
+def test_range_read_vanished_file_is_typed_never_a_spin(w, monkeypatch):
+    """rc-0-empty from the shim when bytes were expected (file vanished
+    between stat and read) is a STATE CHANGE — data.missing retryable,
+    never a 0-byte eof=False success a chunk streamer would spin on."""
+    from weft.adapters.base import ShimResult
+    jid = _mk_run(w, "printf 0123456789 > gone.bin")
+    fake = _fake_remote_adapter(f"jobs/{jid}", "")   # rc 0, EMPTY payload
+    row = w.store.get_job(jid)
+    monkeypatch.setitem(w.adapters, row["site"], fake)
+    out = w.run_file_read_range(jid, "gone.bin", offset=0, length=8)
+    assert out["error"] == "data.missing" and out["retryable"] is True
+    assert "vanished" in out["detail"]
+
+
+def test_range_read_pread_vanish_race_is_typed(w, monkeypatch):
+    # pread branch, same race: stat sees it, open() doesn't
+    jid2 = _mk_run(w, "printf xyz > flee.bin")
+    from weft import retain as _r
+    orig = _r.RetainManager._stat_one
+
+    def stat_then_unlink(cand):
+        st = orig(cand)
+        if st is not None and cand["adapter"] is not None:
+            import os as _os
+            try:
+                _os.unlink(cand["path"])
+            except OSError:
+                pass
+        return st
+
+    monkeypatch.setattr(_r.RetainManager, "_stat_one",
+                        staticmethod(stat_then_unlink))
+    out2 = w.run_file_read_range(jid2, "flee.bin")
+    assert out2["error"] == "data.missing" and out2["retryable"] is True
+
+
+def test_range_read_cap_env_is_read_per_call(w, monkeypatch):
+    jid = _mk_run(w, "printf 0123456789 > capped.bin")
+    monkeypatch.setenv("WEFT_RANGE_READ_CAP", "4")   # AFTER import
+    got = w.run_file_read_range(jid, "capped.bin", length=100)
+    assert got["nbytes"] == 4 and got["capped"] is True
+    monkeypatch.setenv("WEFT_RANGE_READ_CAP", "not-a-number")
+    bad = w.run_file_read_range(jid, "capped.bin")
+    assert bad["error"] == "task.invalid"
+    assert "WEFT_RANGE_READ_CAP" in bad["detail"]
