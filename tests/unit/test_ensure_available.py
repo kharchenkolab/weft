@@ -588,3 +588,107 @@ def test_probe_cran_repos_without_cran_lane_refused(tmp_path, pixi_bin):
                              lanes=["pypi"], probe=True,
                              cran_repos=["https://r.example.org"])
     assert out["error"] == "task.invalid"
+
+
+# ── fast=False: the deferred conflict check, pulled forward ────────────────
+
+def _pylib_ok_fakes(monkeypatch, w, sid, tmp_path):
+    """Minimal overlay-lane fakes (dry-run report + rc-0 everything)."""
+    import json as _json
+    from weft.adapters.base import ShimResult
+    ad = w.adapters["local"]
+    report = tmp_path / "site" / "sessions" / sid / "pip-report.json"
+
+    def act(script, *, timeout=120.0):
+        if "--dry-run" in script:
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text(_json.dumps({"install": [
+                {"metadata": {"name": "leafpkg", "version": "1.0"}}]}))
+        return ShimResult(0, "", "")
+
+    monkeypatch.setattr(ad, "run_activated", act)
+
+
+def test_fast_false_conflict_fails_at_add_time(tmp_path, pixi_bin,
+                                               monkeypatch):
+    """THE aba incident lever: a base-contradicting leaf fails AT ADD
+    TIME as env.solve_conflict — typed, before anything is installed
+    or recorded. Their _is_constraint_conflict() matches this payload
+    verbatim."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    _pylib_ok_fakes(monkeypatch, w, sid, tmp_path)
+
+    def clash(spec):
+        raise WeftError("env.solve_conflict",
+                        f"spec '{spec['name']}' is unsatisfiable as "
+                        f"pinned", stage="solve",
+                        hints={"solver_message": "dep ==1.6 vs ==1.9"})
+
+    monkeypatch.setattr(w.sessions.envman, "ensure", clash)
+    out = w.ensure_available({"session": sid}, {"pypi": ["leafpkg"]},
+                             fast=False)
+    assert out["error"] == "env.solve_conflict"
+    assert "unsatisfiable as pinned" in out["detail"]
+    assert out["hints"]["at"] == "add-time (fast=False)"
+    assert "nothing was installed" in out["hints"]["note"]
+    att = out["hints"]["attempts"][0]
+    assert att["outcome"] == "failed"
+    assert att["error"]["error"] == "env.solve_conflict"
+    # NOTHING recorded, NO overlay laid
+    assert w.store.get_session(sid)["added_pypi"] == []
+    assert not (tmp_path / "site" / "sessions" / sid / "pylib").exists()
+
+
+def test_fast_false_clean_add_validates_then_installs(tmp_path, pixi_bin,
+                                                      monkeypatch):
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    _pylib_ok_fakes(monkeypatch, w, sid, tmp_path)
+    solved = []
+    monkeypatch.setattr(
+        w.sessions.envman, "ensure",
+        lambda spec: (solved.append(spec)
+                      or {"env_id": "env:v1:" + "e" * 64}))
+    out = w.ensure_available({"session": sid}, {"pypi": ["leafpkg"]},
+                             verify=False, fast=False)
+    assert out["satisfied"] is True
+    assert len(solved) == 1                        # exactly one solve
+    assert "leafpkg" in solved[0]["deps"]["pypi"]  # candidate included
+    assert "leafpkg" in w.store.get_session(sid)["added_pypi"]
+
+
+def test_fast_default_never_solves(tmp_path, pixi_bin, monkeypatch):
+    """The default lane keeps its contract: no solve at add — the
+    snapshot's re-solve stays the identity mint and conflict check."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    _pylib_ok_fakes(monkeypatch, w, sid, tmp_path)
+    monkeypatch.setattr(
+        w.sessions.envman, "ensure",
+        lambda spec: (_ for _ in ()).throw(AssertionError("solved!")))
+    out = w.ensure_available({"session": sid}, {"pypi": ["leafpkg"]},
+                             verify=False)
+    assert out["satisfied"] is True
+
+
+def test_shadows_base_rides_the_envelope(tmp_path, pixi_bin,
+                                         monkeypatch):
+    """The overlay's shadow warning must survive the crossing aba
+    actually uses — it was silently dropped exactly here (their
+    incident's early signal)."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    from weft.session import SessionManager
+    monkeypatch.setattr(
+        SessionManager, "install",
+        lambda self, session_id, adapter, pypi=None, verify=None,
+        fast=True, **kw: {
+            "installed": {"pypi": pypi}, "mode": "pylib",
+            "shadows_base": [{"name": "dep", "base": "1.9",
+                              "layer": "1.6"}],
+            "session_id": session_id})
+    out = w.ensure_available({"session": sid}, {"pypi": ["leafpkg"]},
+                             verify=False)
+    assert out["satisfied"] is True
+    assert out["attempts"][0]["shadows_base"][0]["base"] == "1.9"

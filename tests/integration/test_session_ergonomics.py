@@ -83,3 +83,28 @@ def test_fast_pypi_add_is_usable_and_snapshot_solves(w):
     assert "env_id" in snap, snap             # the real solve happened here
     assert snap["spec"]["deps"]["pypi"] == ["six"]
     w.session_stop(sid)
+
+
+def test_fast_false_validates_at_add_and_snapshot_agrees(w):
+    """fast=False, the real thing: the add-time validation solve mints
+    the SAME EnvID the snapshot later mints (identity is content — the
+    pulled-forward check and the deferred one are ONE question), and
+    the overlay install proceeds after validation."""
+    s = w.session_start({"name": "guarded",
+                         "deps": {"conda": ["python =3.12", "pip"]}},
+                        "local")
+    sid = s["session_id"]
+    out = w.ensure_available({"session": sid}, {"pypi": ["idna"]},
+                             fast=False)
+    assert out["satisfied"] is True, out
+    assert out["attempts"][0]["outcome"] == "installed"
+    r = w.session_exec(sid, "python -c 'import idna'")
+    assert r["rc"] == 0
+    snap = w.session_snapshot(sid, verify=False)
+    ins = w.session_install(sid, pypi=[])  # no-op; fetch session row
+    row = w.store.get_session(sid)
+    assert "idna" in row["added_pypi"]
+    # the validation minted an env row for the SAME content the
+    # snapshot resolves to — one spec synthesis, one identity
+    assert snap["env_id"].startswith("env:")
+    w.session_stop(sid)

@@ -1283,7 +1283,8 @@ class Weft:
                          lanes=None, verify=True,
                          probe: bool = False,
                          cran_repos: list[str] | None = None,
-                         site: str | None = None) -> dict:
+                         site: str | None = None,
+                         fast: bool = True) -> dict:
         """Make REQUEST available in TARGET, prove it, and report one
         typed envelope: {satisfied, changed, attempts, verified,
         runtime}. Tagged mode: request is an eco-tagged delta
@@ -1296,6 +1297,13 @@ class Weft:
         of package strings with lanes=[...] — YOUR ranking; per-package
         independent chains, verify-in-loop, halting on outages,
         exhaustion = env.unavailable_in_lanes with every attempt.
+        fast=False pulls the snapshot's conflict check FORWARD: pypi
+        adds solve the full manifest at add time (one solve; a
+        base-contradicting leaf fails HERE as env.solve_conflict with
+        the solver message, and nothing is installed or recorded) —
+        capability installs where correctness > latency. The default
+        stays the fast lane; the snapshot's re-solve remains the
+        identity mint either way.
         cran_repos=[urls] names extra repositories for the cran lane
         (either mode; recorded on attempts; the cran PROBE degrades to
         unknown — secondary registries are not probeable). Env targets:
@@ -1386,7 +1394,7 @@ class Weft:
         sid = target["session"]
         return self.sessions.ensure_available(
             sid, self._session_adapter(sid), request, verify=verify,
-            lanes=lanes, probe=probe, cran_repos=cran_repos)
+            lanes=lanes, probe=probe, cran_repos=cran_repos, fast=fast)
 
     def _env_verify_now(self, env_id: str, site: str, request: dict,
                         verify, attempt: dict) -> dict:

@@ -780,7 +780,8 @@ class SessionManager:
     def ensure_available(self, session_id: str, adapter: SiteAdapter,
                          request: dict, verify=True, lanes=None,
                          probe: bool = False,
-                         cran_repos: list[str] | None = None) -> dict:
+                         cran_repos: list[str] | None = None,
+                         fast: bool = True) -> dict:
         """ensure_available, TAGGED mode (P3): make an eco-tagged delta
         available in the session, prove it, report the envelope
         {satisfied, changed, attempts, verified, runtime}. Pre-check
@@ -869,17 +870,19 @@ class SessionManager:
             if ranked:
                 return self._ensure_ranked(session_id, adapter, request,
                                            lanes, verify, eff,
-                                           cran_repos=cran_repos)
+                                           cran_repos=cran_repos,
+                                           fast=fast)
             return self._ensure_tagged(session_id, adapter, request,
                                        verify, eff,
-                                       cran_repos=cran_repos)
+                                       cran_repos=cran_repos, fast=fast)
         finally:
             stop.set()
             self.store.release_session_ensure(session_id, nonce)
 
     def _ensure_tagged(self, session_id: str, adapter: SiteAdapter,
                        request: dict, verify, eff: dict | None,
-                       cran_repos: list[str] | None = None) -> dict:
+                       cran_repos: list[str] | None = None,
+                       fast: bool = True) -> dict:
         import time as _t
         s = self._get(session_id)
         remaining = {k: list(request.get(k) or [])
@@ -936,6 +939,7 @@ class SessionManager:
                 out = self.install(session_id, adapter, **{eco: entries},
                                    verify=(verify if eff is not None
                                            else None),
+                                   fast=fast,
                                    cran_repos=(cran_repos
                                                if eco == "cran"
                                                else None))
@@ -946,6 +950,11 @@ class SessionManager:
                      "mutations": [out.get("mode") or "prefix"]}
                 if eco == "cran" and cran_repos:
                     a["repositories"] = list(cran_repos)
+                if out.get("shadows_base"):
+                    # the overlay's shadow warning must survive the
+                    # crossing aba actually uses (their incident's
+                    # early signal was dropped exactly here)
+                    a["shadows_base"] = out["shadows_base"]
                 verified.update(out.get("verified") or {})
             except WeftError as e:
                 a = {"lane": eco, "outcome": "failed",
@@ -981,7 +990,8 @@ class SessionManager:
     def _ensure_ranked(self, session_id: str, adapter: SiteAdapter,
                        packages: list[str], lanes: list[str], verify,
                        eff: dict | None,
-                       cran_repos: list[str] | None = None) -> dict:
+                       cran_repos: list[str] | None = None,
+                       fast: bool = True) -> dict:
         """The ranked chain (P4): per-package INDEPENDENT chains over
         caller-ranked lanes. A lane succeeds only if its postcondition
         passed (verify-in-loop rides P1's install: a verify-failed lane
@@ -1086,6 +1096,7 @@ class SessionManager:
                                        **{lane: [spelling]},
                                        verify=(verify if eff is not None
                                                else None),
+                                       fast=fast,
                                        cran_repos=(cran_repos
                                                    if lane == "cran"
                                                    else None))
@@ -1096,6 +1107,8 @@ class SessionManager:
                          "seconds": round(_t.monotonic() - t0, 2)}
                     if lane == "cran" and cran_repos:
                         a["repositories"] = list(cran_repos)
+                    if out.get("shadows_base"):
+                        a["shadows_base"] = out["shadows_base"]
                     verified.update(out.get("verified") or {})
                     success = True
                     installed_count += 1
@@ -1424,7 +1437,10 @@ class SessionManager:
         else verifies a different world than user code sees."""
         main, ns = self._stack_activation(s, adapter)
         overlay = adapter.path(f"{s['location']}/overlay.sh")
-        return (f"{main} && {{ [ -f {shlex.quote(overlay)} ] && "
+        # hermetic interpreters: ~/.local site-packages must not leak
+        # into the composed runtime (same umbrella as the runner)
+        return (f"export PYTHONNOUSERSITE=1 && {main} && "
+                f"{{ [ -f {shlex.quote(overlay)} ] && "
                 f". {shlex.quote(overlay)}; true; }}"), ns
 
     def _verify_exec_fn(self, s: dict, adapter: SiteAdapter):
@@ -1549,6 +1565,13 @@ class SessionManager:
                 s, f"adding conda package(s) {conda}")
         if mode in ("none", "pylib") and pypi and not conda \
                 and not full_clone:
+            validated = None
+            if not fast:
+                # fast=False must mean solve-at-add on EVERY lane: the
+                # regate had silently made it a no-op here (the overlay
+                # lane never consulted it — aba's incident lever
+                # wouldn't have worked even if reachable)
+                validated = self._validate_solve(s, pypi)
             got = self._materialize_pylib(s, adapter, pypi)
             self.store.session_add_deps(session_id, [], pypi)
             self.store.emit("session.installed", session=session_id,
@@ -1556,6 +1579,7 @@ class SessionManager:
                             **got.get("timings", {}))
             out = {"installed": {"conda": [], "pypi": pypi},
                    "session_id": session_id, "mode": "pylib",
+                   **({"validated": validated} if validated else {}),
                    "fetched": got["fetched"],
                    "timings": got.get("timings"),
                    "fetch_method": got.get("fetch_method"),
@@ -1888,6 +1912,61 @@ class SessionManager:
                                    "produce what you asserted"})
         return out
 
+    def _synth_spec(self, s: dict, name: str | None = None,
+                    extra_conda: tuple = (), extra_pypi: tuple = (),
+                    extra_cran: tuple = ()) -> dict:
+        """ONE spec synthesis for the snapshot AND the pulled-forward
+        conflict check — they must ask the solver the same question or
+        add-time validation and snapshot-time reality drift apart."""
+        env_row = self.store.get_env(s["base_env_id"])
+        installers = s.get("installers") or []
+        spec = {
+            "name": name or f"synth-of-{s['session_id']}",
+            "extends": env_row["spec_hash"],
+            "deps": {"conda": list(s["added_conda"]) + list(extra_conda),
+                     "pypi": list(s["added_pypi"]) + list(extra_pypi)},
+        }
+        cran = list(s.get("added_cran") or []) + list(extra_cran)
+        if cran:
+            # the spec's native cran layer: the solve pins versions the
+            # scratch install left floating (github refs get SHA-pinned);
+            # classify_delta layers cran, so this realizes as a delta
+            # overlay on the frozen base
+            spec["deps"]["cran"] = cran
+        if s.get("added_cran_repos"):
+            spec["r_repositories"] = s["added_cran_repos"]
+        if installers:
+            spec["post_install"] = [i["cmd"] for i in installers]
+            spec["step_notes"] = {str(i): inst["note"]
+                                  for i, inst in enumerate(installers)
+                                  if inst.get("note")}
+            inputs = [i["input"] for i in installers if i.get("input")]
+            if inputs:
+                spec["post_install_inputs"] = inputs
+        return spec
+
+    def _validate_solve(self, s: dict, pypi: list[str]) -> str:
+        """The deferred conflict check, PULLED FORWARD (fast=False on
+        the overlay lane; aba incident): solve the would-be snapshot
+        spec including these candidates — a base-contradicting leaf
+        fails HERE, typed, before anything is installed or recorded.
+        One solve, no clone, no realize; the minted env IS the eventual
+        snapshot env (identity is content), so the snapshot later hits
+        the cached solve."""
+        spec = self._synth_spec(s, extra_pypi=tuple(pypi))
+        try:
+            return self.envman.ensure(spec)["env_id"]
+        except WeftError as e:
+            e.hints = dict(e.hints or {})
+            e.hints.setdefault("at", "add-time (fast=False)")
+            e.hints.setdefault("requested", list(pypi))
+            e.hints.setdefault(
+                "note", "nothing was installed or recorded — the "
+                        "session is unchanged; route the package to an "
+                        "isolated env (ensure_available env target / "
+                        "extends_env) or relax the conflicting pin")
+            raise
+
     def snapshot(self, session_id: str, name: str | None = None,
                  notes: list[str] | None = None, verify: bool = True) -> dict:
         """Synthesize the spec delta, re-solve properly, return a real EnvID.
@@ -1914,29 +1993,9 @@ class SessionManager:
             return {"env_id": s["base_env_id"], "session_id": session_id,
                     "note": "session added nothing — the base env is "
                             "the snapshot"}
-        env_row = self.store.get_env(s["base_env_id"])
         installers = s.get("installers") or []
-        spec = {
-            "name": name or f"snapshot-of-{session_id}",
-            "extends": env_row["spec_hash"],
-            "deps": {"conda": s["added_conda"], "pypi": s["added_pypi"]},
-        }
-        if s.get("added_cran"):
-            # the spec's native cran layer: the solve pins versions the
-            # scratch install left floating (github refs get SHA-pinned);
-            # classify_delta layers cran, so this realizes as a delta
-            # overlay on the frozen base
-            spec["deps"]["cran"] = s["added_cran"]
-        if s.get("added_cran_repos"):
-            spec["r_repositories"] = s["added_cran_repos"]
-        if installers:
-            spec["post_install"] = [i["cmd"] for i in installers]
-            spec["step_notes"] = {str(i): inst["note"]
-                                  for i, inst in enumerate(installers)
-                                  if inst.get("note")}
-            inputs = [i["input"] for i in installers if i.get("input")]
-            if inputs:
-                spec["post_install_inputs"] = inputs
+        spec = self._synth_spec(s, name=name
+                                or f"snapshot-of-{session_id}")
         if notes:
             spec["notes"] = list(notes)
         result = self.envman.ensure(spec)

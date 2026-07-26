@@ -115,6 +115,11 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   speaks each lane's dialect and records the spelling; a lane succeeds
   only if its postcondition passes; outages HALT; exhaustion is
   `env.unavailable_in_lanes` and each attempt carries its own levers).
+  `fast=False` pulls the snapshot's conflict check to ADD TIME
+  (typed env.solve_conflict, nothing installed/recorded — route the
+  leaf to an isolated env or relax the pin); default stays fast with
+  the snapshot as the deferred check. attempts carry `shadows_base`
+  when the overlay shadows base pins.
   Satisfaction is CHECKED first (`changed: false` short-circuit);
   `probe=True` returns per-lane availability facts (unknown is never
   false; with `cran_repos` the cran probe is "unknown" outright —

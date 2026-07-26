@@ -326,6 +326,15 @@ class EnvManager:
         try:
             result, relaxed = self._solve_forgiving(merged, workdir, relax)
         except WeftError as e:
+            # the failure exists OUTSIDE the exception too: an event a
+            # UI can render even when the caller swallows the raise
+            kind = (e.code if str(e.code).startswith("env.solve")
+                    else "env.solve_error")
+            self.store.emit(
+                kind, spec=merged_name, code=e.code,
+                solve_dir=str(workdir),
+                tail=str(e.hints.get("solver_message")
+                         or e.hints.get("stderr_tail") or "")[-800:])
             if parent_env is None or e.code != "env.solve_conflict":
                 raise
             # the delta cannot be satisfied with the base frozen: that IS the

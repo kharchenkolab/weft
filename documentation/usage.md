@@ -77,6 +77,13 @@ w.data_fetch(m["outputs"][0]["ref"], "results/scan.h5")
 | `env_vars` | exported in the job; `{{cpus}}`/`{{mem_gb}}`/`{{gpus}}` templated |
 | `after` | job_ids that must be DONE first — pipelines without polling; a failed upstream fails this job as `task.dep_failed` (it never starts) |
 
+Weft-launched interpreters are HERMETIC: `PYTHONNOUSERSITE=1` is set
+in every launcher (tasks — including `env: null` bare-node runs —
+kernels, and session exec), so `~/.local` site-packages never leak in
+(a version-matched broken user-site build otherwise shadows even
+managed envs). Opt out per task with `env_vars:
+{"PYTHONNOUSERSITE": ""}`.
+
 Sandbox contract: the job's working directory contains its mounted inputs,
 pre-created output dirs, and `tmp/`; guaranteed variables `WEFT_JOB_ID`,
 `WEFT_CPUS`, `WEFT_MEM_GB`, `WEFT_GPUS` (+ `WEFT_ARRAY_INDEX` in arrays).
@@ -479,7 +486,17 @@ The substrate speaks each lane's DIALECT (an R-namespace bare name is
 too; attempts record the `spelling` used); dialect requires an
 effective postcondition, and a bare name across cran+pypi is refused
 as ambiguous (per-lane spellings `{"name": "X", "pypi": "x"}` are the
-escape). `cran_repos=[urls]` names extra repositories for the cran
+escape). `fast=False` pulls the snapshot's conflict check FORWARD:
+pypi adds solve the full manifest at add time — a base-contradicting
+leaf fails there as a typed `env.solve_conflict` (solver message,
+`at: add-time`), and nothing is installed or recorded; the overlay
+lane's shadow warnings (`shadows_base`) also ride the envelope's
+attempts. Use it for capability installs where correctness beats
+latency; the default stays the fast lane with the snapshot as the
+deferred check. Failing solves persist their stderr as
+`solve/<hash>/solve.err` and emit an `env.solve_conflict`/
+`env.solve_failed` event — a swallowed exception no longer destroys
+the forensics. `cran_repos=[urls]` names extra repositories for the cran
 lane in EITHER mode (validated at intake; the attempt records the
 `repositories` actually used, like `spelling`). `probe=True` returns
 per-lane availability FACTS (404 is false; transport trouble is

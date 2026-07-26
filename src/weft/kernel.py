@@ -179,7 +179,11 @@ class KernelManager:
         adapter.write_file(f"{jobdir_rel}/{driver_file}", driver_src)
         adapter.write_file(
             f"{jobdir_rel}/activate.sh",
-            (self.runner.site_prelude(site) + activate + "\n").encode())
+            # hermetic interpreters (same umbrella as the runner): a
+            # version-matched ~/.local build must not shadow the kernel's
+            (self.runner.site_prelude(site)
+             + "export PYTHONNOUSERSITE=1\n"
+             + activate + "\n").encode())
         adapter.write_file(
             f"{jobdir_rel}/cmd.sh",
             f"mkdir -p blocks\nexec {interp} {driver_file}\n".encode())

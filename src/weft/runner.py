@@ -336,6 +336,13 @@ class JobRunner:
             # LC_MESSAGES alone; task env_vars below can override both.
             "unset LC_ALL",
             "export LC_MESSAGES=C",
+            # hermetic interpreters: ~/.local site-packages must not
+            # leak into weft-launched python — neither the bare node
+            # interpreter (env=None) nor a managed env whose python
+            # version happens to match (a broken user-site build
+            # aborted an import with an opaque SystemError; aba note).
+            # task env_vars below can override (set to "" to opt out).
+            "export PYTHONNOUSERSITE=1",
             f"export WEFT_JOB_ID={job_id_expr}",
             f"export WEFT_CPUS={task.resources.cpus}",
             f"export WEFT_MEM_GB={task.resources.mem_gb}",

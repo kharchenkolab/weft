@@ -1,5 +1,5 @@
 {
-  "$comment": "ensure_available result envelope v1 — the PINNED cross-repo contract (aba guards it consumer-side; tests/conformance/test_envelope.py guards it here). Changes are deliberate, versioned events. 2026-07-22 additive: attempt.repositories, success.verified_site + env-target verify-now note semantics (coordinated with aba's vendored copy).",
+  "$comment": "ensure_available result envelope v1 — the PINNED cross-repo contract (aba guards it consumer-side; tests/conformance/test_envelope.py guards it here). Changes are deliberate, versioned events. 2026-07-22 additive: attempt.repositories, success.verified_site + env-target verify-now note semantics (coordinated with aba's vendored copy); 2026-07-26 additive: attempt.shadows_base.",
   "envelope_version": 1,
   "success": {
     "satisfied": "bool (true)",
@@ -26,6 +26,7 @@
     "skip_reason": "halted|budget|grammar (outcome=skipped)",
     "verify": "per-lane got/want when a postcondition failed in-loop (ranked mode)",
     "spelling": "the lane-dialect spelling actually used (ranked mode)",
-    "repositories": "list[str] (cran lane, when cran_repos was passed — the extra repositories actually used; provenance, like spelling)"
+    "repositories": "list[str] (cran lane, when cran_repos was passed — the extra repositories actually used; provenance, like spelling)",
+    "shadows_base": "overlay shadow warning VERBATIM from the install (pypi lane, when the pylib layer shadows base-pinned packages) — the early signal for base-contradicting leaves; fast=False turns it into a typed add-time env.solve_conflict instead"
   }
 }
