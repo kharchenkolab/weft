@@ -5,7 +5,8 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=7   # v7: storage.reflink probe
+WEFT_SHIM_VERSION=8   # v8: read-from --root/--base64 (ranged read)
+                      # v7: storage.reflink probe
                       # v6: list-tree file roots (fingerprint verb)
                       # v5: squashfs realization inputs (fuse/squashfuse/
                       # mksquashfs/userns/root fs); host-first glibc
@@ -335,19 +336,44 @@ cmd_tail() {
     [ -f "$file" ] && tail -n "$lines" "$file" || true
 }
 
-# read-from --file F --offset N --max M : incremental log follow
+# read-from --file F --offset N --max M [--root R] [--base64]
+#   Byte-range read: `max` bytes starting at `offset`. Two optional,
+#   OFF-by-default arms keep the incremental-log-follow lane (no --root,
+#   no --base64) byte-identical to prior versions:
+#   --root R  : confine --file to the R subtree — reject an absolute
+#               path outside R or any '..' component (exit 3). A remote
+#               mirror of the controller's containment; log follow never
+#               passes it and so never changes.
+#   --base64  : base64-encode stdout, so a binary range survives the
+#               control channel's text decode (the ranged-read verb;
+#               log follow reads utf-8 streams raw and omits it).
 cmd_read_from() {
-    file=""; offset=0; max=65536
+    file=""; offset=0; max=65536; root=""; b64=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --file) file=$2; shift 2;;
             --offset) offset=$2; shift 2;;
             --max) max=$2; shift 2;;
+            --root) root=$2; shift 2;;
+            --base64) b64=1; shift;;
             *) echo "read-from: unknown arg $1" >&2; exit 2;;
         esac
     done
+    if [ -n "$root" ]; then
+        case "/$file/" in
+            */../*) echo "read-from: path escapes root" >&2; exit 3;;
+        esac
+        case "$file" in
+            "$root"/*) ;;
+            *) echo "read-from: path escapes root" >&2; exit 3;;
+        esac
+    fi
     [ -f "$file" ] || exit 0
-    tail -c +$((offset + 1)) "$file" | head -c "$max"
+    if [ "$b64" = "1" ]; then
+        tail -c +$((offset + 1)) "$file" | head -c "$max" | base64
+    else
+        tail -c +$((offset + 1)) "$file" | head -c "$max"
+    fi
 }
 
 cmd_head() {
