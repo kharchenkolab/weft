@@ -544,8 +544,10 @@ class RetainManager:
     _READ_HARD_CAP = 8 << 20   # a preview channel, not a transport
 
     def _sandbox_path(self, target: str, rel: str) -> tuple:
-        """(adapter, abs_path) with the path CONFINED to the jobdir —
-        a '../' escape is refused, never resolved."""
+        """(adapter, root, abs_path) with the path CONFINED to the jobdir
+        — a '../' escape is refused, never resolved. `root` is the
+        confining subtree, carried so a remote-side read can re-assert
+        containment (defense in depth)."""
         kind, row, jobdir_rel = self._target_row(target)
         adapter = self.adapters.get(row["site"])
         if adapter is None:
@@ -560,26 +562,29 @@ class RetainManager:
             raise WeftError("task.invalid",
                             f"path escapes the run sandbox: {rel!r}",
                             stage="infra")
-        return adapter, joined
+        return adapter, root, joined
 
     def resolve_key(self, target: str, rel: str) -> list[dict]:
         """(run, relpath) — retention2.md's durable handle — resolved to
         every place the bytes might currently be, in precedence order:
         the sandbox, then the keep (only once its row is `done`).
-        Each candidate: {at, adapter|None, path} (adapter None = a
-        local/workspace path read directly)."""
-        adapter, sandbox = self._sandbox_path(target, rel)
-        out = [{"at": "sandbox", "adapter": adapter, "path": sandbox}]
+        Each candidate: {at, adapter|None, path, root} (adapter None = a
+        local/workspace path read directly; `root` is the subtree the
+        path is confined to, for a remote-side containment re-check)."""
+        adapter, sandbox_root, sandbox = self._sandbox_path(target, rel)
+        out = [{"at": "sandbox", "adapter": adapter, "path": sandbox,
+                "root": sandbox_root}]
         row = self.store.get_retained(target)
         if row and row["state"] == "done" and row.get("moved") != 0:
             # a MOVED keep adds a second address; a MARK's keep address
             # IS the sandbox path (already listed)
+            keep_root = os.path.normpath(row["location"])
             norm = os.path.normpath(os.path.join(row["location"], rel))
-            if norm.startswith(os.path.normpath(row["location"])):
+            if norm.startswith(keep_root):
                 out.append({"at": "retained",
                             "adapter": adapter if row["in_place"]
                             else None,
-                            "path": norm})
+                            "path": norm, "root": keep_root})
         return out
 
     @staticmethod
@@ -732,6 +737,120 @@ class RetainManager:
             return {"target": target, "path": rel, "at": cand["at"],
                     "bytes_b64": b64, "bytes_total": st["bytes"],
                     "truncated": st["bytes"] > max_bytes}
+        raise WeftError("data.missing",
+                        f"no such file in the run sandbox or its keep: "
+                        f"{rel}",
+                        stage="infra",
+                        hints={"note": "run_inventory shows what the "
+                                       "run produced; the sandbox may "
+                                       "have been swept and the keep "
+                                       "forgotten"})
+
+    # a TRANSPORT tier (unlike file_read's preview): serve a byte range
+    # of any contained artifact without moving the whole file. The cap
+    # bounds ONE call, not the file — callers stream in cap-sized reads.
+    _RANGE_READ_CAP = 16 << 20                       # default; see below
+
+    def _range_read_cap(self) -> int:
+        """WEFT_RANGE_READ_CAP is read PER CALL (an env var honored
+        only before import is a silent no-op for embedders); malformed
+        values refuse loudly — accept-and-mangle is the tested
+        failure."""
+        raw = os.environ.get("WEFT_RANGE_READ_CAP")
+        if raw is None:
+            return self._RANGE_READ_CAP
+        try:
+            cap = int(raw)
+            if cap <= 0:
+                raise ValueError
+        except ValueError:
+            raise WeftError(
+                "task.invalid",
+                f"WEFT_RANGE_READ_CAP must be a positive integer, got "
+                f"{raw!r}", stage="infra") from None
+        return cap
+
+    def file_read_range(self, target: str, rel: str, offset: int = 0,
+                        length: int | None = None) -> dict:
+        """`length` bytes at `offset` from (run, relpath), served WITHOUT
+        transferring the whole file — direct pread on a local-transport
+        site, the shim's `read-from` lane on ssh. Same containment as
+        file_read/file_stat (resolve_key), re-asserted remote-side.
+
+        Returns {target, path, at, offset, nbytes, size, eof, capped,
+        bytes_b64}. offset past EOF is not an error: empty payload,
+        eof=True, and `size` lets the caller answer 416. `length` above
+        the per-call cap clamps (capped=True); `length=None` reads to the
+        cap."""
+        cap = self._range_read_cap()
+        if not isinstance(offset, int) or offset < 0:
+            raise WeftError("task.invalid",
+                            f"offset must be a non-negative int, got "
+                            f"{offset!r}", stage="infra")
+        if length is None:
+            length = cap
+        if not isinstance(length, int) or length < 0:
+            raise WeftError("task.invalid",
+                            f"length must be a non-negative int, got "
+                            f"{length!r}", stage="infra")
+        capped = length > cap
+        want = min(length, cap)                      # controller-side clamp
+        import base64 as _b64
+        for cand in self.resolve_key(target, rel):   # confines controller-side
+            st = self._stat_one(cand)
+            if st is None:
+                continue
+            size = st["bytes"]
+            from .adapters.local import LocalAdapter
+            is_local = (cand["adapter"] is None
+                        or isinstance(cand["adapter"], LocalAdapter)
+                        or getattr(cand["adapter"], "transport",
+                                   None) == "local")
+            if is_local:
+                # POSITIVE local signal only — an adapter without a
+                # transport attribute (cloud wraps an inner ssh) must
+                # take the shim lane, never a controller-side pread of
+                # a remote path (best case untyped ENOENT; worst case a
+                # same-named LOCAL file answers with wrong bytes)
+                try:
+                    with Path(cand["path"]).open("rb") as f:
+                        f.seek(offset)
+                        data = f.read(want)
+                except OSError as e:
+                    raise WeftError(
+                        "data.missing",
+                        f"file vanished between stat and read: {rel!r}",
+                        stage="infra", retryable=True,
+                        hints={"os_error": str(e)[:200]}) from e
+            else:
+                r = cand["adapter"].shim(
+                    ["read-from", "--file", cand["path"],
+                     "--offset", str(offset), "--max", str(want),
+                     "--root", cand["root"], "--base64"], timeout=300)
+                if r.rc == 3:
+                    raise WeftError(
+                        "task.invalid",
+                        f"path escapes its root remote-side: {rel!r}",
+                        stage="infra")
+                if r.rc != 0:
+                    raise WeftError(
+                        "data.missing",
+                        f"range read failed: {(r.err or '')[:200]}",
+                        stage="infra", retryable=True)
+                data = _b64.b64decode("".join(r.out.split()))
+                if not data and want > 0 and offset < size:
+                    # the shim's [ -f ] || exit 0 answers rc 0 with an
+                    # empty payload when the file vanished between the
+                    # stat and the read — a 0-byte eof=False success
+                    # would spin a chunk-streaming consumer forever
+                    raise WeftError(
+                        "data.missing",
+                        f"file vanished between stat and read: {rel!r}",
+                        stage="infra", retryable=True)
+            return {"target": target, "path": rel, "at": cand["at"],
+                    "offset": offset, "nbytes": len(data), "size": size,
+                    "eof": offset + len(data) >= size, "capped": capped,
+                    "bytes_b64": _b64.b64encode(data).decode()}
         raise WeftError("data.missing",
                         f"no such file in the run sandbox or its keep: "
                         f"{rel}",

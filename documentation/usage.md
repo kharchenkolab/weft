@@ -156,6 +156,18 @@ Files are addressed by the (run, relpath) KEY everywhere:
 answered (`at`); task inputs accept `{"run": ..., "rel": ...,
 "mount_as": ...}` (resolved to the output's ref — no rehash for
 declared outputs); `data_register(run=, rel=)` re-enters explicitly.
+`run_file_read_range(target, rel, offset=, length=)` is the
+TRANSPORT tier (vs `run_file_read`'s preview): a byte range served
+without moving the whole file — pread on local sites, the shim's
+byte-range lane elsewhere (containment re-asserted remote-side). It
+returns `{bytes_b64, nbytes, size, eof, capped, at}`: offset past EOF
+is NOT an error (empty + `eof` + `size` — answer 416 upstream); a
+`length` over the per-call cap (16 MiB; `WEFT_RANGE_READ_CAP`, read
+per call) clamps with `capped=true` — loop for more. A file that
+vanishes mid-read is `data.missing` retryable, never a 0-byte
+success. This is the backhaul for HTTP-Range serving of remote
+chunked stores.
+
 Panels and pollers must BATCH: `run_file_stat(target, rels=[...])`
 answers N files with one target resolution, one keep lookup and ONE
 stat invocation (per-file answers under `files`; a `../` entry

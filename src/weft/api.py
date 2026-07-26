@@ -2060,6 +2060,25 @@ class Weft:
         files travel via data_register(run=…, rel=…) → data_fetch."""
         return self.retains.file_read(target, rel, max_bytes)
 
+    def run_file_read_range(self, target: str, rel: str, offset: int = 0,
+                            length: int | None = None) -> dict:
+        """Ranged read: `length` bytes at byte `offset` of a (run,
+        relpath) artifact, WITHOUT moving the whole file — local sites
+        pread, ssh sites read through the shim's byte-range lane. The
+        transport arm behind serving HTTP Range requests for chunked
+        stores that live on remote sites (the ranged sibling of
+        run_file_read's preview).
+
+        Same containment as run_file_read (sandbox then keep, escape
+        refused), re-asserted remote-side. Returns {target, path, at,
+        offset, nbytes, size, eof, capped, bytes_b64}: `bytes_b64` is the
+        base64 payload, `size` the whole-file size, `eof` whether this
+        read reached the end. An `offset` past EOF is not an error —
+        empty payload, eof=True, `size` present (answer 416 upstream). A
+        `length` over the per-call cap (default 16 MiB, WEFT_RANGE_READ_CAP)
+        clamps and sets capped=True; loop for more."""
+        return self.retains.file_read_range(target, rel, offset, length)
+
     def run_discard(self, target: str) -> dict:
         """Active sandbox GC: delete a finished run's sandbox NOW.
         Retained files and the terminal inventory survive. The passive
@@ -2276,7 +2295,7 @@ PUBLIC_TOOLS = [
     "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",
     "events_poll", "doctor", "reconcile", "provenance", "run_inventory",
     "run_retain", "retained_runs", "run_discard", "run_forget",
-    "run_file_stat", "run_file_read",
+    "run_file_stat", "run_file_read", "run_file_read_range",
     "bundle_export", "bundle_import",
     "gc_plan", "gc_sweep", "gc_events", "gc_packages", "gc_orphans",
     "env_evict", "site_footprint",
