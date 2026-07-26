@@ -123,7 +123,25 @@ def main():
                 importlib.invalidate_caches()
             code = open(code_f).read()
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                exec(compile(code, f"<block-{n}>", "exec"), globals_ns)
+                # notebook echo: a bare FINAL expression displays its
+                # repr (python's own interactive convention — compile
+                # the last Expr node in 'single' mode, which routes
+                # through sys.displayhook: non-None printed, `_` set).
+                # Agents expect cell semantics; a silent bare `files`
+                # cost a live agent three remote round trips (aba).
+                import ast as _ast
+                tree = _ast.parse(code, f"<block-{n}>")
+                if tree.body and isinstance(tree.body[-1], _ast.Expr):
+                    last = _ast.Interactive(body=[tree.body[-1]])
+                    head = _ast.Module(body=tree.body[:-1],
+                                       type_ignores=[])
+                    exec(compile(head, f"<block-{n}>", "exec"),
+                         globals_ns)
+                    exec(compile(last, f"<block-{n}>", "single"),
+                         globals_ns)
+                else:
+                    exec(compile(tree, f"<block-{n}>", "exec"),
+                         globals_ns)
         except SystemExit as e:
             rc = int(e.code or 0)
         except KeyboardInterrupt:

@@ -111,6 +111,15 @@ quick["delta"]["layerable"]   # True → overlay fast path; else why-not text
 change). Overlay vs full prefix is a realization detail: same EnvID, same
 results — held byte-identical by a conformance test.
 
+`env_realize(env_id, site)` idempotently realizes an env on a site
+— ready-and-intact is a fast no-op; a missing/demoted/evicted
+realization rebuilds from the stored lock through the standard path.
+This is the honest primitive for "make it usable there NOW": never
+run a placebo task for the side effect (a fixed probe task collides
+with memoization — the recorded manifest comes back and nothing
+rebuilds; field finding). `env_repair` stays the force lever for a
+realization the marker still wrongly claims.
+
 Re-solving an unchanged spec never happens implicitly; pass
 `update=True` to `env_ensure` to pick up new channel state (old EnvID
 remains valid for reproducing past results).
@@ -608,6 +617,12 @@ per-phase timings (`session.installed`: `seconds`, or
 attribute latency from the payload, never by subtracting adjacent
 event timestamps. Unknown kinds should be
 ignored (new kinds are always additive).
+
+Kernel blocks display like notebooks: a bare FINAL python
+expression echoes its repr (`_` is set, None silent); R auto-prints
+visible top-level values exactly like the console (`invisible()` and
+assignments stay silent); julia shows the last non-nothing value.
+Explicit print/cat is never needed just to see a value.
 
 Kernel blocks may freely `os.chdir`/`setwd` — the working directory
 persists across blocks (session state) while the driver's protocol

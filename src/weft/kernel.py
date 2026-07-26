@@ -105,9 +105,9 @@ class KernelManager:
                     "env.not_realized",
                     f"env {env_id} is not realized on {site}",
                     stage="realize",
-                    hints={"suggestion": "run any task with this env on the "
-                                         "site first (even `true`) — kernels "
-                                         "attach to realized envs"})
+                    hints={"suggestion": f"env_realize({env_id!r}, "
+                                         f"{site!r}) — kernels attach to "
+                                         "realized envs"})
             activate = f". {shlex.quote(adapter.path(rel))}/activate.sh"
         elif session_id:
             if self.sessions is None:

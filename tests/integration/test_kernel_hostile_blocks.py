@@ -118,3 +118,28 @@ def test_prelude_chdir_cannot_orphan_the_exit_record(w, tmp_path,
     assert (jd / "exit_code").read_text().strip() == "0"
     assert (jd / "wall_s").exists() and (jd / "log").exists()
     assert not (tmp_path / "site2" / "exit_code").exists()
+
+
+# ── notebook echo: bare final expressions display (aba live finding: a
+# silent bare `files` cost an agent three remote round trips) ──────────────
+
+def test_python_kernel_echoes_last_bare_expression(w):
+    k = w.kernel_start("local", "python")["kernel_id"]
+    try:
+        r = _exec(w, k, "x = 6 * 7\nx")           # cell semantics
+        assert r["out"].strip() == "42"
+        r = _exec(w, k, "'quoted'")               # repr, not str
+        assert r["out"].strip() == "'quoted'"
+        r = _exec(w, k, "_ * 1")                  # displayhook set _
+        assert "quoted" in r["out"]
+        r = _exec(w, k, "y = 5")                  # assignment: silent
+        assert r["out"].strip() == ""
+        r = _exec(w, k, "None")                   # None: silent
+        assert r["out"].strip() == ""
+        r = _exec(w, k, "print('once')\n3 + 4")   # prints AND echoes
+        assert r["out"].split() == ["once", "7"]
+        r = w.kernel_exec(k, "x\nboom_undefined", timeout=60)
+        assert r["rc"] == 1                       # error in last expr:
+        assert "boom_undefined" in r["err"]       # honest traceback
+    finally:
+        w.kernel_stop(k)

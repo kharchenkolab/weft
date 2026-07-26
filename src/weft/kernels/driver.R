@@ -37,8 +37,13 @@ repeat {
   sink(out_con, type = "output"); sink(err_con, type = "message")
   tryCatch({
     exprs <- parse(text = paste(readLines(code_f), collapse = "\n"))
-    for (e in exprs) {   # same semantics as eval(exprs): no auto-print
-      eval(e, envir = env)
+    for (e in exprs) {
+      # console semantics: VISIBLE top-level values auto-print (agents
+      # expect what the R console shows; invisible() and assignments
+      # stay silent) — a silent bare expression sent a live agent
+      # chasing a phantom capture bug (aba)
+      res <- withVisible(eval(e, envir = env))
+      if (res$visible) print(res$value)
       flush(out_con); flush(err_con)
     }
   }, interrupt = function(e) {

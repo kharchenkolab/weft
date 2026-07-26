@@ -126,12 +126,23 @@ def test_kernel_survives_disconnect(tmp_path, pixi_bin, sshd_site):
 @pytest.mark.slow
 def test_r_kernel_with_env(wk):
     env = wk.env_ensure({"name": "r-kern", "deps": {"conda": ["r-base =4.4"]}})
-    # realize the env by running a trivial task first
-    r0 = wk.task_submit({"command": "true", "env": env["env_id"], "site": "local"})
-    assert wk.runner.wait(r0["job_id"], 900)["state"] == "DONE"
+    # the honest primitive, not a placebo task (our own suite used the
+    # pattern the kernel hint used to recommend — aba's E1 showed the
+    # placebo colliding with memoization)
+    got = wk.env_realize(env["env_id"], "local")
+    assert got.get("state") in ("ready", None) or "error" not in got, got
+    # idempotent: the second call is a fast no-op
+    again = wk.env_realize(env["env_id"], "local")
+    assert "error" not in again and again["seconds"] < 5, again
 
     k = wk.kernel_start("local", "r", env_id=env["env_id"])["kernel_id"]
     assert wk.kernel_exec(k, "x <- 40", timeout=60)["rc"] == 0
+    # console echo: visible top-level values print; assignment and
+    # invisible() stay silent (the aba silent-bare-expression finding)
+    r = wk.kernel_exec(k, "x", timeout=60)
+    assert r["rc"] == 0 and r["out"].split() == ["[1]", "40"], r
+    r = wk.kernel_exec(k, "invisible(x)", timeout=60)
+    assert r["rc"] == 0 and r["out"].strip() == "", r
     # THE mendel incident, verbatim shape: dir.create + setwd killed
     # two kernels in a row (driver protocol paths were cwd-relative).
     # The kernel must survive, keep state, and keep executing.
@@ -173,3 +184,24 @@ def test_r_kernel_with_env(wk):
     assert wk.kernel_poll(k, n, timeout=30).get("rc") == 0
     assert partial, "R output never appeared between statements"
     wk.kernel_stop(k)
+
+
+@pytest.mark.solver
+@pytest.mark.slow
+def test_env_realize_rebuilds_after_eviction(wk):
+    """THE aba E1 shape: evict a realized env, then env_realize —
+    the prefix rebuilds transparently (no placebo task, no memo
+    collision, no force flag)."""
+    env = wk.env_ensure({"name": "evict-me",
+                         "deps": {"conda": ["python =3.12"]}})
+    eid = env["env_id"]
+    assert "error" not in wk.env_realize(eid, "local")
+    ev = wk.env_evict(eid, "local")
+    assert "error" not in ev, ev
+    got = wk.env_realize(eid, "local")
+    assert "error" not in got, got
+    r = wk.task_submit({"command": "python -c 'print(21*2)' > o.txt",
+                        "env": eid, "outputs": ["o.txt"],
+                        "site": "local"})
+    job = wk.runner.wait(r["job_id"], 600)
+    assert job["state"] == "DONE"

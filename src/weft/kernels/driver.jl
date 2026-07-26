@@ -32,7 +32,13 @@ while true
     end
     try
         redirect_stdio(stdout=out, stderr=err) do
-            include_string(Main, read(code_f, String), "block-$n")
+            # REPL convention: show the final value unless nothing —
+            # agents expect what the julia prompt shows
+            res = include_string(Main, read(code_f, String), "block-$n")
+            if res !== nothing
+                show(stdout, MIME"text/plain"(), res)
+                println()
+            end
         end
     catch e
         rc = e isa InterruptException ? 130 : 1

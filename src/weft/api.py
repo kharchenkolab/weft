@@ -686,6 +686,45 @@ class Weft:
         except WeftError as e:
             return e.to_dict()
 
+    def env_realize(self, env_id: str, site: str) -> dict:
+        """Idempotently realize an env on a site: ready-and-intact is a
+        fast no-op; a missing / demoted / evicted realization rebuilds
+        from the stored lock through the standard path (adopt, shared
+        lease, wipe-aside — exactly what task staging does, minus the
+        task). THE honest primitive behind "run any task with this env
+        first (even `true`)": placebo tasks run for this side effect
+        collide with memoization — an evicted env's fixed probe task
+        returns the recorded manifest and the prefix never rebuilds
+        (aba field finding). env_repair remains the force-rebuild
+        lever for a realization the marker still (wrongly) claims."""
+        import time as _t
+        adapter = self._adapter(site)
+        env_row = self.store.get_env(env_id)
+        if not env_row:
+            raise WeftError(
+                "task.invalid", f"unknown EnvID: {env_id}",
+                stage="realize",
+                hints={"suggestion": "env_ensure the spec first"})
+        site_row = self.store.get_site(site) or {}
+        pack_tools = {"pixi_pack": self.pixi_pack, "cas": self.cas,
+                      "transfers": self.transfers,
+                      "solvers": self.envman.solvers, "store": self.store,
+                      "dataman": self.dataman}
+        from .realize import ensure_realization
+        t0 = _t.monotonic()
+        real = ensure_realization(
+            env_id, env_row, adapter, self.store,
+            caps=site_row.get("capabilities"),
+            site_config=site_row.get("config"),
+            prefer=(site_row.get("config") or {}).get("prefer"),
+            pack_tools=pack_tools)
+        out = {"env_id": env_id, "site": site,
+               "seconds": round(_t.monotonic() - t0, 2)}
+        for k in ("strategy", "location", "state", "read_only"):
+            if k in (real or {}):
+                out[k] = real[k]
+        return out
+
     def env_repair(self, env_id: str, site: str) -> dict:
         """Force-rebuild lever: clears a realization the marker still claims
         (corrupt unpack, half-deleted prefix). The next task using this env
@@ -2379,6 +2418,7 @@ PUBLIC_TOOLS = [
     "site_route_probe", "module_check", "module_list", "site_exec",
     "job_node_exec", "site_teardown", "site_unregister",
     "env_ensure", "env_status", "env_why", "env_packages", "env_repair",
+    "env_realize",
     "env_gpu_hint", "env_revise", "env_find_near",
     "env_publish", "env_adopt", "env_unpublish", "env_published",
     "data_register", "data_describe", "data_fetch", "data_fingerprint",

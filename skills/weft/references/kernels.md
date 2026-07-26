@@ -103,3 +103,7 @@ Interactive sessions want SHORT walltimes and a restart, not a day hold.
 - Blocks may chdir freely: cwd PERSISTS across blocks (session state);
   the driver's protocol files and $WEFT_BLOCK_DIR stay anchored to the
   sandbox — a chdir cannot kill the kernel or scatter artifacts.
+- Notebook echo: a bare final python expression displays (repr, `_`
+  set); R auto-prints visible top-level values (console semantics);
+  julia shows the last non-nothing value. No print/cat needed to see
+  a value.

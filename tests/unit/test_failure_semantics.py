@@ -388,3 +388,19 @@ def test_control_persist_default_and_lever():
     assert "ControlPersist=600" in " ".join(ad._ssh_base())
     ad2 = SSHAdapter("s", "host.example", "/root", control_persist=1800)
     assert "ControlPersist=1800" in " ".join(ad2._ssh_base())
+
+
+def test_env_realize_refusals_are_typed(tmp_path, pixi_bin):
+    """env_realize (the honest primitive behind 'run any task first,
+    even true'): unknown env and unknown site refuse typed — never a
+    placebo-shaped silence."""
+    from weft.api import Weft
+    w = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
+    w.register_site("local", "local", {"root": str(tmp_path / "site"),
+                                       "pixi_source": pixi_bin})
+    out = w.env_realize("env:v1:" + "0" * 64, "local")
+    assert out["error"] == "task.invalid"
+    assert "env_ensure" in out["hints"]["suggestion"]
+    out = w.env_realize("env:v1:" + "0" * 64, "nonexistent")
+    assert out["error"] == "task.invalid"
+    assert "registered" in out["hints"]
