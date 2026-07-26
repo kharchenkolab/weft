@@ -174,3 +174,116 @@ def test_range_verbs_share_one_engine_conformance(w, tmp_path):
         assert base64.b64decode(via_ref["bytes_b64"]) == \
             data[kwargs["offset"]:kwargs["offset"]
                  + kwargs.get("length", len(data))]
+
+
+# ── batched member reads (aba rates note ask 1): one floor, not N ──────────
+
+def _counting_shim(w):
+    ad = w.adapters["local"]
+    calls = []
+    orig = ad.shim
+    return calls, orig, ad
+
+
+def test_batched_members_local_and_remainder(w, tmp_path):
+    """The local lane: correct per-member entries; a small call budget
+    defers the remainder EXPLICITLY (not_read) — never a silent
+    truncation."""
+    ref = _site_tree_ref(w, tmp_path, ingest=False)
+    got = w.data_read_range(ref, rels=[".zattrs", "c/0/0", "c/0/1",
+                                       "c/9/9"])
+    files = got["files"]
+    assert base64.b64decode(files[".zattrs"]["bytes_b64"]) == b'{"k": 1}'
+    assert files["c/0/0"]["size"] == 256 and files["c/0/0"]["eof"]
+    assert files["c/0/1"]["nbytes"] == 900
+    assert files["c/9/9"]["error"] == "data.missing"   # absent member:
+    #                                    typed entry, batch survives
+    assert got["not_read"] == []
+    import os
+    os.environ["WEFT_RANGE_READ_CAP"] = "300"
+    try:
+        small = w.data_read_range(ref, rels=["c/0/0", "c/0/1"])
+        assert small["files"]["c/0/0"]["nbytes"] == 256
+        assert "c/0/1" in small["not_read"]            # over budget
+        assert "c/0/1" not in small["files"]
+    finally:
+        del os.environ["WEFT_RANGE_READ_CAP"]
+
+
+def test_batched_members_shim_lane_is_one_invocation(w, tmp_path,
+                                                     monkeypatch):
+    """THE point of the batch: N members through a remote adapter cost
+    ONE read-multi invocation (the WAN floor is per call). Proven with
+    an attribute-less fake whose shim answers the real framing."""
+    from weft.adapters.base import ShimResult
+    ref = _site_tree_ref(w, tmp_path, ingest=False)
+    real = w.adapters["local"]
+    calls = []
+
+    class FakeRemote:
+        name = "local"
+        # NO transport attribute: must take the shim lane
+
+        def path(self, rel):
+            return real.path(rel)
+
+        def write_file(self, rel, data, mode=0o644):
+            return real.write_file(rel, data)
+
+        def run_cmd(self, script, timeout=120.0):
+            return real.run_cmd(script, timeout=timeout)
+
+        def shim(self, argv, *, timeout=60.0):
+            calls.append(argv)
+            import subprocess
+            from pathlib import Path
+            shim_path = (Path(__file__).parent.parent.parent
+                         / "src/weft/shim/weft-shim")
+            r = subprocess.run(["sh", str(shim_path), *argv],
+                               capture_output=True, text=True,
+                               timeout=timeout)
+            return ShimResult(r.returncode, r.stdout, r.stderr)
+
+    monkeypatch.setitem(w.adapters, "local", FakeRemote())
+    got = w.data_read_range(ref, rels=["c/0/0", "c/0/1", ".zattrs"])
+    multi = [a for a in calls if a[0] == "read-multi"]
+    assert len(multi) == 1, calls                  # ONE invocation
+    assert not [a for a in calls if a[0] == "read-from"]
+    assert base64.b64decode(
+        got["files"]["c/0/0"]["bytes_b64"]) == bytes(range(256))
+    assert got["files"][".zattrs"]["nbytes"] == 8
+
+
+def test_batched_rels_intake_refusals(w, tmp_path):
+    ref = _site_tree_ref(w, tmp_path)
+    fref = _file_ref(w, tmp_path)
+    out = w.data_read_range(ref, rels=["a"], rel="b")
+    assert out["error"] == "task.invalid"          # both forms
+    out = w.data_read_range(ref, rels=["a"], offset=5)
+    assert out["error"] == "task.invalid"          # ranged batch: no
+    out = w.data_read_range(ref, rels=[])
+    assert out["error"] == "task.invalid"
+    out = w.data_read_range(fref, rels=["x"])
+    assert out["error"] == "task.invalid"          # file ref: no members
+    out = w.data_read_range(ref, rels=["m%d" % i for i in range(501)])
+    assert out["error"] == "task.invalid" and "chunk" in out["detail"]
+    # run-verb parity
+    jid = w.task_submit({"command": "echo a > f1 && echo b > f2",
+                         "site": "local"})["job_id"]
+    assert w.runner.wait(jid, 120)["state"] == "DONE"
+    got = w.run_file_read_range(jid, rels=["f1", "f2", "absent"])
+    assert base64.b64decode(got["files"]["f1"]["bytes_b64"]) == b"a\n"
+    assert got["files"]["absent"]["error"] == "data.missing"
+    assert w.run_file_read_range(jid)["error"] == "task.invalid"
+    out = w.run_file_read_range(jid, rels=["f1"], length=3)
+    assert out["error"] == "task.invalid"
+
+
+def test_batch_of_one_matches_singular_fields(w, tmp_path):
+    """Conformance ACROSS call forms: a batch of one and the singular
+    verb answer with identical range fields for the same member."""
+    ref = _site_tree_ref(w, tmp_path)
+    single = w.data_read_range(ref, rel="c/0/1")
+    batch = w.data_read_range(ref, rels=["c/0/1"])["files"]["c/0/1"]
+    for k in ("nbytes", "size", "eof", "bytes_b64", "at"):
+        assert single[k] == batch[k], k

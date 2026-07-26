@@ -5,7 +5,9 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=8   # v8: read-from --root/--base64 (ranged read)
+WEFT_SHIM_VERSION=9   # v9: read-from --with-size (atomic SIZE/ABSENT);
+                      #     read-multi (batched member reads)
+                      # v8: read-from --root/--base64 (ranged read)
                       # v7: storage.reflink probe
                       # v6: list-tree file roots (fingerprint verb)
                       # v5: squashfs realization inputs (fuse/squashfuse/
@@ -348,7 +350,7 @@ cmd_tail() {
 #               control channel's text decode (the ranged-read verb;
 #               log follow reads utf-8 streams raw and omits it).
 cmd_read_from() {
-    file=""; offset=0; max=65536; root=""; b64=0
+    file=""; offset=0; max=65536; root=""; b64=0; withsize=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --file) file=$2; shift 2;;
@@ -356,6 +358,7 @@ cmd_read_from() {
             --max) max=$2; shift 2;;
             --root) root=$2; shift 2;;
             --base64) b64=1; shift;;
+            --with-size) withsize=1; shift;;
             *) echo "read-from: unknown arg $1" >&2; exit 2;;
         esac
     done
@@ -368,12 +371,78 @@ cmd_read_from() {
             *) echo "read-from: path escapes root" >&2; exit 3;;
         esac
     fi
+    if [ "$withsize" = "1" ]; then
+        # ATOMIC absence-or-read: one invocation answers both — the
+        # separate pre-stat (and its stat-then-read race) is gone.
+        # Markers ("SIZE <n>" / "ABSENT") are unambiguous: base64
+        # payload lines never contain a space.
+        if [ ! -f "$file" ]; then echo "ABSENT"; exit 0; fi
+        sz=$(stat -c %s "$file" 2>/dev/null || stat -f %z "$file")
+        echo "SIZE $sz"
+        tail -c +$((offset + 1)) "$file" | head -c "$max" | base64
+        exit 0
+    fi
     [ -f "$file" ] || exit 0
     if [ "$b64" = "1" ]; then
         tail -c +$((offset + 1)) "$file" | head -c "$max" | base64
     else
         tail -c +$((offset + 1)) "$file" | head -c "$max"
     fi
+}
+
+# read-multi --plan P --root R --max-total T : batched WHOLE-member
+#   reads — ONE invocation for N files (the per-call round-trip floor
+#   is the WAN cost; a chunk cascade must not pay it N times). Plan =
+#   one absolute path per line. Output framing, one member at a time,
+#   in plan order ("%%W" cannot appear in base64):
+#     %%W <idx> SIZE <bytes>   then the base64 payload lines
+#     %%W <idx> ABSENT         no such file (an answer, not an error)
+#     %%W <idx> DEFER          total cap reached — NOT read; the
+#                              controller returns it as not_read and
+#                              the caller loops
+#   Any path escaping --root aborts the whole call (exit 3): the
+#   controller confines first, so an escape here is hostile input.
+cmd_read_multi() {
+    plan=""; root=""; maxtotal=16777216
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --plan) plan=$2; shift 2;;
+            --root) root=$2; shift 2;;
+            --max-total) maxtotal=$2; shift 2;;
+            *) echo "read-multi: unknown arg $1" >&2; exit 2;;
+        esac
+    done
+    [ -f "$plan" ] || { echo "read-multi: no plan" >&2; exit 2; }
+    [ -n "$root" ] || { echo "read-multi: --root required" >&2; exit 2; }
+    total=0; idx=0
+    while IFS= read -r f || [ -n "$f" ]; do
+        [ -n "$f" ] || continue
+        case "/$f/" in
+            */../*) echo "read-multi: path escapes root" >&2; exit 3;;
+        esac
+        case "$f" in
+            "$root"/*) ;;
+            *) echo "read-multi: path escapes root" >&2; exit 3;;
+        esac
+        if [ ! -f "$f" ]; then
+            echo "%%W $idx ABSENT"
+        else
+            sz=$(stat -c %s "$f" 2>/dev/null || stat -f %z "$f")
+            if [ $((total + sz)) -gt "$maxtotal" ] && [ "$total" -gt 0 ]
+            then
+                echo "%%W $idx DEFER"
+            elif [ "$sz" -gt "$maxtotal" ]; then
+                # a single member over the whole budget: defer, never
+                # a silent partial read (the singular verb streams it)
+                echo "%%W $idx DEFER"
+            else
+                echo "%%W $idx SIZE $sz"
+                base64 < "$f"
+                total=$((total + sz))
+            fi
+        fi
+        idx=$((idx + 1))
+    done < "$plan"
 }
 
 cmd_head() {
@@ -602,6 +671,7 @@ case "$sub" in
     tail) cmd_tail "$@";;
     head) cmd_head "$@";;
     read-from) cmd_read_from "$@";;
+    read-multi) cmd_read_multi "$@";;
     hash-tree) cmd_hash_tree "$@";;
     list-tree) cmd_list_tree "$@";;
     materialize) cmd_materialize "$@";;

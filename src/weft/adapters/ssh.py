@@ -68,6 +68,7 @@ class SSHAdapter(SiteAdapter):
         shared: bool = False,
         pixi_cache: str | None = None,
         transport: str = "ssh",
+        control_persist: int = 600,
     ):
         # transport="local": the controller RUNS ON this site (a submit
         # node with the scheduler on PATH) — every command is a direct
@@ -101,6 +102,11 @@ class SSHAdapter(SiteAdapter):
         self.pixi_source = pixi_source
         self.pixi_unpack_source = pixi_unpack_source
         self.connect_timeout = connect_timeout
+        # mux keepalive: a viewer's think-time between interactions
+        # outlived the old 120s window, so its next call paid a full
+        # reconnect+auth (3-5s spikes, aba rates note). Site-config
+        # lever `control_persist` per the adjustability rule.
+        self.control_persist = int(control_persist)
         # status polls use a tighter timeout so outages surface quickly
         # (a blocked poll is indistinguishable from a slow one until it times out)
         self.poll_timeout = 20.0
@@ -151,7 +157,7 @@ class SSHAdapter(SiteAdapter):
             "-o", f"ConnectTimeout={self.connect_timeout}",
             "-o", "ControlMaster=auto",
             "-o", f"ControlPath={self._control_path}",
-            "-o", "ControlPersist=120",
+            "-o", f"ControlPersist={self.control_persist}",
             # a master whose LINK died (bastion restart, VPN blip) must
             # exit, or every muxed command fails through it until
             # ControlPersist expires — the classic wedged-mux failure

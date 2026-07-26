@@ -660,6 +660,49 @@ class DataManager:
             out["rel"] = rel
         return out
 
+    def read_range_many(self, ref: str, adapters: dict, rels: list,
+                        site: str | None = None) -> dict:
+        """Batched WHOLE-member reads of a TREE ref — the chunk-cascade
+        shape (aba rates note): one remote invocation per location
+        group instead of N round-trip floors."""
+        from .fileio import range_read_many
+        if not isinstance(rels, list) or not rels or \
+                not all(isinstance(r, str) and r for r in rels):
+            raise WeftError("task.invalid",
+                            "rels must be a non-empty list of member "
+                            "paths", stage="staging")
+        if len(rels) > 500:
+            raise WeftError("task.invalid",
+                            f"{len(rels)} rels in one call (cap 500) — "
+                            f"chunk the request", stage="staging")
+        row = self.store.get_dataref(ref)
+        if not row:
+            raise WeftError("data.missing", f"unknown ref: {ref}",
+                            stage="staging")
+        if row["kind"] != "tree":
+            raise WeftError("task.invalid",
+                            "rels=[...] batches members of a TREE ref",
+                            stage="staging", hints={"kind": row["kind"]})
+        cands = {}
+        for rel in dict.fromkeys(rels):
+            try:
+                cands[rel] = self.ref_candidates(ref, rel, adapters,
+                                                 site=site)
+            except WeftError as e:
+                # a per-member refusal (absent member, link, escape)
+                # rides the batch verbatim as that entry's answer
+                cands[rel] = e
+        pre_errors = {r: c.to_dict() for r, c in cands.items()
+                      if isinstance(c, WeftError)}
+        good = {r: c for r, c in cands.items()
+                if not isinstance(c, WeftError)}
+        got = range_read_many(
+            good,
+            missing_hints={"note": "data_stat shows where the record "
+                                   "thinks the bytes are"})
+        got["files"].update(pre_errors)
+        return {"ref": ref, **got}
+
     def stat_ref(self, ref: str, adapters: dict,
                  site: str | None = None, sample: int = 20) -> dict:
         """Live observation vs the record: where does this ref's data

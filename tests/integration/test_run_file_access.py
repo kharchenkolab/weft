@@ -341,7 +341,11 @@ def _fake_remote_adapter(sandbox_path, payload_b64):
 
         def shim(self, argv, *, timeout=60.0):
             self.shim_calls.append(argv)
-            return ShimResult(0, payload_b64, "")
+            if not payload_b64:
+                return ShimResult(0, "", "")     # broken-probe shape
+            import base64 as _b
+            size = len(_b.b64decode(payload_b64))
+            return ShimResult(0, f"SIZE {size}\n{payload_b64}", "")
 
     return FakeRemote()
 
@@ -377,40 +381,33 @@ def test_range_read_local_adapter_preads_no_shim(w, monkeypatch):
     assert not calls, "local reads must pread, not subprocess"
 
 
-def test_range_read_vanished_file_is_typed_never_a_spin(w, monkeypatch):
-    """rc-0-empty from the shim when bytes were expected (file vanished
-    between stat and read) is a STATE CHANGE — data.missing retryable,
-    never a 0-byte eof=False success a chunk streamer would spin on."""
-    from weft.adapters.base import ShimResult
+def test_range_read_marker_less_response_is_probe_trouble(w,
+                                                          monkeypatch):
+    """The with-size lane made absence-or-read ATOMIC: rc-0 output
+    carrying neither SIZE nor ABSENT is a BROKEN PROBE —
+    internal.error retryable, never a file verdict and never a 0-byte
+    eof=False success a chunk streamer would spin on."""
     jid = _mk_run(w, "printf 0123456789 > gone.bin")
-    fake = _fake_remote_adapter(f"jobs/{jid}", "")   # rc 0, EMPTY payload
+    fake = _fake_remote_adapter(f"jobs/{jid}", "")   # rc 0, no marker
     row = w.store.get_job(jid)
     monkeypatch.setitem(w.adapters, row["site"], fake)
     out = w.run_file_read_range(jid, "gone.bin", offset=0, length=8)
-    assert out["error"] == "data.missing" and out["retryable"] is True
-    assert "vanished" in out["detail"]
+    assert out["error"] == "internal.error" and out["retryable"] is True
+    assert "marker" in out["detail"]
 
 
-def test_range_read_pread_vanish_race_is_typed(w, monkeypatch):
-    # pread branch, same race: stat sees it, open() doesn't
-    jid2 = _mk_run(w, "printf xyz > flee.bin")
-    from weft import retain as _r
-    orig = _r.RetainManager._stat_one
-
-    def stat_then_unlink(cand):
-        st = orig(cand)
-        if st is not None and cand["adapter"] is not None:
-            import os as _os
-            try:
-                _os.unlink(cand["path"])
-            except OSError:
-                pass
-        return st
-
-    monkeypatch.setattr(_r.RetainManager, "_stat_one",
-                        staticmethod(stat_then_unlink))
-    out2 = w.run_file_read_range(jid2, "flee.bin")
-    assert out2["error"] == "data.missing" and out2["retryable"] is True
+def test_range_read_deleted_local_file_is_atomically_absent(w):
+    """The pread lane is open-then-fstat — there is no stat-then-read
+    window at all: a deleted file is simply ABSENT and resolution
+    falls through candidates to the honest data.missing."""
+    jid = _mk_run(w, "printf xyz > flee.bin")
+    import os as _os
+    row = w.store.get_job(jid)
+    root = w.adapters[row["site"]].path(f"jobs/{jid}")
+    _os.unlink(f"{root}/flee.bin")
+    out = w.run_file_read_range(jid, "flee.bin")
+    assert out["error"] == "data.missing"
+    assert "run_inventory" in out["hints"]["note"]
 
 
 def test_range_read_cap_env_is_read_per_call(w, monkeypatch):

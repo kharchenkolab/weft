@@ -188,6 +188,19 @@ candidates. A range slice is unverifiable by construction in any
 scheme — a viewing tier; computation inputs go through whole-content
 verified fetch.
 
+Both range verbs BATCH whole members: `rels=[...]` (on
+`data_read_range` for tree members, on `run_file_read_range` for run
+files) answers N files in ONE remote invocation — the WAN cost is the
+per-call round-trip floor (~2.4x RTT measured), so a chunk cascade
+must never pay it N times. The call budget (the same 16 MiB cap)
+defers the remainder EXPLICITLY: entries past it return in
+`not_read`, the caller loops; absent members are per-entry typed
+errors and never fail the batch. Singular reads are ONE round trip
+too (the shim answers absence-or-size-plus-payload atomically — there
+is no separate stat, and no stat-then-read race). ssh sites keep
+their control connection warm for 600s between calls
+(`control_persist` site config adjusts).
+
 `run_file_read_range(target, rel, offset=, length=)` is the
 TRANSPORT tier (vs `run_file_read`'s preview): a byte range served
 without moving the whole file — pread on local sites, the shim's

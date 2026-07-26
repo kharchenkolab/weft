@@ -377,3 +377,14 @@ def test_syslib_never_rides_a_network_verdict():
         "No such file or directory")
     assert (code, retryable) == ("env.solve_failed", True)
     # the classifier's verdict wins; _syslib_hints is never merged there
+
+
+def test_control_persist_default_and_lever():
+    """Mux keepalive (aba rates note ask 4): viewer think-time outlived
+    the old 120s window — first-call-after-idle paid a 3-5s reconnect.
+    600 default; control_persist is the site-config lever."""
+    from weft.adapters.ssh import SSHAdapter
+    ad = SSHAdapter("s", "host.example", "/root")
+    assert "ControlPersist=600" in " ".join(ad._ssh_base())
+    ad2 = SSHAdapter("s", "host.example", "/root", control_persist=1800)
+    assert "ControlPersist=1800" in " ".join(ad2._ssh_base())

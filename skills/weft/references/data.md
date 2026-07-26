@@ -80,6 +80,13 @@ w.data_read_range(ref, rel=, offset=, length=)
                                        # engine, identical semantics);
                                        # tree refs take rel= (a member
                                        # path — the chunked-store shape)
+w.data_read_range(ref, rels=[...])     # BATCH whole members: ONE remote
+w.run_file_read_range(t, rels=[...])   # invocation for N files; budget
+                                       # defers the rest via not_read
+                                       # (loop); absent = per-entry typed
+                                       # error. Chunk cascades ALWAYS
+                                       # batch — the WAN floor is per
+                                       # CALL, not per byte
 w.data_stat(ref | refs=[...])          # live vs record: where the bytes
                                        # ACTUALLY sit (workspace/homes/
                                        # site CAS); divergent flags

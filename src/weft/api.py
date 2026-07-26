@@ -166,6 +166,7 @@ class Weft:
                 pixi_unpack_source=config.get("pixi_unpack_source", self.pixi_unpack),
                 shared=bool(config.get("shared")),
                 pixi_cache=config.get("pixi_cache"),
+                control_persist=int(config.get("control_persist", 600)),
             )
         elif kind == "slurm":
             from .adapters.slurm import SlurmAdapter
@@ -1053,7 +1054,8 @@ class Weft:
 
     def data_read_range(self, ref: str, rel: str | None = None,
                         offset: int = 0, length: int | None = None,
-                        site: str | None = None) -> dict:
+                        site: str | None = None,
+                        rels: list[str] | None = None) -> dict:
         """Ranged read by CONTENT REF — the ref-addressed sibling of
         run_file_read_range (one transport engine, identical range
         semantics: past-EOF = empty+eof+size, cap clamps with
@@ -1063,7 +1065,19 @@ class Weft:
         registered locations (reference-in-place home / site CAS);
         site= narrows the remote candidates. A range slice is
         UNVERIFIABLE by construction — a viewing tier; computation
-        inputs go through whole-content verified fetch."""
+        inputs go through whole-content verified fetch.
+
+        rels=[...] batches WHOLE members of a TREE ref (the chunk-
+        cascade shape): one remote invocation, {"files": ...,
+        "not_read": [...]} remainder, per-entry typed errors."""
+        if rels is not None:
+            if rel is not None or offset != 0 or length is not None:
+                raise WeftError(
+                    "task.invalid",
+                    "rels=[...] batches WHOLE members — no rel=/"
+                    "offset=/length= alongside", stage="staging")
+            return self.dataman.read_range_many(ref, self.adapters,
+                                                rels, site=site)
         return self.dataman.read_range(ref, self.adapters, rel=rel,
                                        offset=offset, length=length,
                                        site=site)
@@ -2111,8 +2125,10 @@ class Weft:
         files travel via data_register(run=…, rel=…) → data_fetch."""
         return self.retains.file_read(target, rel, max_bytes)
 
-    def run_file_read_range(self, target: str, rel: str, offset: int = 0,
-                            length: int | None = None) -> dict:
+    def run_file_read_range(self, target: str, rel: str | None = None,
+                            offset: int = 0,
+                            length: int | None = None,
+                            rels: list[str] | None = None) -> dict:
         """Ranged read: `length` bytes at byte `offset` of a (run,
         relpath) artifact, WITHOUT moving the whole file — local sites
         pread, ssh sites read through the shim's byte-range lane. The
@@ -2127,7 +2143,24 @@ class Weft:
         read reached the end. An `offset` past EOF is not an error —
         empty payload, eof=True, `size` present (answer 416 upstream). A
         `length` over the per-call cap (default 16 MiB, WEFT_RANGE_READ_CAP)
-        clamps and sets capped=True; loop for more."""
+        clamps and sets capped=True; loop for more.
+
+        rels=[...] batches WHOLE-member reads: one remote invocation
+        for N files ({"files": {rel: entry | typed error},
+        "not_read": [...]}) — the call budget defers the remainder
+        explicitly, the caller loops. A chunk cascade should always
+        batch (the WAN floor is per CALL)."""
+        if rels is not None:
+            if rel is not None or offset != 0 or length is not None:
+                raise WeftError(
+                    "task.invalid",
+                    "rels=[...] batches WHOLE members — no rel=/"
+                    "offset=/length= alongside (range one member with "
+                    "rel=)", stage="infra")
+            return self.retains.file_read_range_many(target, rels)
+        if rel is None:
+            raise WeftError("task.invalid",
+                            "pass rel= or rels=[...]", stage="infra")
         return self.retains.file_read_range(target, rel, offset, length)
 
     def run_discard(self, target: str) -> dict:

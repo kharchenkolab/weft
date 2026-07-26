@@ -717,12 +717,34 @@ class RetainManager:
         from .fileio import range_cap, range_read
         got = range_read(
             self.resolve_key(target, rel), offset, length,
-            cap=range_cap(self._RANGE_READ_CAP),
-            stat_fn=self._stat_one, what=repr(rel),
+            cap=range_cap(self._RANGE_READ_CAP), what=repr(rel),
             missing_hints={"note": "run_inventory shows what the run "
                                    "produced; the sandbox may have "
                                    "been swept and the keep forgotten"})
         return {"target": target, "path": rel, **got}
+
+    def file_read_range_many(self, target: str, rels: list) -> dict:
+        """Batched WHOLE-member reads by run key — ONE remote
+        invocation for N files (the WAN floor is per call, not per
+        byte). Same intake discipline as file_stat_many; the engine's
+        not_read remainder says what the call budget deferred."""
+        from .fileio import range_cap, range_read_many
+        if not isinstance(rels, list) or not rels or \
+                not all(isinstance(r, str) and r for r in rels):
+            raise WeftError("task.invalid",
+                            "rels must be a non-empty list of relative "
+                            "paths", stage="infra")
+        if len(rels) > 500:
+            raise WeftError("task.invalid",
+                            f"{len(rels)} rels in one call (cap 500) — "
+                            f"chunk the request", stage="infra")
+        cands = {rel: self.resolve_key(target, rel)
+                 for rel in dict.fromkeys(rels)}
+        got = range_read_many(
+            cands, cap=range_cap(self._RANGE_READ_CAP),
+            missing_hints={"note": "run_inventory shows what the run "
+                                   "produced"})
+        return {"target": target, **got}
 
     # -- GC: the other half ---------------------------------------------------
 
