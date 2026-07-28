@@ -24,6 +24,39 @@ from ..errors import WeftError
 from .base import ShimResult, SiteAdapter
 
 SHIM_SRC = Path(__file__).resolve().parent.parent / "shim" / "weft-shim"
+
+# rc-255 stderr shapes. CHANNEL-level failures (a healthy master
+# refusing one more session, one broken exec) must NOT evict the shared
+# master — killing it takes down every other lane's in-flight channels,
+# turning one failure into everyone's (the herd amplifier an N-kernel
+# site would feel). Everything else keeps the eviction default: a
+# stale/wedged master poisons every retry until ControlPersist expires
+# (the original lesson), so unknown shapes still evict.
+_CHANNEL_255 = (
+    "mux_client_request_session",          # session refused (MaxSessions)
+    "session request failed",
+    "channel_open_failure",
+)
+# connect-phase shapes: the request NEVER reached the far side —
+# delivered: "no" (a caller may retry anything on these)
+_NOT_DELIVERED_255 = (
+    "could not resolve hostname",
+    "connection refused",
+    "connection timed out",
+    "timed out during banner exchange",
+    "no route to host",
+    "network is unreachable",
+)
+
+
+def _mux_verdict(stderr: str) -> tuple[bool, str]:
+    """(evict_master, delivered) from an ssh rc-255 stderr."""
+    low = stderr.lower()
+    if any(m in low for m in _CHANNEL_255):
+        return False, "unknown"
+    if any(m in low for m in _NOT_DELIVERED_255):
+        return True, "no"
+    return True, "unknown"
 BOOTSTRAP_VERSION = 6  # v6: shim v7 (storage.reflink probe)
                        # v4: shim v6 (list-tree file roots)
                        # v3: CA bundle found on darwin controllers too
@@ -238,7 +271,8 @@ class SSHAdapter(SiteAdapter):
                     "site.unreachable",
                     f"local command on {self.name} timed out after {timeout}s",
                     stage="infra", retryable=True,
-                    hints={"command": remote_cmd[:120]},
+                    hints={"command": remote_cmd[:120],
+                           "delivered": "unknown"},
                 ) from e
             return proc.returncode, proc.stdout, proc.stderr
         try:
@@ -250,23 +284,34 @@ class SSHAdapter(SiteAdapter):
             raise WeftError(
                 "site.unreachable", f"ssh to {self.name} timed out after {timeout}s",
                 stage="infra", retryable=True,
-                hints={"host": self.host, "command": remote_cmd[:120]},
+                hints={"host": self.host, "command": remote_cmd[:120],
+                       "delivered": "unknown"},
             ) from e
         if proc.returncode == 255:
-            # a stale mux master (link died under it) poisons every retry
-            # until ControlPersist expires — evict it so the NEXT attempt
-            # builds a fresh connection instead of failing through the corpse
-            subprocess.run(
-                ["ssh", "-o", f"ControlPath={self._control_path}",
-                 "-O", "exit", self.destination()],
-                capture_output=True, timeout=10)
+            stderr_text = proc.stderr.decode("utf-8", "replace")
+            evict, delivered = _mux_verdict(stderr_text)
+            if evict:
+                # a stale mux master (link died under it) poisons every
+                # retry until ControlPersist expires — evict it so the
+                # NEXT attempt builds a fresh connection instead of
+                # failing through the corpse. Channel-level failures
+                # (verdict above) deliberately do NOT reach here: a
+                # healthy master must not die for one refused session.
+                subprocess.run(
+                    ["ssh", "-o", f"ControlPath={self._control_path}",
+                     "-O", "exit", self.destination()],
+                    capture_output=True, timeout=10)
             raise WeftError(
                 "site.unreachable", f"ssh transport to {self.name} failed",
                 stage="infra", retryable=True,
                 hints={"host": self.host,
-                       "stderr": proc.stderr.decode("utf-8", "replace")[-500:],
-                       "note": "connection multiplexer reset; a retry "
-                               "builds a fresh connection"},
+                       "stderr": stderr_text[-500:],
+                       "delivered": delivered,
+                       "note": ("connection multiplexer reset; a retry "
+                                "builds a fresh connection" if evict else
+                                "channel-level failure on a healthy "
+                                "connection; the shared master was kept "
+                                "— retry rides it")},
             )
         return proc.returncode, proc.stdout, proc.stderr
 

@@ -404,3 +404,66 @@ def test_env_realize_refusals_are_typed(tmp_path, pixi_bin):
     out = w.env_realize("env:v1:" + "0" * 64, "nonexistent")
     assert out["error"] == "task.invalid"
     assert "registered" in out["hints"]
+
+
+# ── rc-255 discrimination: channel failures must not kill the master ───────
+
+def test_mux_verdict_channel_failures_keep_the_master():
+    """A healthy master refusing one more session (MaxSessions) is a
+    CHANNEL failure — evicting the shared master for it takes down
+    every other lane's in-flight channels (the N-kernel herd
+    amplifier). Keep it; the caller retries over it."""
+    from weft.adapters.ssh import _mux_verdict
+    for s in ("mux_client_request_session: session request failed",
+              "channel_open_failure: open failed"):
+        evict, delivered = _mux_verdict(s)
+        assert evict is False and delivered == "unknown", s
+
+
+def test_mux_verdict_connect_phase_is_not_delivered():
+    from weft.adapters.ssh import _mux_verdict
+    for s in ("ssh: Could not resolve hostname nope.example",
+              "connect to host x port 22: Connection refused",
+              "connect to host x port 22: Connection timed out",
+              "Connection timed out during banner exchange",
+              "connect to host x port 22: No route to host"):
+        evict, delivered = _mux_verdict(s)
+        assert evict is True and delivered == "no", s
+
+
+def test_mux_verdict_unknown_shapes_keep_the_wedge_protection():
+    """The original lesson stands: an UNRECOGNIZED 255 still evicts —
+    a stale master poisons every retry until ControlPersist expires.
+    Only positively-identified channel failures spare it."""
+    from weft.adapters.ssh import _mux_verdict
+    evict, delivered = _mux_verdict("Broken pipe")
+    assert evict is True and delivered == "unknown"
+    evict, delivered = _mux_verdict("")
+    assert evict is True and delivered == "unknown"
+
+
+def test_channel_255_does_not_evict_and_says_so(tmp_path, monkeypatch):
+    """Through the adapter: a channel-level 255 raises retryable
+    site.unreachable WITHOUT the ssh -O exit eviction, and the payload
+    carries delivered + the kept-master note."""
+    import subprocess as sp
+    from weft.adapters.ssh import SSHAdapter
+    ad = SSHAdapter("s", "host.example", "/root")
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append(argv)
+        if "-O" in argv:
+            raise AssertionError("master must NOT be evicted")
+        return sp.CompletedProcess(
+            argv, 255, b"",
+            b"mux_client_request_session: session request failed")
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    with pytest.raises(WeftError) as e:
+        ad.run_cmd("true")
+    err = e.value
+    assert err.code == "site.unreachable" and err.retryable is True
+    assert err.hints["delivered"] == "unknown"
+    assert "master was kept" in err.hints["note"]
+    assert len(calls) == 1                        # no second (evict) call
