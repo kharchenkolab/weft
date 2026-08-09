@@ -15,6 +15,9 @@ EXCLUDED = {
     "resolve_run_file": "reached through data_register(run=, rel=) and "
                         "{'run','rel'} task inputs — one tool surface "
                         "for one concept",
+    "as_actor": "embedder-scoped attribution contextmanager — a per-call "
+                "tool parameter would let an agent spoof the audit trail "
+                "(design refusal, footprint round 26)",
 }
 
 
