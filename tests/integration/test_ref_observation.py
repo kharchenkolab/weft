@@ -287,3 +287,40 @@ def test_batch_of_one_matches_singular_fields(w, tmp_path):
     batch = w.data_read_range(ref, rels=["c/0/1"])["files"]["c/0/1"]
     for k in ("nbytes", "size", "eof", "bytes_b64", "at"):
         assert single[k] == batch[k], k
+
+
+def test_stat_batch_is_one_invocation_per_site(w, tmp_path, monkeypatch):
+    """Footprint round 26: the refs=[] batch pays ONE marker-batched
+    invocation per site across ALL refs (a few hundred locations was a
+    minute of ssh at one call per ref) — and batch-of-one answers
+    exactly like the singular verb."""
+    refs = []
+    for i in range(4):
+        p = tmp_path / f"f{i}.bin"
+        p.write_bytes(bytes([i]) * (10 + i))
+        r = w.data_register(str(p))["ref"]
+        jid = w.task_submit({"command": "true",
+                             "inputs": [{"ref": r, "mount_as": "x"}],
+                             "site": "local"})["job_id"]
+        assert w.runner.wait(jid, 120)["state"] == "DONE"
+        refs.append(r)
+    singular = w.data_stat(refs[0])
+    ad = w.adapters["local"]
+    calls = []
+    orig = ad.run_cmd
+    monkeypatch.setattr(
+        ad, "run_cmd",
+        lambda s, timeout=120.0: (calls.append(s),
+                                  orig(s, timeout=timeout))[1])
+    out = w.data_stat(refs=refs)
+    assert len(calls) == 1, f"{len(calls)} invocations for 4 refs"
+    for r in refs:
+        st = out["refs"][r]
+        site = next(s for s in st["sites"] if s["site"] == "local")
+        assert site["present"] is True
+        assert st["divergent"] is False
+    # batch-of-one == singular (collect/replay shares ONE code path)
+    batch1 = w.data_stat(refs=[refs[0]])["refs"][refs[0]]
+    assert batch1["workspace"] == singular["workspace"]
+    assert batch1["sites"] == singular["sites"]
+    assert batch1["divergent"] == singular["divergent"]

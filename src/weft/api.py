@@ -130,7 +130,7 @@ class Weft:
                                      sessions=self.sessions)
         from .retain import RetainManager
         self.retains = RetainManager(self.store, self.adapters,
-                                     self.workspace)
+                                     self.workspace, cas=self.cas)
         # settlement hooks (job collect, kernel stop/death) capture
         # pinned-pending retains through this reference
         self.runner.retains = self.retains
@@ -686,6 +686,40 @@ class Weft:
         except WeftError as e:
             return e.to_dict()
 
+    def as_actor(self, actor: str):
+        """EMBEDDER-scoped audit attribution: rows written inside the
+        context carry `actor` instead of the constructor default.
+        Deliberately NOT a tool parameter and NOT in PUBLIC_TOOLS — a
+        per-call actor on the tool surface would let an agent write
+        someone else's name into the trail (recorded design refusal).
+        Free-form with hygiene only; the documented convention is
+        "agent:<conversation-id>". Usage:
+
+            with w.as_actor(f"agent:{cid}"):
+                ...tool calls audit as that actor...
+        """
+        from contextlib import contextmanager
+
+        from .store import ACTOR_CONTEXT
+        if not isinstance(actor, str) or not actor.strip() \
+                or len(actor) > 200 \
+                or any(ord(c) < 32 for c in actor):
+            raise WeftError(
+                "task.invalid",
+                "actor must be a non-empty string, <=200 chars, no "
+                "control characters (audit rows stay parseable)",
+                stage="infra")
+
+        @contextmanager
+        def _ctx():
+            token = ACTOR_CONTEXT.set(actor)
+            try:
+                yield self
+            finally:
+                ACTOR_CONTEXT.reset(token)
+
+        return _ctx()
+
     def env_realize(self, env_id: str, site: str) -> dict:
         """Idempotently realize an env on a site: ready-and-intact is a
         fast no-op; a missing / demoted / evicted realization rebuilds
@@ -1080,11 +1114,34 @@ class Weft:
                 raise WeftError("task.invalid",
                                 "refs must be a non-empty list of "
                                 "dref ids", stage="staging")
+            from .fileio import stat_batch
+            uniq = list(dict.fromkeys(refs))
+            # phase 1: dry passes record every (site, path) probe
+            needs: dict[str, set] = {}
+            for r in uniq:
+                try:
+                    self.dataman.stat_ref(r, self.adapters, site=site,
+                                          sample=sample,
+                                          collect_into=needs)
+                except WeftError:
+                    pass          # the real pass reports it per entry
+            # phase 2: ONE marker-batched invocation per site (a few
+            # hundred locations = one round trip, not a minute of ssh)
+            probe_results: dict = {}
+            for sname, paths in needs.items():
+                adapter = self.adapters.get(sname)
+                if adapter is None:
+                    continue
+                got = stat_batch(adapter, sorted(paths))
+                probe_results.update(
+                    {(sname, pth): v for pth, v in got.items()})
+            # phase 3: replay assembles from the shared results
             out = {}
-            for r in dict.fromkeys(refs):
+            for r in uniq:
                 try:
                     out[r] = self.dataman.stat_ref(
-                        r, self.adapters, site=site, sample=sample)
+                        r, self.adapters, site=site, sample=sample,
+                        probe_results=probe_results)
                 except WeftError as e:
                     out[r] = e.to_dict()
             return {"refs": out}
@@ -1120,6 +1177,33 @@ class Weft:
         return self.dataman.read_range(ref, self.adapters, rel=rel,
                                        offset=offset, length=length,
                                        site=site)
+
+    def data_evict(self, ref: str, at: str, dry_run: bool = False,
+                   force: bool = False) -> dict:
+        """Drop ONE copy of a dataset at a named place — at=<site>
+        removes a staged/site-CAS copy; at="@workspace" removes the
+        controller CAS blob (never fetched files: those are YOUR saved
+        copies). The targeted reclaim verb (runs have run_forget/
+        run_discard, envs have env_evict; staged data had only policy
+        gc).
+
+        Refusals, typed and checked ATOMICALLY with the deletion:
+        data.last_copy (the record knows no other live copy — force
+        destroys), data.pinned (@workspace + provenance-reachable —
+        force overrides loudly), data.external_home (a reference-in-
+        place home is not weft's copy; force does NOT override). Trees
+        evict per member (kept: [(member, last_copy)] partial receipts
+        keep Release reversible for everything actually removed).
+
+        dry_run=True returns the exact would-be receipt (same
+        evaluator — preview and execution cannot drift), with any
+        refusal embedded instead of raised. ADVISORY: the world can
+        move between preview and click; the real call re-checks and
+        may still refuse."""
+        from .gc import _pinned_refs
+        return self.dataman.evict(ref, at, self.adapters,
+                                  _pinned_refs(self.store),
+                                  dry_run=dry_run, force=force)
 
     def data_fetch(self, ref: str, to_path: str) -> dict:
         return self.dataman.fetch(ref, to_path, self.adapters, self.transfers)
@@ -2422,7 +2506,7 @@ PUBLIC_TOOLS = [
     "env_gpu_hint", "env_revise", "env_find_near",
     "env_publish", "env_adopt", "env_unpublish", "env_published",
     "data_register", "data_describe", "data_fetch", "data_fingerprint",
-    "data_stat", "data_read_range",
+    "data_stat", "data_read_range", "data_evict",
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_elements", "array_result", "array_retry",
     "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",

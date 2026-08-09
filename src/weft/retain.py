@@ -100,10 +100,11 @@ def mark_scaffold(entries: list[dict]) -> list[dict]:
 
 
 class RetainManager:
-    def __init__(self, store, adapters, workspace: Path):
+    def __init__(self, store, adapters, workspace: Path, cas=None):
         self.store = store
         self.adapters = adapters
         self.workspace = Path(workspace)
+        self.cas = cas          # workspace CAS (record_only checks)
 
     # -- target facts -------------------------------------------------------
 
@@ -879,12 +880,33 @@ class RetainManager:
                                                "path; not an outage"})
                 else:
                     shutil.rmtree(row["location"], ignore_errors=True)
+                # keep-anchored refs lose their anchor with the keep;
+                # any whose ONLY copy was this keep become RECORD-ONLY
+                # (identity + provenance survive; bytes do not) — the
+                # receipt says which, so the caller's pre-flight
+                # warning and the outcome agree (weft-ui round 26)
+                stranded = []
+                for d in self.store.all_datarefs():
+                    keep = (d.get("meta") or {}).get("keep")
+                    if not keep or keep.get("target") != row["target"]:
+                        continue
+                    self.store.update_dataref_meta(d["ref"],
+                                                   {"keep": None})
+                    has_bytes = any(
+                        self.store.locations_of(d["ref"])) or \
+                        (self.cas is not None and self.cas._blob_path(
+                            d["ref"][len("dref:"):]).exists())
+                    if not has_bytes:
+                        stranded.append(d["ref"])
                 self.store.delete_retained(row["target"])
                 self.store.emit("retain.forgotten", target=row["target"],
                                 bytes=row["bytes"])
-                forgotten.append({"target": row["target"],
-                                  "bytes": row["bytes"],
-                                  "location": row["location"]})
+                entry = {"target": row["target"],
+                         "bytes": row["bytes"],
+                         "location": row["location"]}
+                if stranded:
+                    entry["record_only"] = stranded
+                forgotten.append(entry)
             except WeftError as e:
                 self.store.update_retained(row["target"],
                                            state="forget_pending",

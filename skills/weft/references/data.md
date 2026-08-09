@@ -93,11 +93,30 @@ w.data_stat(ref | refs=[...])          # live vs record: where the bytes
                                        # mismatch; NON-MUTATING (staging
                                        # demotes, this testifies); trees
                                        # sampled (flagged)
+w.data_evict(ref, at="hpc")            # delete ONE recorded copy (site
+                                       # CAS or "@workspace"); record +
+                                       # other copies survive — the next
+                                       # task re-stages. Receipt:
+                                       # bytes_freed, remaining; trees
+                                       # partition per member (kept =
+                                       # sole-copy members, named).
+                                       # Typed refusals: data.last_copy
+                                       # (force destroys, loudly),
+                                       # data.pinned (@workspace +
+                                       # provenance-reachable; force
+                                       # overrides), data.external_home
+                                       # (user's original files — force
+                                       # NEVER overrides). dry_run=True:
+                                       # same evaluator, would_free_bytes,
+                                       # refusal embeds (advisory —
+                                       # record-based, like gc).
 w.run_forget(target=...)               # the INVERSE of retain: removes
                                        # what retain created — the pin
                                        # always; copies only if a move
                                        # made them. Unmarking deletes
-                                       # NOTHING.
+                                       # NOTHING. If the keep held some
+                                       # ref's ONLY bytes, the receipt
+                                       # names it (record_only=[...]).
 w.run_discard(target)                  # byte destruction (sandboxes
                                        # only). On a still-marked target:
                                        # SELECTIVE — junk goes, keeps stay.

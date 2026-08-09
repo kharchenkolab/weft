@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import time
 from pathlib import Path
 
@@ -543,10 +544,180 @@ class DataManager:
         if not row:
             raise WeftError("data.missing", f"unknown ref: {ref}", stage="staging")
         row["locations"] = [
-            {"site": loc["site"], "verified_at": loc["verified_at"]}
+            # `external` is a TYPED fact (a reference-in-place home) —
+            # consumers were about to parse the "external:" path prefix
+            # themselves, the string-grammar-two-implementations trap
+            {"site": loc["site"], "verified_at": loc["verified_at"],
+             "external": str(loc["path"]).startswith("external:")}
             for loc in self.store.locations_of(ref)
         ]
         return row
+
+    # -- targeted eviction (footprint round 26) -----------------------------
+
+    def _copies_of(self, ref: str, hexdigest: str) -> list[dict]:
+        """Every place the record says these bytes live: location rows
+        (present=1; external homes count — they ARE the durable
+        original), the workspace CAS blob, and a keep anchor (LINK
+        re-obtains from keeps hash-verified). RECORD-based, like gc —
+        the verify fence turns a lying record into a loud re-transfer,
+        and the UI's preflight live-verifies via data_stat anyway."""
+        copies = [{"at": l["site"],
+                   "external": str(l["path"]).startswith("external:")}
+                  for l in self.store.locations_of(ref)
+                  if l["site"] != "@workspace"]
+        if self.cas._blob_path(hexdigest).exists():
+            copies.append({"at": "@workspace"})
+        keep = ((self.store.get_dataref(ref) or {}).get("meta")
+                or {}).get("keep")
+        if keep:
+            copies.append({"at": f"keep:{keep['target']}",
+                           "keep": True})
+        return copies
+
+    def _evict_plan(self, ref: str, at: str, force: bool,
+                    pinned: set) -> dict:
+        """ONE evaluator for dry_run AND execution — preview and real
+        cannot drift. Returns {units: [(kind, ref, hex, bytes)],
+        kept: [...], refusal: WeftError|None, would_free_bytes,
+        remaining: [...]}. kind: "blob-ws" | "location"."""
+        row = self.store.get_dataref(ref)
+        if not row:
+            raise WeftError("data.missing", f"unknown ref: {ref}",
+                            stage="staging")
+        loc_here = next((l for l in self.store.locations_of(ref)
+                         if l["site"] == at), None)
+        if at != "@workspace":
+            if self.adapters_hint and at not in self.adapters_hint:
+                raise WeftError("task.invalid", f"unknown site: {at}",
+                                stage="staging",
+                                hints={"registered":
+                                       sorted(self.adapters_hint)})
+            if loc_here is None:
+                raise WeftError("data.missing",
+                                f"{ref} has no recorded copy at {at}",
+                                stage="staging")
+            if str(loc_here["path"]).startswith("external:"):
+                # NOT force-able: this is the owner's original, not a
+                # weft copy at any force level
+                raise WeftError(
+                    "data.external_home",
+                    f"the copy at {at} is a reference-in-place home — "
+                    f"not weft's to delete",
+                    stage="staging",
+                    hints={"home": str(loc_here["path"])
+                           [len("external:"):]})
+        members: list[tuple] = []      # (member_ref, hex, bytes)
+        if row["kind"] == "tree":
+            for e in self.cas.tree_manifest(ref):
+                if e.get("kind") == "file":
+                    members.append((f"dref:{e['sha256']}", e["sha256"],
+                                    e.get("size") or 0))
+        else:
+            members.append((ref, ref[len("dref:"):], row["bytes"] or 0))
+        units, kept = [], []
+        refusal = None
+        if at == "@workspace" and ref in pinned and not force:
+            refusal = WeftError(
+                "data.pinned",
+                f"{ref} is provenance-reachable — the workspace record "
+                f"must survive (gc's rule; force=True overrides "
+                f"loudly)", stage="staging",
+                hints={"copies": self._copies_of(
+                    ref, members[0][1] if members else "")})
+        remaining_all: set = set()
+        for mref, hexd, nbytes in members:
+            copies = self._copies_of(mref, hexd)
+            others = [c for c in copies if c["at"] != at]
+            # for tree members, the TREE's own copies elsewhere count
+            # (an external home or another site holds the whole tree)
+            if row["kind"] == "tree" and mref != ref:
+                others += [c for c in self._copies_of(
+                    ref, ref[len("dref:"):]) if c["at"] != at]
+            here = ((at == "@workspace"
+                     and self.cas._blob_path(hexd).exists())
+                    or (at != "@workspace"
+                        and any(c["at"] == at for c in copies)))
+            if not here:
+                continue                    # nothing of this member at `at`
+            if not others and not force:
+                kept.append({"ref": mref, "why": "last_copy",
+                             "bytes": nbytes})
+                continue
+            units.append((mref, hexd, nbytes))
+            remaining_all.update(c["at"] for c in others)
+        if not units and kept and refusal is None:
+            refusal = WeftError(
+                "data.last_copy",
+                f"every byte of {ref} at {at} is the last live copy "
+                f"the record knows — force=True destroys it",
+                stage="staging",
+                hints={"copies_checked": ["locations", "workspace CAS",
+                                          "keep anchors"],
+                       "kept": kept})
+        return {"units": units, "kept": kept, "refusal": refusal,
+                "would_free_bytes": sum(u[2] for u in units),
+                "remaining": sorted(remaining_all)}
+
+    def evict(self, ref: str, at: str, adapters: dict,
+              pinned: set, dry_run: bool = False,
+              force: bool = False) -> dict:
+        """Drop ONE copy of a dataset at a named place — the targeted
+        reclaim verb (every other tier has one). check -> demote ->
+        delete: a crash between demote and delete leaves orphans for
+        gc_orphans, never a lost last copy."""
+        self.adapters_hint = set(adapters)      # for _evict_plan
+        plan = self._evict_plan(ref, at, force, pinned)
+        receipt = {"ref": ref, "at": at,
+                   "would_free_bytes" if dry_run else "bytes_freed":
+                       plan["would_free_bytes"],
+                   "remaining": plan["remaining"]}
+        if plan["kept"]:
+            receipt["kept"] = plan["kept"]
+        if len(plan["units"]) > (0 if plan["refusal"] else 1)                 or (self.store.get_dataref(ref) or {}).get(
+                    "kind") == "tree":
+            receipt["evicted_members"] = [u[0] for u in plan["units"]]
+        if plan["refusal"] is not None:
+            if dry_run:
+                receipt["refusal"] = plan["refusal"].to_dict()
+                receipt["would_free_bytes"] = 0
+                return receipt
+            raise plan["refusal"]
+        if dry_run:
+            return receipt
+        # execute the SAME plan: demote rows first, delete bytes after
+        if at == "@workspace":
+            for mref, hexd, _ in plan["units"]:
+                self.store.demote_location(mref, "@workspace")
+                self.store.demote_location(ref, "@workspace")
+                bp = self.cas._blob_path(hexd)
+                try:
+                    bp.unlink()
+                except OSError:
+                    pass
+        else:
+            adapter = adapters[at]
+            # capture the CAS root BEFORE demoting (demoted rows leave
+            # locations_of), then demote, then delete bytes
+            loc = next((l for l in self.store.locations_of(ref)
+                        if l["site"] == at), None)
+            cas_root = str(loc["path"]) if loc else None
+            for mref, _, _ in plan["units"]:
+                self.store.demote_location(mref, at)
+            if not plan["kept"]:
+                self.store.demote_location(ref, at)
+            paths = []
+            for _, hexd, _ in plan["units"]:
+                if cas_root and not cas_root.startswith("external:"):
+                    paths.append(f"{cas_root}/{hexd[:2]}/{hexd}")
+            if paths:
+                adapter.run_cmd(
+                    "rm -f " + " ".join(shlex.quote(p) for p in paths),
+                    timeout=300)
+        self.store.emit("data.evicted", ref=ref, at=at,
+                        bytes=plan["would_free_bytes"],
+                        forced=bool(force))
+        return receipt
 
     # -- observation (the ref-addressed tier: fileio engine) ----------------
 
@@ -704,7 +875,9 @@ class DataManager:
         return {"ref": ref, **got}
 
     def stat_ref(self, ref: str, adapters: dict,
-                 site: str | None = None, sample: int = 20) -> dict:
+                 site: str | None = None, sample: int = 20,
+                 probe_results: dict | None = None,
+                 collect_into: dict | None = None) -> dict:
         """Live observation vs the record: where does this ref's data
         actually sit RIGHT NOW. Non-mutating — divergence is reported,
         never acted on (staging's verify fence stays the sole authority
@@ -774,7 +947,15 @@ class DataManager:
                 else:
                     paths = [f"{lpath}/{e['sha256'][:2]}/{e['sha256']}"
                              for e in probe]
-                got = stat_batch(adapter, paths)
+                if collect_into is not None:
+                    collect_into.setdefault(loc["site"],
+                                            set()).update(paths)
+                    got = {p: None for p in paths}     # dry pass
+                elif probe_results is not None:
+                    got = {p: probe_results.get((loc["site"], p))
+                           for p in paths}
+                else:
+                    got = stat_batch(adapter, paths)
                 present = sum(1 for v in got.values() if v is not None)
                 entry.update(members_checked=len(probe),
                              members_present=present,
@@ -785,7 +966,15 @@ class DataManager:
                 hexd = ref[len("dref:"):]
                 path = (lpath[len("external:"):] if external
                         else f"{lpath}/{hexd[:2]}/{hexd}")
-                st = stat_candidate({"adapter": adapter, "path": path})
+                if collect_into is not None:
+                    collect_into.setdefault(loc["site"],
+                                            set()).add(path)
+                    st = None                          # dry pass
+                elif probe_results is not None:
+                    st = probe_results.get((loc["site"], path))
+                else:
+                    st = stat_candidate({"adapter": adapter,
+                                         "path": path})
                 entry.update({"present": True, **st} if st
                              else {"present": False})
             if entry.get("present") is False:

@@ -27,6 +27,16 @@ CODES = {
     "data.transfer_failed": "bulk transfer failed; hints say whether resumable",
     "data.verify_failed": "content hash mismatch after transfer or at use",
     "data.missing": "referenced DataRef unknown or content unavailable",
+    "data.last_copy": "eviction refused: this is the last live copy "
+                      "anywhere the record knows (locations, workspace "
+                      "CAS, keep anchors); force=True destroys it",
+    "data.external_home": "eviction refused: a reference-in-place home "
+                          "is not weft's copy to delete — its lifecycle "
+                          "belongs to its owner (force does NOT "
+                          "override)",
+    "data.pinned": "workspace eviction refused: the ref is provenance-"
+                   "reachable (job inputs/outputs/code) and the record "
+                   "must survive; force=True overrides loudly",
     "site.unreachable": "control channel to site failed; hints carry backoff schedule",
     "site.capability_violation": "request exceeds site limits; hints give nearest valid ask",
     "site.bootstrap_failed": "shim/pixi installation on site failed",

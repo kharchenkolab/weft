@@ -217,6 +217,44 @@ is no separate stat, and no stat-then-read race). ssh sites keep
 their control connection warm for 600s between calls
 (`control_persist` site config adjusts).
 
+`data_stat(refs=[...])` batches its probes too: one shim invocation
+per site regardless of how many refs' copies live there — safe to call
+on a whole listing before rendering it.
+
+### Evicting cached copies (footprint control)
+
+`data_evict(ref, at=..., dry_run=False, force=False)` deletes ONE
+recorded copy of a ref — a site's CAS copy (`at="local"`, `at="hpc"`)
+or the workspace blob (`at="@workspace"`) — and never touches the
+record: identity, provenance, and every other copy survive, so the
+next task that needs the bytes re-stages them from wherever they
+remain. The receipt says what happened: `bytes_freed`, `remaining`
+(where copies still live), and for trees `evicted_members`/`kept`
+(per-member last-copy partition — safe members go, sole-copy members
+stay, both are named).
+
+Refusals are typed, and `force=True` covers exactly the weft-owned
+cases:
+
+| refusal | meaning | force? |
+|---|---|---|
+| `data.last_copy` | no other live copy anywhere (keep anchors count) | yes — destroys the data, loudly |
+| `data.pinned` | workspace copy is provenance-reachable (a run's input/output) | yes — the record survives, bytes go |
+| `data.external_home` | a reference-in-place home: the USER's original files | **no — never** |
+| `data.missing` | no copy recorded at that site | — |
+
+`dry_run=True` runs the SAME evaluator and returns the same receipt
+shape with `would_free_bytes` (a refusal embeds instead of raising —
+render it in the confirm sheet). It is advisory: copy accounting is
+record-based, like gc; the verify fence turns a lying record into a
+loud re-transfer, and a live check is one `data_stat` away.
+Locations rows on `data_describe` carry a typed `external: true` flag
+for reference-in-place homes — no path-prefix parsing.
+
+Relatedly, `run_forget` on a keep whose bytes were some ref's ONLY
+copy reports those refs in the receipt (`record_only: [...]`):
+identity and provenance survive; the bytes do not.
+
 `run_file_read_range(target, rel, offset=, length=)` is the
 TRANSPORT tier (vs `run_file_read`'s preview): a byte range served
 without moving the whole file — pread on local sites, the shim's
@@ -743,7 +781,14 @@ The trail's actor is set by the EMBEDDER at construction
 "agent") — never per call, so nobody can write someone else's name.
 Registration-class actions (`register_site`, `site_unregister`,
 `site_teardown`) always audit as "user": they are user-confirmed by
-doctrine.
+doctrine. Embedders multiplexing one workspace across principals scope
+attribution with `with w.as_actor("agent:<conversation-id>"): ...` —
+a context manager on the object (contextvar-backed, so concurrent
+facade threads don't cross), deliberately NOT a tool parameter and not
+in `PUBLIC_TOOLS` for the same reason. The actor string is free-form
+(hygiene-checked: non-empty, ≤200 chars, no control characters);
+`agent:<conversation-id>` is the documented convention, not a
+registry.
 
 ### MCP server
 

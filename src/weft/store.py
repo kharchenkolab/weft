@@ -10,6 +10,7 @@ rows here are reconciled snapshots.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import sqlite3
 import threading
@@ -77,6 +78,13 @@ _SESSION_MIGRATIONS = [
 
 def _j(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True)
+
+
+# embedder-scoped audit attribution (footprint round 26): set via
+# Weft.as_actor — a contextvar, so concurrent facade threads each carry
+# their own stamp and nothing leaks across lanes
+ACTOR_CONTEXT: contextvars.ContextVar = contextvars.ContextVar(
+    "weft_audit_actor", default=None)
 
 
 class _ReaderRef:
@@ -390,10 +398,16 @@ class Store:
         self, actor: str | None, action: str, *, site: str = "",
         command: str = "", why: str = "", result: str = "",
     ) -> None:
+        # precedence: explicit arg > embedder context (as_actor) >
+        # constructor default. The context is EMBEDDER-scoped — it is
+        # not a tool parameter, so an agent driving the tool surface
+        # cannot write someone else's name into the trail (the recorded
+        # design refusal stands).
+        eff = actor or ACTOR_CONTEXT.get() or self.audit_actor
         self._write(
             "INSERT INTO audit(ts, actor, action, site, command, why, result)"
             " VALUES(?,?,?,?,?,?,?)",
-            (time.time(), actor or self.audit_actor, action, site, command,
+            (time.time(), eff, action, site, command,
              why, result[:4000]),
         )
 
