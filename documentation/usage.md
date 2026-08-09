@@ -427,6 +427,15 @@ w.register_site("hpc", "slurm", {
     },
 })
 w.module_check("hpc", ["espresso/7.2"])   # lazy module inventory
+# storage roles accept a LIST when a site has several long-term stores:
+#   "large": ["/groups/phys/me", "/archive/phys"]
+# the FIRST entry stays the one WEFT_STORAGE_LARGE path inside sandboxes;
+# the full list rides sites_describe(site)["storage"]["roles"]. Malformed
+# roles (empty list, non-string entries) are refused at registration.
+# sites_describe(site)["compute"] is the digested hardware summary
+# (gpus, cuda_driver, cores, mem, os/arch — the same compute_view that
+# validates GPU asks), so consumers routing work by site capability
+# don't parse raw capabilities.
 
 # Cloud (provisioner-backed, hard budget caps)
 w.register_site("cloud-gpu", "cloud", {
@@ -680,9 +689,28 @@ w.array_retry(r["group"])                   # linked retries; digests heal
 w.array_result(r["group"])                  # roll-up: wall stats, failures
 w.env_repair(env_id, "hpc")                 # clear a corrupt realization
 
-w.jobs_where(state="FAILED", limit=50)      # enumerate: jobs …
+w.jobs_where(state="FAILED", limit=50)      # enumerate: jobs — pass the
+                                            # returned next_cursor back as
+                                            # cursor= (keyset: concurrent
+                                            # inserts never shift a page;
+                                            # offset= kept but unreliable
+                                            # past one page under writes)
 w.list_envs(); w.list_kernels(); w.list_services()   # … and everything else
+w.data_list(kind="tree", at="hpc",          # every DataRef: {ref, kind,
+            limit=100, cursor=None)         # bytes, meta, locations
+                                            # (typed external flag)};
+                                            # keyset next_cursor
+w.data_members(ref, limit=500)              # tree members in MANIFEST
+                                            # order ({path, bytes, sha256};
+                                            # links flagged) — the hashing
+                                            # order, so streamed stores
+                                            # prefetch by it; cursor =
+                                            # member index
 w.audit_tail(50)                            # one trail, user + agent
+w.audit_tail(50, actor="agent:c-9",         # filters: actor / action /
+             action="site.note",            # since (unix ts, inclusive);
+             since=t0)                      # page back in history with
+                                            # before_seq=<next_before_seq>
 w.task_status(job_id)[0]["plan"]            # the submit-time promise,
                                             # persisted (survives restarts;
                                             # arrays store one group plan)

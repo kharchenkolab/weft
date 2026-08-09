@@ -338,8 +338,13 @@ class Weft:
         if not row:
             raise WeftError("task.invalid", f"unknown site: {name}", stage="infra",
                             hints={"registered": [s["name"] for s in self.store.list_sites()]})
+        from .capability import compute_view
         from .retain import storage_facts
-        row = {**row, "storage": storage_facts(row.get("config") or {})}
+        row = {**row, "storage": storage_facts(row.get("config") or {}),
+               # digested compute facts (ONE owner: compute_view — the
+               # same summary env_gpu_hint and validation read), so
+               # consumers routing GPU work don't parse raw capabilities
+               "compute": compute_view(row.get("capabilities") or {})}
         notes = self.store.site_notes(name)
         if notes:
             row = {**row, "site_notebook": notes}
@@ -1067,6 +1072,37 @@ class Weft:
     def data_describe(self, ref: str) -> dict:
         return self.dataman.describe(ref)
 
+    def data_list(self, kind: str | None = None, at: str | None = None,
+                  limit: int = 100, cursor: str | None = None) -> dict:
+        """Enumerate DataRefs this workspace knows (consumers rendering a
+        data view need enumeration, not N point reads): rows carry
+        {ref, kind, bytes, meta, locations} with the typed `external`
+        flag per location. Filter kind= ("file"|"tree"|"chunked") or
+        at= (site with a present copy). Keyset pagination: pass
+        `next_cursor` back as cursor= — refs are content addresses, so
+        a page can never shift or duplicate under writes."""
+        limit = max(1, min(int(limit), 1000))
+        rows = self.store.datarefs_page(kind=kind, at_site=at, limit=limit,
+                                        after_ref=cursor)
+        for r in rows:
+            r["locations"] = [
+                {"site": loc["site"], "verified_at": loc["verified_at"],
+                 "external": str(loc["path"]).startswith("external:")}
+                for loc in r["locations"]]
+        out = {"refs": rows}
+        if len(rows) == limit:
+            out["next_cursor"] = rows[-1]["ref"]
+        return out
+
+    def data_members(self, ref: str, limit: int = 500,
+                     cursor: int | None = None) -> dict:
+        """Tree member names in MANIFEST ORDER ({path, bytes, sha256};
+        symlinks flagged kind="link") — the order bytes were hashed, so
+        streamed stores can prefetch by it. Served from the local
+        manifest, which exists for ingested AND reference-in-place
+        trees (adopted at registration). Cursor = member index."""
+        return self.dataman.members(ref, limit=limit, cursor=cursor)
+
     def data_fingerprint(self, path: str, site: str,
                          hash_under: int = 0,
                          max_entries: int = 5000) -> dict:
@@ -1764,15 +1800,29 @@ class Weft:
     # -- read-only enumeration (agent/UI parity: "what exists here?") ----------
 
     def jobs_where(self, state: str | None = None, site: str | None = None,
-                   limit: int = 100, offset: int = 0) -> dict:
+                   limit: int = 100, offset: int = 0,
+                   cursor: str | None = None) -> dict:
         """List job rows (oldest first), filterable by state and site.
         Rows carry array_group/array_index; a retried array element's old
         row carries `superseded_by` — fold those under the group's history
-        rather than reading them as duplicates."""
-        rows = self.store.jobs_where(state=state, site=site,
-                                     limit=limit, offset=offset)
-        return {"jobs": rows, "count": len(rows), "offset": offset,
-                "limit": limit}
+        rather than reading them as duplicates.
+
+        Pagination: pass the returned `next_cursor` back as cursor= —
+        keyset, so concurrent inserts never shift or duplicate a page.
+        offset= is kept for compatibility but is unreliable past one
+        page under writes (use the cursor)."""
+        if offset:
+            rows = self.store.jobs_where(state=state, site=site,
+                                         limit=limit, offset=offset)
+            return {"jobs": rows, "count": len(rows), "offset": offset,
+                    "limit": limit}
+        after = int(cursor) if cursor else 0
+        rows, last = self.store.jobs_page(state=state, site=site,
+                                          limit=limit, after_rowid=after)
+        out = {"jobs": rows, "count": len(rows), "limit": limit}
+        if len(rows) == limit:
+            out["next_cursor"] = str(last)
+        return out
 
     def list_envs(self) -> dict:
         """Every solved environment in this workspace (newest first):
@@ -1789,9 +1839,19 @@ class Weft:
         service_status(service_id) re-checks endpoints and liveness."""
         return {"services": self.store.list_services(state=state)}
 
-    def audit_tail(self, n: int = 50) -> dict:
-        """The last n audited actions (user and agent share one trail)."""
-        return {"audit": self.store.audit_tail(n)}
+    def audit_tail(self, n: int = 50, actor: str | None = None,
+                   action: str | None = None, since: float | None = None,
+                   before_seq: int | None = None) -> dict:
+        """The last n audited actions (user and agent share one trail),
+        filterable by actor / action / since (unix ts, inclusive). Rows
+        come in seq order; page BACKWARD through history by passing the
+        returned `next_before_seq` as before_seq=."""
+        rows = self.store.audit_page(n, actor=actor, action=action,
+                                     since=since, before_seq=before_seq)
+        out = {"audit": rows}
+        if len(rows) == n and rows:
+            out["next_before_seq"] = rows[0]["seq"]
+        return out
 
     # -- events / diagnostics -----------------------------------------------------
 
@@ -2526,7 +2586,8 @@ PUBLIC_TOOLS = [
     "env_gpu_hint", "env_revise", "env_find_near",
     "env_publish", "env_adopt", "env_unpublish", "env_published",
     "data_register", "data_describe", "data_fetch", "data_fingerprint",
-    "data_stat", "data_read_range", "data_evict",
+    "data_stat", "data_read_range", "data_evict", "data_list",
+    "data_members",
     "task_submit", "task_status", "task_logs", "task_result", "task_cancel",
     "array_status", "array_elements", "array_result", "array_retry",
     "jobs_where", "list_envs", "list_kernels", "list_services", "audit_tail",

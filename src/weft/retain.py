@@ -33,29 +33,42 @@ def storage_facts(config: dict) -> dict:
     answers "is there durable storage on this node, and where?" —
     absent/False = no, True = the root itself, "<abs path>" = there.
     NEVER guessed: durability is a user assertion. The path heuristic
-    exists only to phrase a courtesy hint at registration."""
+    exists only to phrase a courtesy hint at registration. Storage
+    ROLES (policy.storage.{large,scratch,node_tmp}) are validated here
+    too — register_site calls this up front — and surfaced normalized
+    (each role a LIST; sites commonly have several long-term stores,
+    only the first feeds the one-path env var)."""
+    from .policy import (STORAGE_ROLES, storage_role_paths,
+                         validate_storage_roles)
     config = config or {}
+    policy = config.get("policy") or {}
+    validate_storage_roles(policy, str(config.get("root") or "site"))
+    roles = {role: storage_role_paths(policy, role)
+             for role in STORAGE_ROLES
+             if storage_role_paths(policy, role)}
+    extra = {"roles": roles} if roles else {}
     d = config.get("durable")
     if d is None:
         legacy = (config.get("retain") or {}).get("dir")
         if legacy:
             return {"durable": legacy,
-                    "source": "retain.dir (deprecated — use durable=)"}
+                    "source": "retain.dir (deprecated — use durable=)",
+                    **extra}
     if d is True:
-        return {"durable": True, "source": "declared"}
+        return {"durable": True, "source": "declared", **extra}
     if isinstance(d, str):
         if not d.startswith("/"):
             raise WeftError(
                 "task.invalid",
                 f"durable must be True or an absolute path (got {d!r})",
                 stage="infra")
-        return {"durable": d, "source": "declared"}
+        return {"durable": d, "source": "declared", **extra}
     if d not in (None, False):
         raise WeftError(
             "task.invalid",
             f"durable must be True, False/absent, or an absolute path "
             f"(got {d!r})", stage="infra")
-    out = {"durable": None, "source": "not declared"}
+    out = {"durable": None, "source": "not declared", **extra}
     root = str(config.get("root") or "")
     if root.startswith(("/home/", "/users/", "/user/")) or "/home/" in root:
         out["hint"] = (f"root {root} looks like a home filesystem — "

@@ -93,6 +93,19 @@ w.data_stat(ref | refs=[...])          # live vs record: where the bytes
                                        # mismatch; NON-MUTATING (staging
                                        # demotes, this testifies); trees
                                        # sampled (flagged)
+w.data_list(kind=, at=, limit=,        # enumerate DataRefs: {ref, kind,
+            cursor=)                   # bytes, meta, locations (typed
+                                       # external flag)}; keyset
+                                       # next_cursor — pages never shift
+                                       # under writes. Render views from
+                                       # THIS, not N describes
+w.data_members(ref, limit=, cursor=)   # tree members in MANIFEST order
+                                       # ({path, bytes, sha256}; links
+                                       # flagged kind="link") — hashing
+                                       # order, so prefetch by it; works
+                                       # for ingest=False trees too (the
+                                       # manifest is adopted locally at
+                                       # registration)
 w.data_evict(ref, at="hpc")            # delete ONE recorded copy (site
                                        # CAS or "@workspace"); record +
                                        # other copies survive — the next

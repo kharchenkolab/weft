@@ -59,8 +59,12 @@ is NOT part of task identity: relabeling never forks memoization, and a
 memoized resubmission returns the prior job under its original label.
 
 **Enumeration** (what exists in this workspace): `jobs_where(state=,
-site=, limit=, offset=)`, `list_envs()`, `list_kernels()`,
-`list_services()`, `audit_tail(n)`. `task_status(job_id)` also carries
+site=, limit=, cursor=)` — pass the returned `next_cursor` back;
+keyset, so pages never shift under concurrent inserts (offset= kept
+but unreliable past one page) — `list_envs()`, `list_kernels()`,
+`list_services()`, `data_list(kind=, at=, cursor=)`,
+`audit_tail(n, actor=, action=, since=, before_seq=)` (page backward
+via `next_before_seq`). `task_status(job_id)` also carries
 `plan` — the persisted submit-time promise (staging bytes, env action)
 to compare against what actually happened; arrays store one plan for
 the group (`array_status(group)["plan"]`).

@@ -818,6 +818,73 @@ class Store:
             vals += [limit, offset]
         return [self._job_row(r) for r in self._rows(q, tuple(vals))]
 
+    def jobs_page(self, state: str | None = None, site: str | None = None,
+                  limit: int = 100, after_rowid: int = 0) -> tuple[list, int]:
+        """Keyset page of job rows (insertion order): rowid cursor —
+        offset pagination shifts under concurrent inserts (weft-ui hit
+        this: 'unreliable past one page'). Returns (rows, last_rowid)."""
+        q, vals = ("SELECT rowid AS _rid, * FROM jobs WHERE rowid > ?",
+                   [after_rowid])
+        if state:
+            q += " AND state=?"; vals.append(state)
+        if site:
+            q += " AND site=?"; vals.append(site)
+        q += " ORDER BY rowid LIMIT ?"
+        vals.append(limit)
+        raw = self._rows(q, tuple(vals))
+        last = raw[-1]["_rid"] if raw else after_rowid
+        return [self._job_row(r) for r in raw], last
+
+    def datarefs_page(self, kind: str | None = None,
+                      at_site: str | None = None, limit: int = 100,
+                      after_ref: str | None = None) -> list[dict]:
+        """Keyset page of datarefs ordered by ref (content addresses are
+        immutable and unique — a page can never shift or duplicate),
+        with each row's location rows attached in ONE extra query."""
+        q, vals = "SELECT * FROM datarefs WHERE ref > ?", [after_ref or ""]
+        if kind:
+            q += " AND kind=?"; vals.append(kind)
+        if at_site:
+            q += (" AND EXISTS (SELECT 1 FROM locations WHERE "
+                  "locations.ref = datarefs.ref AND site=? AND present=1)")
+            vals.append(at_site)
+        q += " ORDER BY ref LIMIT ?"
+        vals.append(limit)
+        rows = [dict(r) for r in self._rows(q, tuple(vals))]
+        if rows:
+            marks = ",".join("?" for _ in rows)
+            locs: dict[str, list] = {}
+            for l in self._rows(
+                    f"SELECT * FROM locations WHERE present=1 AND ref IN "
+                    f"({marks})", tuple(r["ref"] for r in rows)):
+                locs.setdefault(l["ref"], []).append(dict(l))
+            for r in rows:
+                r["meta"] = json.loads(r["meta"]) if r.get("meta") else {}
+                r.pop("chunks", None)
+                r["locations"] = locs.get(r["ref"], [])
+        return rows
+
+    def audit_page(self, n: int = 50, actor: str | None = None,
+                   action: str | None = None, since: float | None = None,
+                   before_seq: int | None = None) -> list[dict]:
+        """Filtered tail of the audit trail, newest-first window returned
+        in seq order; before_seq pages BACKWARD through history."""
+        q, vals, conds = "SELECT * FROM audit", [], []
+        if actor:
+            conds.append("actor=?"); vals.append(actor)
+        if action:
+            conds.append("action=?"); vals.append(action)
+        if since is not None:
+            conds.append("ts>=?"); vals.append(since)
+        if before_seq is not None:
+            conds.append("seq<?"); vals.append(before_seq)
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        q += " ORDER BY seq DESC LIMIT ?"
+        vals.append(n)
+        rows = self._rows(q, tuple(vals))
+        return [dict(r) for r in reversed(rows)]
+
     def nonterminal_jobs(self) -> list[dict]:
         return [self._job_row(r) for r in self._rows(
             "SELECT * FROM jobs WHERE state NOT IN ('DONE','FAILED','CANCELLED')"

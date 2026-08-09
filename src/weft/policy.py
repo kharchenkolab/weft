@@ -16,7 +16,11 @@ Schema (all fields optional):
       max_gpus: 4
       max_concurrent_jobs: 50
       storage:
-        large: /groups/phys/me      # big persistent datasets
+        large: /groups/phys/me      # big persistent datasets — or a LIST
+                                    # (sites commonly have several long-term
+                                    # stores); the FIRST entry is the one
+                                    # env-var path, the full list is surfaced
+                                    # in sites_describe storage facts
         scratch: /scratch/me        # fast cluster-wide temp
         node_tmp: /tmp              # node-local scratch
       notes:
@@ -99,14 +103,55 @@ def allowed_partition(policy: dict, configured: str | None, site: str) -> str | 
     return configured
 
 
+STORAGE_ROLES = ("large", "scratch", "node_tmp")
+
+
+def storage_role_paths(policy: dict, role: str) -> list[str]:
+    """THE storage-role reader (one owner): a role holds one path or a
+    list; every consumer sees a normalized list. Intake validation is
+    validate_storage_roles — by the time this runs, shapes are legal."""
+    v = ((policy or {}).get("storage") or {}).get(role)
+    if not v:
+        return []
+    return [str(p) for p in v] if isinstance(v, (list, tuple)) else [str(v)]
+
+
+def validate_storage_roles(policy: dict, site: str) -> None:
+    """Intake gate (register_site): a role is a non-empty string or a
+    non-empty list of non-empty strings — anything else is refused with
+    the offending role named. Accept-and-mangle (str() on a dict, a
+    silently dropped empty list) is the tested failure mode."""
+    storage = (policy or {}).get("storage") or {}
+    for role in STORAGE_ROLES:
+        v = storage.get(role)
+        if v is None:
+            continue
+        items = list(v) if isinstance(v, (list, tuple)) else [v]
+        bad = (not items
+               or any(not isinstance(p, str) or not p.strip()
+                      for p in items))
+        if bad:
+            raise WeftError(
+                "task.invalid",
+                f"policy.storage.{role} must be a non-empty path or a "
+                f"non-empty list of paths ({site})",
+                stage="infra",
+                hints={"got": repr(v)[:120],
+                       "accepted": "one absolute path, or [path, ...] — "
+                                   "first entry becomes the "
+                                   f"WEFT_STORAGE_{role.upper()} env var"})
+
+
 def storage_env_vars(policy: dict) -> dict[str, str]:
     """Storage roles become guaranteed env vars inside every job sandbox,
-    so agent-written commands can target the right filesystem tier."""
-    storage = policy.get("storage") or {}
+    so agent-written commands can target the right filesystem tier. A
+    role may hold a LIST of stores; the env var contract stays one path
+    per role — the FIRST entry (the full list rides sites_describe)."""
     out = {}
     for role, var in (("large", "WEFT_STORAGE_LARGE"),
                       ("scratch", "WEFT_STORAGE_SCRATCH"),
                       ("node_tmp", "WEFT_STORAGE_NODE_TMP")):
-        if storage.get(role):
-            out[var] = str(storage[role])
+        paths = storage_role_paths(policy, role)
+        if paths:
+            out[var] = paths[0]
     return out

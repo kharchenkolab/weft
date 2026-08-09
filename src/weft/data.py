@@ -553,6 +553,54 @@ class DataManager:
         ]
         return row
 
+    def members(self, ref: str, limit: int = 500,
+                cursor: int | None = None) -> dict:
+        """Tree member enumeration in MANIFEST ORDER (the order bytes
+        were hashed — streamed stores prefetch by it), from the local
+        manifest, which exists for BOTH lanes (ingested trees write it
+        at registration; site-side/ingest=False trees adopt the
+        site-computed manifest the same moment). Cursor = plain index
+        into the immutable manifest: content-addressed, so a page can
+        never shift under a reader."""
+        row = self.store.get_dataref(ref)
+        if not row:
+            raise WeftError("data.missing", f"unknown ref: {ref}",
+                            stage="staging")
+        if row.get("kind") != "tree":
+            raise WeftError(
+                "task.invalid",
+                f"{ref} is a {row.get('kind')}, not a tree — only trees "
+                "have members",
+                stage="infra",
+                hints={"suggestion": "data_describe/data_stat cover "
+                                     "single files"})
+        try:
+            manifest = self.cas.tree_manifest(ref)
+        except WeftError:
+            raise WeftError(
+                "data.missing",
+                f"no manifest for {ref} in this workspace — cannot "
+                "enumerate members",
+                stage="staging",
+                hints={"suggestion": "re-register the tree (site-side "
+                                     "registration adopts the manifest "
+                                     "locally)"})
+        start = int(cursor or 0)
+        limit = max(1, min(int(limit), 10_000))
+        page = manifest[start:start + limit]
+        out = {
+            "ref": ref,
+            "total": len(manifest),
+            "members": [{"path": e["path"], "bytes": e.get("bytes"),
+                         "sha256": e.get("sha256"),
+                         **({"kind": e["kind"]}
+                            if e.get("kind") not in (None, "file") else {})}
+                        for e in page],
+        }
+        if start + limit < len(manifest):
+            out["next_cursor"] = start + limit
+        return out
+
     # -- targeted eviction (footprint round 26) -----------------------------
 
     def _copies_of(self, ref: str, hexdigest: str) -> list[dict]:
