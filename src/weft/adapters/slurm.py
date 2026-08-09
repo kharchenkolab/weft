@@ -614,6 +614,20 @@ class SlurmAdapter(SSHAdapter):
             )
         return f"slurm:{m.group(1)}"
 
+    def find_handle_by_name(self, name: str) -> str | None:
+        """Positive queue check for a submission whose sbatch REPLY was
+        lost (site outage cut _drive mid-submit): submit stamps
+        --job-name=weft-<job_id>, so squeue-by-name discriminates
+        'accepted, pending with an empty jobdir' from 'never delivered'.
+        Returns the adoptable handle, or None = positively absent (a
+        control-plane failure raises site.unreachable instead — absence
+        of signal must not read as absence of the job)."""
+        r = self._sched_query(
+            f"squeue -h --name {shlex.quote(name)} -o '%i'",
+            timeout=self.poll_timeout)
+        ids = [ln.strip() for ln in r.out.splitlines() if ln.strip()]
+        return f"slurm:{ids[0]}" if ids else None
+
     def _sched_query(self, cmd: str, timeout: float):
         """squeue/scontrol with the OUTAGE DISCRIMINATOR (2026-07 sweep
         S1, probed on real slurm): an unknown/purged job exits 1 with

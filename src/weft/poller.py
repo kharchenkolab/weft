@@ -45,6 +45,11 @@ class Watch:
     cancelled: bool = False
     cancel_sent: bool = False
     lease: str | None = None     # "kernel"|"service": report deaths, not results
+    probe: bool = False          # deferred submit (site outage cut _drive):
+                                 # on the next successful poll, JOBDIR TRUTH
+                                 # decides — exited -> collect, running ->
+                                 # adopt, absent -> re-drive once
+    deferred_since: float = 0.0  # grace anchor for probe watches
 
 
 class SitePoller:
@@ -90,6 +95,11 @@ class SitePoller:
         return float(policy.get("poll_interval_s")
                      or self.runner.poll_interval)
 
+    def _requeue_grace(self) -> float:
+        row = self.runner.store.get_site(self.site) or {}
+        policy = (row.get("config") or {}).get("policy") or {}
+        return float(policy.get("outage_requeue_grace_s") or 3600.0)
+
     # -- loop ------------------------------------------------------------------
 
     def _run(self) -> None:
@@ -113,30 +123,17 @@ class SitePoller:
                                        detail=repr(e)[:300])
                 time.sleep(self._interval())
 
-    def _tick(self, items: list[Watch]) -> None:
-        try:
-            statuses = self.adapter.poll_jobs(
-                [(w.handle, w.jobdir_rel) for w in items]
-            )
-        except WeftError as e:
-            if e.code != "site.unreachable":
-                # a site-fatal error (e.g. budget.exceeded tore the cloud
-                # instance down) kills every job watched here — burying it
-                # as a poller.error would leave them RUNNING forever
-                for w in items:
-                    self._fail(w, e)
-                    if w.array_group:
-                        self.runner.emit_group_digest(w.array_group)
-                return
-            # one outage, one event — regardless of how many jobs wait it out
-            if self._outage_since is None:
-                self._outage_since = time.time()
-                self.runner.store.set_health(self.site, "unreachable")
-                self.runner.store.emit("site.unreachable", site=self.site,
-                                       jobs_waiting=len(items))
-            self._backoff = min(max(self._backoff * 2, self._interval() * 2),
-                                OUTAGE_BACKOFF_CAP_S)
-            return
+    def _note_outage(self, jobs_waiting: int) -> None:
+        # one outage, one event — regardless of how many jobs wait it out
+        if self._outage_since is None:
+            self._outage_since = time.time()
+            self.runner.store.set_health(self.site, "unreachable")
+            self.runner.store.emit("site.unreachable", site=self.site,
+                                   jobs_waiting=jobs_waiting)
+        self._backoff = min(max(self._backoff * 2, self._interval() * 2),
+                            OUTAGE_BACKOFF_CAP_S)
+
+    def _note_reachable(self) -> None:
         if self._outage_since is not None:
             self.runner.store.set_health(self.site, "ok")
             self.runner.store.emit(
@@ -146,11 +143,82 @@ class SitePoller:
             self._outage_since = None
         self._backoff = 0.0
 
+    def _enforce_probe_grace(self, items: list[Watch]) -> set:
+        """RUNNING jobs are detached and wait out any outage (remote
+        state is the truth). Deferred SUBMITS are different: parked limbo
+        must be bounded — past the grace the honest terminal verdict
+        lands, with the deferral context and the lever ("unknown" must
+        never quietly become "unlimited"). Store writes only — runs
+        whether or not the site answers. Returns the failed job_ids."""
+        grace = self._requeue_grace()
+        dropped: set = set()
+        for w in items:
+            if w.probe and w.deferred_since \
+                    and time.time() - w.deferred_since > grace:
+                dropped.add(w.job_id)
+                self._fail(w, WeftError(
+                    "site.unreachable",
+                    f"submit deferred by a site outage and {self.site} "
+                    f"stayed unreachable past the grace window",
+                    stage="submit", retryable=True,
+                    hints={"deferred_for_s": round(
+                               time.time() - w.deferred_since, 1),
+                           "grace_s": grace,
+                           "lever": "site policy outage_requeue_grace_s",
+                           "suggestion": "resubmit when the site "
+                                         "returns; memoization makes "
+                                         "the retry cheap"}))
+        return dropped
+
+    def _tick(self, items: list[Watch]) -> None:
+        dropped = self._enforce_probe_grace(items)
+        if dropped:
+            items = [w for w in items if w.job_id not in dropped]
+        # probe watches self-serve jobdir truth via the shim — their fake
+        # handles must not reach a scheduler's batch query (squeue on a
+        # garbage id would error the whole batch into a phantom outage)
+        polled = [w for w in items if not w.probe]
+        statuses: dict[str, dict] = {}
+        if polled:
+            try:
+                statuses = self.adapter.poll_jobs(
+                    [(w.handle, w.jobdir_rel) for w in polled]
+                )
+            except WeftError as e:
+                if e.code != "site.unreachable":
+                    # a site-fatal error (e.g. budget.exceeded tore the
+                    # cloud instance down) kills every job watched here —
+                    # burying it as a poller.error would leave them
+                    # RUNNING forever
+                    for w in items:
+                        self._fail(w, e)
+                        if w.array_group:
+                            self.runner.emit_group_digest(w.array_group)
+                    return
+                self._note_outage(len(items))
+                return
+            self._note_reachable()
+
         dirty_groups: set[str] = set()
         for w in items:
+            was_probe = w.probe
             try:
                 self._transition(w, statuses.get(w.handle, {"state": "unknown"}))
+                if was_probe:
+                    # its shim call answered: the site is reachable, even
+                    # when this poller watches probes only
+                    self._note_reachable()
             except WeftError as e:
+                if e.code == "site.unreachable":
+                    # an adapter call INSIDE the transition (cancel,
+                    # tail_log, probe status) rode dead transport. Site-
+                    # scoped, never this job's verdict: keep the watch,
+                    # engage the outage machinery, skip the tick. (This
+                    # path minted FAILED(site.unreachable) on the
+                    # walltime-cancel path before — aba, live,
+                    # 2026-08-09.)
+                    self._note_outage(len(items))
+                    continue
                 self._fail(w, e)
             except Exception as e:
                 import traceback
@@ -171,6 +239,13 @@ class SitePoller:
             self._watches.pop(job_id, None)
 
     def _transition(self, w: Watch, status: dict) -> None:
+        if w.probe:
+            # parked submit (site outage cut _drive): jobdir truth decides,
+            # via the shim directly — batch poll status is keyed by a
+            # handle this job never got (and slurm's batch poll is
+            # scheduler-side only)
+            self._probe_transition(w)
+            return
         if w.cancelled:
             # CONFIRM before unregistering: scancel is fire-and-forget on
             # the scheduler side — a swallowed failure left the job
@@ -271,6 +346,105 @@ class SitePoller:
                        "elapsed_s": round(time.time() - w.started_at, 1),
                        "suggestion": "raise resources.walltime or shrink the task"},
             )
+
+    def _probe_transition(self, w: Watch) -> None:
+        """A submit cut by a site outage was PARKED, not failed. Now the
+        site answers again: decide from what actually happened on disk.
+        exited -> collect (the run finished without us); running -> adopt
+        the live pid and resume normal supervision; nothing there after
+        two strikes -> the submit never delivered: re-drive ONCE, then
+        the honest terminal verdict. Scheduler sites get a positive
+        queue check by job name before the re-drive — an sbatch whose
+        reply was lost may sit PENDING with an empty jobdir, and a blind
+        re-drive would run the task twice."""
+        store = self.runner.store
+        job = store.get_job(w.job_id)
+        if not job or job["state"] in ("DONE", "FAILED", "CANCELLED") \
+                or w.cancelled:
+            self._unregister(w.job_id)
+            return
+        st = self.adapter.shim(
+            ["status", "--dir", self.adapter.path(w.jobdir_rel)],
+            timeout=self.adapter.poll_timeout
+            if hasattr(self.adapter, "poll_timeout") else 60.0).json()
+        state = st.get("state")
+        if state == "exited":
+            store.set_job_deferral(w.job_id, None)
+            store.update_job(w.job_id, queue_reason="")
+            store.emit("job.recovered", job_id=w.job_id, site=self.site,
+                       found="exited",
+                       note="deferred submit had delivered; the run "
+                            "finished during the outage — collecting")
+            self._unregister(w.job_id)
+            w.probe = False
+            self.runner.enqueue_collect(w, st)
+            return
+        if state == "running" and st.get("pid"):
+            handle = f"pid:{st['pid']}"
+            w.probe = False
+            w.handle = handle
+            w.last_state = "RUNNING"
+            w.lost_strikes = 0
+            store.set_job_deferral(w.job_id, None)
+            store.update_job(w.job_id, sched_handle=handle, queue_reason="",
+                             submitted_at=w.deferred_since or time.time())
+            store.emit("job.recovered", job_id=w.job_id, site=self.site,
+                       found="running", handle=handle)
+            self.runner.set_job_state(
+                w.job_id, "RUNNING", **self.runner.group_payload(w.array_group))
+            return
+        # nothing usable on disk — one weird poll proves nothing
+        w.lost_strikes += 1
+        if w.lost_strikes < LOST_STRIKES:
+            return
+        dfr = dict(job.get("deferral") or {})
+        if w.scheduler:
+            find = getattr(self.adapter, "find_handle_by_name", None)
+            handle = find(f"weft-{w.job_id}") if find else None
+            if handle:
+                # the sbatch DID land; the job pends with an empty jobdir
+                w.probe = False
+                w.handle = handle
+                w.last_state = "QUEUED"
+                w.lost_strikes = 0
+                store.set_job_deferral(w.job_id, None)
+                store.update_job(w.job_id, sched_handle=handle,
+                                 queue_reason="")
+                store.emit("job.recovered", job_id=w.job_id, site=self.site,
+                           found="queued", handle=handle)
+                return
+            if find is None:
+                # cannot positively rule out an accepted submission —
+                # a blind re-drive could run the task twice
+                self._fail(w, WeftError(
+                    "site.unreachable",
+                    "submit was cut by a site outage and this scheduler "
+                    "offers no queue-by-name check — cannot rule out an "
+                    "accepted duplicate",
+                    stage="submit", retryable=False,
+                    hints={"deferral": dfr,
+                           "suggestion": "check the scheduler queue for "
+                                         f"weft-{w.job_id}, then resubmit"}))
+                return
+        attempts = int(dfr.get("attempts") or 0)
+        self._unregister(w.job_id)
+        if attempts >= 1:
+            self._fail(w, WeftError(
+                "site.unreachable",
+                "submit never delivered and the re-drive was cut by an "
+                "outage as well",
+                stage="submit", retryable=True,
+                hints={"deferral": dfr,
+                       "suggestion": "resubmit when the site is stable; "
+                                     "memoization makes the retry cheap"}))
+            return
+        dfr["attempts"] = attempts + 1
+        store.set_job_deferral(w.job_id, dfr)
+        store.emit("job.redriven", job_id=w.job_id, site=self.site,
+                   note="deferred submit never delivered; re-driving once")
+        import threading as _th
+        _th.Thread(target=self.runner._drive, args=(w.job_id,),
+                   daemon=True).start()
 
     # scheduler verdicts: the scheduler POSITIVELY says the job is gone.
     # Strikes exist to guard against absence of signal (a poll that could

@@ -393,8 +393,20 @@ class RetainManager:
         total = sum(e["bytes"] for e in selected)
         try:
             self.store.update_retained(target, state="inflight")
-            method = self._place(adapter, jobdir_rel, selected,
-                                 location, in_place, local_like)
+            # transport blips are site-scoped and retryable — the same
+            # rule as collection: a keep must not land "failed" because
+            # one ssh window dropped (embedder-truth class sweep)
+            backoff = 3.0
+            for attempt in range(5):
+                try:
+                    method = self._place(adapter, jobdir_rel, selected,
+                                         location, in_place, local_like)
+                    break
+                except WeftError as e:
+                    if e.code != "site.unreachable" or attempt == 4:
+                        raise
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 30.0)
             self._sidecar(kind, row, target, site, label, selected,
                           location, in_place, method, adapter)
             self.store.update_retained(target, state="done",

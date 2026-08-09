@@ -542,7 +542,17 @@ class JobRunner:
             try:
                 self._drive_inner(job_id)
             except WeftError as e:
-                if not self._cancelled(job_id):
+                if self._cancelled(job_id):
+                    pass
+                elif e.code == "site.unreachable":
+                    # a transport failure is a SITE outage, never this
+                    # job's verdict — and after a submit attempt the
+                    # command may well be running remotely (rc-255 with
+                    # the reply lost; aba watched a node compute the true
+                    # answer under a FAILED row, live 2026-08-09). Park;
+                    # jobdir truth decides when the site returns.
+                    self._defer_job(job_id, e)
+                else:
                     self.store.update_job(job_id, state="FAILED", error=e.to_dict())
                     self._emit_failed(job_id, e)
             except Exception as e:  # infra bug — still a structured event,
@@ -558,6 +568,49 @@ class JobRunner:
             finally:
                 hb_stop.set()
                 self.store.release_job_drive(job_id, nonce)
+
+    def _defer_job(self, job_id: str, err: WeftError) -> None:
+        """Park a job whose drive was cut by a site outage: deferral
+        record + queue_reason + a probe watch. The probe resolves from
+        jobdir truth once the site answers (exited -> collect, running ->
+        adopt, absent after strikes -> re-drive once); the poller's grace
+        window bounds the limbo."""
+        job = self.store.get_job(job_id)
+        if not job or job["state"] in TERMINAL:
+            return
+        prior = dict(job.get("deferral") or {})
+        since = prior.get("since") or time.time()
+        deferral = {
+            "since": since,
+            "stage": err.stage,
+            "delivered": (err.hints or {}).get("delivered", "no"),
+            "attempts": int(prior.get("attempts") or 0),
+        }
+        self.store.set_job_deferral(job_id, deferral)
+        self.store.update_job(
+            job_id,
+            queue_reason=f"deferred: {job['site']} unreachable "
+                         f"(stage {err.stage}, delivered "
+                         f"{deferral['delivered']})")
+        self.store.emit("job.deferred", job_id=job_id, site=job["site"],
+                        stage=err.stage, delivered=deferral["delivered"],
+                        attempts=deferral["attempts"],
+                        **self.group_payload(job.get("array_group")))
+        self._register_probe(job, deferral)
+
+    def _register_probe(self, job: dict, deferral: dict) -> None:
+        scheduler = scheduler_type(
+            (self.store.get_site(job["site"]) or {}).get("capabilities")
+            or {}) != "none"
+        self.poller_for(job["site"]).register(Watch(
+            job_id=job["job_id"], handle=f"probe:{job['job_id']}",
+            jobdir_rel=f"jobs/{job['job_id']}",
+            task=Task.from_dict(job["task"]),
+            started_at=deferral.get("since") or time.time(),
+            scheduler=scheduler, array_group=job.get("array_group"),
+            last_state=job["state"], probe=True,
+            deferred_since=deferral.get("since") or time.time(),
+        ))
 
     def _emit_failed(self, job_id: str, err: WeftError) -> None:
         job = self.store.get_job(job_id)
@@ -635,6 +688,11 @@ class JobRunner:
         handle = adapter.submit(jobdir_rel, task.to_dict())
         self.store.update_job(job_id, sched_handle=handle,
                               submitted_at=time.time())
+        if job.get("deferral"):
+            # this drive was the deferral's re-drive and it delivered:
+            # the episode is over (a stale record would misread as parked)
+            self.store.set_job_deferral(job_id, None)
+            self.store.update_job(job_id, queue_reason="")
         scheduler = scheduler_type(
             (self.store.get_site(job["site"]) or {}).get("capabilities") or {}
         ) != "none"
@@ -723,8 +781,6 @@ class JobRunner:
             if watch.job_id in self._collecting:
                 return
             self._collecting.add(watch.job_id)
-        self.set_job_state(watch.job_id, "COLLECTING",
-                           **self.group_payload(watch.array_group))
         self._collectors.submit(self._collect_guarded, watch, status)
 
     def record_run_inventory(self, target: str, site: str,
@@ -770,6 +826,27 @@ class JobRunner:
     def _collect_guarded(self, watch: Watch, status: dict) -> None:
         adapter = self.adapters[watch.task.site] if watch.task.site in self.adapters \
             else self.adapters[self.store.get_job(watch.job_id)["site"]]
+        # cross-PROCESS claim (same arbiter shape as the drive claim):
+        # auto-resume means several instances can all watch this job and
+        # all see the exit — exactly one may collect (double collection
+        # would double events and race output ingestion)
+        import os as _os
+        import uuid as _uuid
+        nonce = f"{_os.getpid()}-{_uuid.uuid4().hex[:6]}"
+        if not self.store.claim_job_collect(watch.job_id, nonce):
+            with self._digest_lock:
+                self._collecting.discard(watch.job_id)
+            return
+        self.set_job_state(watch.job_id, "COLLECTING",
+                           **self.group_payload(watch.array_group))
+        hb_stop = threading.Event()
+
+        def _hb():
+            # transfers can outlast the stale window; keep the claim warm
+            while not hb_stop.wait(20.0):
+                self.store.heartbeat_job_collect(watch.job_id, nonce)
+
+        threading.Thread(target=_hb, daemon=True).start()
         try:
             backoff = COLLECT_BACKOFF_S
             for attempt in range(COLLECT_RETRIES + 1):
@@ -786,7 +863,11 @@ class JobRunner:
                         # site is gone for now: park the job back with the
                         # poller — when the site returns, the exited status
                         # re-triggers collection; if the remote lost the
-                        # files, two strikes turn it into node_failure
+                        # files, two strikes turn it into node_failure.
+                        # Release the claim FIRST: the re-triggered
+                        # collection (this process or a peer) must be able
+                        # to claim without waiting out the stale window.
+                        self.store.release_job_collect(watch.job_id, nonce)
                         watch.lost_strikes = 0
                         self.poller_for(adapter.name).register(watch)
                         self.store.emit("collect.deferred", job_id=watch.job_id,
@@ -808,6 +889,8 @@ class JobRunner:
             self.store.update_job(watch.job_id, state="FAILED", error=err.to_dict())
             self.store.emit("job.failed", job_id=watch.job_id, **err.to_dict())
         finally:
+            hb_stop.set()
+            self.store.release_job_collect(watch.job_id, nonce)
             with self._digest_lock:
                 self._collecting.discard(watch.job_id)
             if watch.array_group:
@@ -1002,36 +1085,43 @@ class JobRunner:
             self.poller_for(job["site"]).notify_cancel(job_id)
         return {"job_id": job_id, "state": "CANCELLED"}
 
-    def reconcile(self) -> list[dict]:
-        """Crash recovery: remote state is the source of truth (doc 01 §6).
+    MAX_REDRIVES = 3
 
-        Deliberately does NOT poll inline — an unreachable site at restart
-        must not fail reconciliation. Jobs with a handle are handed to the
-        site poller, whose first tick classifies them (running -> resume,
-        exited -> collect, gone -> two-strike node_failure) and whose
-        outage handling covers a site that is down right now.
-        """
+    def _resumable(self, job: dict) -> bool:
+        job_id = job["job_id"]
+        if job_id in self._threads and self._threads[job_id].is_alive():
+            return False
+        with self._digest_lock:
+            if job_id in self._collecting:
+                return False
+        if self.adapters.get(job["site"]) is None:
+            return False
+        if self.poller_for(job["site"]).watching(job_id):
+            return False
+        return True
+
+    def resume_polls(self, stamp_driverless: bool = True) -> list[dict]:
+        """Re-attach SUPERVISION to every nonterminal job this process is
+        not already driving/watching/collecting: handle-holders go back
+        to the site poller (whose first tick classifies from remote
+        truth), deferred submits re-park their probe, and driverless
+        rows get an honest stamp. NO re-drives — pure truth-keeping,
+        safe at construction (bug3: an embedded controller that never
+        called reconcile() left RUNNING rows frozen forever while the
+        finished job's exit record sat on disk). reconcile() suppresses
+        the stamp — it re-drives those rows itself."""
         actions = []
         for job in self.store.nonterminal_jobs():
             job_id = job["job_id"]
-            if job_id in self._threads and self._threads[job_id].is_alive():
+            if not self._resumable(job):
                 continue
-            with self._digest_lock:
-                if job_id in self._collecting:
-                    continue
-            adapter = self.adapters.get(job["site"])
-            if adapter is None:
-                continue
-            if self.poller_for(job["site"]).watching(job_id):
-                continue
-            task = Task.from_dict(job["task"])
             if job["sched_handle"]:
                 scheduler = scheduler_type(
                     (self.store.get_site(job["site"]) or {}).get("capabilities")
                     or {}) != "none"
                 self.poller_for(job["site"]).register(Watch(
                     job_id=job_id, handle=job["sched_handle"],
-                    jobdir_rel=f"jobs/{job_id}", task=task,
+                    jobdir_rel=f"jobs/{job_id}", task=Task.from_dict(job["task"]),
                     # the SUBMIT moment, not creation: created_at
                     # predates realize+staging (false walltime kills)
                     started_at=job.get("submitted_at")
@@ -1040,21 +1130,69 @@ class JobRunner:
                     last_state=job["state"],
                 ))
                 actions.append({"job": job_id, "action": "resume-poll"})
-            else:
-                # never reached submission. Re-drive — UNLESS a live peer
-                # (another Weft instance/process on this workspace) holds
-                # a fresh drive claim: its thread is mid-staging and our
-                # wipe would race it (#71). Stale claims (dead driver)
-                # fall through: _drive's conditional claim breaks them.
+            elif job.get("deferral"):
+                self._register_probe(job, job["deferral"])
+                actions.append({"job": job_id, "action": "resume-probe"})
+            elif stamp_driverless:
                 claim = self.store.job_drive_claim(job_id)
                 if claim and time.time() - (claim.get("hb") or 0) < 90.0:
-                    actions.append({"job": job_id,
-                                    "action": "driving-elsewhere"})
-                    continue
-                actions.append({"job": job_id, "action": "re-drive"})
-                t = threading.Thread(target=self._drive, args=(job_id,), daemon=True)
-                self._threads[job_id] = t
-                t.start()
+                    continue        # a live peer is mid-drive
+                # driver died before submit. Re-driving mutates (sandbox
+                # wipe + staging) — stamp honestly; reconcile() or
+                # resume="full" owns the re-drive decision.
+                note = "driver lost before submit — reconcile() re-drives"
+                if job.get("queue_reason") != note:
+                    self.store.update_job(job_id, queue_reason=note)
+                    self.store.emit("job.driver_lost", job_id=job_id,
+                                    site=job["site"])
+                actions.append({"job": job_id, "action": "driver-lost"})
+        return actions
+
+    def reconcile(self) -> list[dict]:
+        """Crash recovery: remote state is the source of truth (doc 01 §6).
+
+        Deliberately does NOT poll inline — an unreachable site at restart
+        must not fail reconciliation. resume_polls() re-attaches
+        supervision (handles -> poller, deferrals -> probe); this verb
+        additionally RE-DRIVES driverless rows — bounded by MAX_REDRIVES,
+        so a task whose staging kills its controller cannot crash-loop
+        forever (each restart would innocently re-stage it)."""
+        actions = self.resume_polls(stamp_driverless=False)
+        for job in self.store.nonterminal_jobs():
+            job_id = job["job_id"]
+            if job["sched_handle"] or job.get("deferral"):
+                continue            # supervision-shaped; resume_polls owns it
+            if not self._resumable(job):
+                continue
+            # UNLESS a live peer (another Weft instance/process on this
+            # workspace) holds a fresh drive claim: its thread is
+            # mid-staging and our wipe would race it (#71). Stale claims
+            # (dead driver) fall through: _drive's conditional claim
+            # breaks them.
+            claim = self.store.job_drive_claim(job_id)
+            if claim and time.time() - (claim.get("hb") or 0) < 90.0:
+                actions.append({"job": job_id, "action": "driving-elsewhere"})
+                continue
+            n = self.store.bump_job_redrives(job_id)
+            if n > self.MAX_REDRIVES:
+                err = WeftError(
+                    "job.redrive_exhausted",
+                    f"driving this job died {n - 1} times before submission",
+                    stage="submit",
+                    hints={"redrives": n - 1, "cap": self.MAX_REDRIVES,
+                           "suggestion": "the task or its staging kills "
+                                         "the driver — inspect logs/events "
+                                         "before resubmitting"})
+                self.store.update_job(job_id, state="FAILED",
+                                      error=err.to_dict(), queue_reason="")
+                self._emit_failed(job_id, err)
+                actions.append({"job": job_id, "action": "redrive-exhausted"})
+                continue
+            self.store.update_job(job_id, queue_reason="")
+            actions.append({"job": job_id, "action": "re-drive"})
+            t = threading.Thread(target=self._drive, args=(job_id,), daemon=True)
+            self._threads[job_id] = t
+            t.start()
         return actions
 
     def wait(self, job_id: str, timeout: float = 300.0) -> dict:

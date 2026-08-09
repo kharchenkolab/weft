@@ -773,8 +773,57 @@ w.job_node_exec(job_id, "nvidia-smi; free -m",
 w.site_probe_deep("hpc", partitions=["gpu"])  # compute-node truth via
                                             # probe jobs (measured egress)
 w.audit_tail(50)                            # what ran where, and why
-w.reconcile()                               # after a controller crash/restart
+w.reconcile()                               # supervision AND re-drives of
+                                            # driverless rows (see below —
+                                            # supervision alone is automatic)
 ```
+
+### Restarts and outages (embedder truth)
+
+Weft's rows are the record consumers render, so a dead controller or a
+dropped ssh window must never fabricate state. Two mechanisms:
+
+**Resume at construction.** `Weft(resume=...)` decides what happens to
+nonterminal jobs a previous controller left behind:
+
+- `"poll"` (default): supervision re-attaches at construction — jobs
+  with a scheduler handle go back to the site pollers (the first tick
+  classifies from remote truth: still running resumes, exited collects,
+  gone earns the two-strike node failure), deferred submits re-park
+  their probe, and driverless rows are stamped
+  (`queue_reason`, `job.driver_lost` event) but NOT re-driven. Zero
+  transport happens on the constructing thread; an unreachable site
+  lands in the poller's outage machinery, not in your constructor.
+- `"full"`: additionally re-drives driverless rows (sandbox wipe +
+  staging — the right setting for a long-lived embedding controller
+  that owns its workspace). Re-drives are capped (3): a task whose
+  staging repeatedly kills its controller fails honestly with
+  `job.redrive_exhausted` instead of crash-looping forever.
+- `"off"`: nothing happens until `reconcile()` — inspection tooling.
+
+Before this, a controller kill mid-job left the row RUNNING forever
+while the finished task's exit record sat on disk (aba bug3, reproduced
+live). Multiple controllers over one workspace are safe: collection is
+claimed in the store (one collector wins; a crashed collector's claim
+goes stale), like the drive claim.
+
+**Transport outages never mint job verdicts.** A `site.unreachable`
+anywhere in the job lifecycle is site-scoped: pollers emit ONE
+`site.unreachable` event and back off, running jobs wait it out
+(remote state is the truth), and collection retries then parks
+(`collect.deferred`). A submit cut by an outage PARKS instead of
+failing (`job.deferred` event, `queue_reason` says why, the row's
+`deferral` carries `{since, stage, delivered, attempts}`): when the
+site answers again, jobdir truth decides — the run finished during the
+outage → collected as DONE (`job.recovered`, found=exited); it is
+still running → the live pid is adopted and supervision resumes
+(found=running); nothing ever started → ONE re-drive
+(`job.redriven`), then the honest failure. Scheduler sites get a
+positive queue check by job name first (an sbatch whose reply was lost
+may sit PENDING over an empty jobdir — a blind re-drive would run the
+task twice). Parked limbo is bounded: past the site policy
+`outage_requeue_grace_s` (default 3600 s) the job fails honestly with
+`deferred_for_s` and the lever named in hints.
 
 The trail's actor is set by the EMBEDDER at construction
 (`Weft(default_actor="user")` for a UI serving a human; default

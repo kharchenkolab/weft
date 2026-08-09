@@ -177,6 +177,20 @@ class Store:
             # dead driver's claim goes stale and reconcile can re-drive
             self._conn.execute("ALTER TABLE jobs ADD COLUMN driver_nonce TEXT")
             self._conn.execute("ALTER TABLE jobs ADD COLUMN driver_hb REAL")
+        if "deferral" not in cols:
+            # embedder-truth round: a submit/staging cut by a site outage
+            # PARKS ({since, stage, delivered, attempts}) instead of
+            # minting FAILED — a transport failure is site-scoped, never
+            # a per-job verdict. redrives counts crash-recovery re-drives
+            # so a task whose staging crashes the controller can't loop
+            # forever. collect_nonce/collect_hb arbitrate collection
+            # across PROCESSES (auto-resume means several instances may
+            # all see "exited"), same shape as the drive claim.
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN deferral TEXT")
+            self._conn.execute(
+                "ALTER TABLE jobs ADD COLUMN redrives INTEGER DEFAULT 0")
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN collect_nonce TEXT")
+            self._conn.execute("ALTER TABLE jobs ADD COLUMN collect_hb REAL")
         kcols = {r[1] for r in self._conn.execute("PRAGMA table_info(kernels)")}
         if kcols and "label" not in kcols:
             self._conn.execute("ALTER TABLE kernels ADD COLUMN label TEXT")
@@ -348,6 +362,53 @@ class Store:
         if not r or not r["driver_nonce"]:
             return None
         return {"nonce": r["driver_nonce"], "hb": r["driver_hb"]}
+
+    def claim_job_collect(self, job_id: str, nonce: str,
+                          stale_s: float = 90.0) -> bool:
+        """Atomically claim COLLECTION of an exited job. Cross-process
+        arbiter (auto-resume means several instances can all see the
+        exit): wins iff unclaimed or the holder's heartbeat is stale,
+        and the job is not already terminal (a peer may have finished
+        the whole collect)."""
+        now = time.time()
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "UPDATE jobs SET collect_nonce=?, collect_hb=? "
+                "WHERE job_id=? "
+                "AND state NOT IN ('DONE','FAILED','CANCELLED') "
+                "AND (collect_nonce IS NULL OR collect_hb IS NULL "
+                "OR collect_hb < ?)",
+                (nonce, now, job_id, now - stale_s))
+            return cur.rowcount > 0
+
+    def heartbeat_job_collect(self, job_id: str, nonce: str) -> None:
+        self._write(
+            "UPDATE jobs SET collect_hb=? WHERE job_id=? AND collect_nonce=?",
+            (time.time(), job_id, nonce))
+
+    def release_job_collect(self, job_id: str, nonce: str) -> None:
+        self._write(
+            "UPDATE jobs SET collect_nonce=NULL, collect_hb=NULL "
+            "WHERE job_id=? AND collect_nonce=?", (job_id, nonce))
+
+    def set_job_deferral(self, job_id: str, deferral: dict | None) -> None:
+        """The parked-submit record ({since, stage, delivered, attempts});
+        None clears it (dedicated writer — update_job treats None as
+        'leave unchanged')."""
+        self._write("UPDATE jobs SET deferral=?, updated_at=? WHERE job_id=?",
+                    (_j(deferral) if deferral else None, time.time(), job_id))
+
+    def bump_job_redrives(self, job_id: str) -> int:
+        """Count a crash-recovery re-drive; returns the new total so the
+        caller can enforce its cap without a read-modify-write race."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE jobs SET redrives=COALESCE(redrives,0)+1 "
+                "WHERE job_id=?", (job_id,))
+            r = self._conn.execute(
+                "SELECT redrives FROM jobs WHERE job_id=?",
+                (job_id,)).fetchone()
+            return int(r["redrives"]) if r else 0
 
     def _rows(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
         # reader lane: no lock — WAL snapshots make this safe, and the
@@ -789,6 +850,9 @@ class Store:
             if "superseded_by" in keys else None,
             "submitted_at": r["submitted_at"]
             if "submitted_at" in keys else None,
+            "deferral": (json.loads(r["deferral"])
+                         if "deferral" in keys and r["deferral"] else None),
+            "redrives": (r["redrives"] or 0) if "redrives" in keys else 0,
         }
 
     def detach_from_group(self, job_id: str) -> None:

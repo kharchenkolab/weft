@@ -22,7 +22,8 @@ an unchanged failing task more than once.
 | `sched.node_failure` | process vanished, no exit record (crash/reboot) | infrastructure, not code: resubmit once; if repeated, `doctor()` + tell the user |
 | `data.verify_failed` | hash mismatch / purged cache | retryable — locations demoted; resubmit re-transfers |
 | `data.missing` | unknown/unavailable ref | register the path, or fetch from the site that holds it |
-| `site.unreachable` | transport down | wait — detached jobs survive; watch for `site.reachable`; don't fail anything yourself |
+| `site.unreachable` | transport down | wait — detached jobs survive; watch for `site.reachable`; don't fail anything yourself. Weft doesn't either: submits cut mid-outage park (`job.deferred`) and self-resolve from jobdir truth (`job.recovered`/`job.redriven`); a terminal `site.unreachable` on a job means the deferral GRACE expired (`hints.deferred_for_s`, lever `outage_requeue_grace_s`) — resubmit when the site returns |
+| `job.redrive_exhausted` | driving the job (stage+submit) died repeatedly before submission | something about the task or controller environment kills the driver — inspect events/logs before resubmitting; NOT a site problem |
 | `budget.exceeded` | cloud cap (pre-launch or watchdog) | never loop; report spend from hints and ask the user about the cap |
 | `quota.storage` | site disk pressure | suggest GC / another storage root to the user |
 | `task.invalid` | malformed request | fix your call; hints list valid fields/values |

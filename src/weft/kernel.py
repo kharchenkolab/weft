@@ -53,7 +53,24 @@ class KernelManager:
         if not k:
             raise WeftError("task.invalid", f"unknown kernel: {kernel_id}",
                             stage="infra")
+        if k["state"] == "running":
+            self._rehook(kernel_id, k)
         return k
+
+    def _rehook(self, kernel_id: str, k: dict) -> None:
+        """Re-attach the lease watch after a controller restart (same
+        lazy shape as services): without it a restarted controller
+        keeps exec'ing happily but death detection, idle-stop and
+        retain settlement are silently gone (embedder-truth sweep)."""
+        if self.runner.poller_for(k["site"]).watching(kernel_id):
+            return
+        from .poller import Watch
+        from .task import Task
+        self.runner.poller_for(k["site"]).register(Watch(
+            job_id=kernel_id, handle=k["handle"], jobdir_rel=k["jobdir"],
+            task=Task.from_dict({"command": f"[kernel {k['lang']}]",
+                                 "resources": {"walltime": ""}}),
+            started_at=time.time(), scheduler=False, lease="kernel"))
 
     # -- lifecycle ------------------------------------------------------------
 

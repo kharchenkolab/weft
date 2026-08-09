@@ -69,10 +69,22 @@ the group (`array_status(group)["plan"]`).
 
 - Site unreachable → ONE `site.unreachable` event; detached jobs keep
   running; polling backs off and recovers (`site.reachable` has the
-  outage duration). Never treat an outage as a job failure.
-- Controller restarted → call `reconcile()`; jobs with handles resume
-  watching, unfinished submissions re-drive, completed-during-the-gap jobs
-  get collected. `doctor()` first if unsure.
+  outage duration). Never treat an outage as a job failure — weft
+  itself never does: a submit cut mid-outage PARKS (`job.deferred`;
+  the row's `deferral` says `{since, stage, delivered, attempts}`) and
+  resolves from jobdir truth when the site returns — finished →
+  collected (`job.recovered`), still running → live pid adopted,
+  never started → one re-drive (`job.redriven`), then honest failure.
+  Parked limbo is bounded by site policy `outage_requeue_grace_s`
+  (default 3600 s).
+- Controller restarted → supervision re-attaches AT CONSTRUCTION
+  (`Weft(resume="poll")`, the default): handle-holders resume
+  watching, completed-during-the-gap jobs get collected, deferred
+  submits re-park. Driverless rows (died before submit) are stamped
+  `job.driver_lost`; `reconcile()` or `Weft(resume="full")` re-drives
+  them (capped — repeated driver deaths end in
+  `job.redrive_exhausted`, not a crash loop). `doctor()` first if
+  unsure.
 - Remote crashed/rebooted → the job fails `sched.node_failure` ("crash or
   reboot") after two confirming polls — pid recycling cannot fake a
   running job (process identity is checked, not just the pid).

@@ -96,8 +96,10 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
 6. **When confused, look.** `doctor()` (multi-hop sites: which hop died),
    `site_load()`, `task_logs()`, `site_exec(site, cmd, why=...)` and
    `job_node_exec(job_id, cmd, why=...)` — INSIDE a running job's
-   allocation (both audited, deny-listed) — `reconcile()` after a
-   controller restart. Cancel with a cause: `task_cancel(id, why=...)`.
+   allocation (both audited, deny-listed) — restart recovery is
+   automatic (`Weft(resume=)`); `reconcile()` additionally re-drives
+   rows whose driver died before submit. Cancel with a cause:
+   `task_cancel(id, why=...)`.
 7. **On a new cluster, discover before you submit.** `sites_describe`
    (partitions with GRES/features/limits) → `site_associations` (MY
    QOS/GPU ceilings) → `module_list(search=...)` → `site_probe_deep`

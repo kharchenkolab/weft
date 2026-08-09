@@ -46,6 +46,11 @@ CODES = {
     "job.nonzero_exit": "user command failed; hints carry classified log signature",
     "job.oom": "killed for memory; hints carry observed peak vs requested",
     "job.walltime_exceeded": "killed for time; hints carry elapsed vs requested",
+    "job.redrive_exhausted": "driving this job (stage+submit) died repeatedly "
+                             "before submission; something about the task or "
+                             "the controller environment kills the driver — "
+                             "hints carry the attempt count; inspect before "
+                             "resubmitting",
     "quota.storage": "site storage quota pressure prevents the operation",
     "budget.exceeded": "operation would exceed a configured spending cap",
     "task.invalid": "task specification is malformed or references unknown objects",

@@ -165,12 +165,24 @@ class LocalAdapter(SiteAdapter):
             return {}
         import json
         by_dir = {self.path(rel): h for h, rel in items}
-        proc = subprocess.run(
-            [str(self._root / "bin" / "weft-shim"), "status-batch"],
-            input="\n".join(by_dir) + "\n",
-            capture_output=True, text=True, timeout=60 + 0.05 * len(items),
-            env=self._env(),
-        )
+        try:
+            proc = subprocess.run(
+                [str(self._root / "bin" / "weft-shim"), "status-batch"],
+                input="\n".join(by_dir) + "\n",
+                capture_output=True, text=True, timeout=60 + 0.05 * len(items),
+                env=self._env(),
+            )
+        except subprocess.TimeoutExpired as e:
+            # classified like every transport failure: a raw
+            # TimeoutExpired would bypass the poller's outage machinery
+            # (it only recognizes site.unreachable) and land as a
+            # poller.error with no backoff — class sweep sibling of the
+            # run_cmd wrap above
+            raise WeftError(
+                "site.unreachable",
+                f"local status-batch on {self.name} timed out",
+                stage="infra", retryable=True,
+            ) from e
         out: dict[str, dict] = {}
         for line in proc.stdout.splitlines():
             try:

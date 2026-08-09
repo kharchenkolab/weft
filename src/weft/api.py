@@ -55,13 +55,24 @@ class Weft:
 
     def __init__(self, workspace: Path, pixi_bin: str | None = None,
                  pixi_pack: str | None = None, default_actor: str = "agent",
-                 state_dir: Path | str | None = None):
+                 state_dir: Path | str | None = None, resume: str = "poll"):
         """default_actor names who acts through THIS instance in the audit
         trail ("agent" unless the embedder — a UI serving a human, a
         notebook — says otherwise). Deliberately constructor-only: a
         per-call actor on the tools would let an agent write someone
         else's name into the trail. Registration-class actions always
         audit as "user" (they are user-confirmed by doctrine).
+
+        resume: what happens to nonterminal jobs a dead controller left
+        behind (bug3: rows frozen RUNNING forever while exit records sat
+        on disk). "poll" (default) re-attaches SUPERVISION at
+        construction — handle-holders go to the site pollers (first tick
+        classifies from remote truth; zero transport on this thread),
+        deferred submits re-park their probe, driverless rows get an
+        honest stamp. "full" additionally re-DRIVES driverless rows
+        (mutating: sandbox wipe + staging — the right setting for a
+        long-lived embedding controller). "off" restores the old
+        behavior (reconcile() only) for inspection tooling and tests.
 
         state_dir (or WEFT_STATE_DIR) relocates state.db — sqlite is
         latency-critical and belongs on a LOCAL disk when the workspace
@@ -137,7 +148,16 @@ class Weft:
         from .service import ServiceManager
         self.services = ServiceManager(self.store, self.adapters,
                                        self.runner, self.dataman)
+        if resume not in ("poll", "full", "off"):
+            raise WeftError(
+                "task.invalid",
+                f"resume must be 'poll', 'full' or 'off', got {resume!r}",
+                stage="infra")
         self._restore_sites()
+        if resume == "full":
+            self.runner.reconcile()
+        elif resume == "poll":
+            self.runner.resume_polls()
 
     # -- site management ---------------------------------------------------
 

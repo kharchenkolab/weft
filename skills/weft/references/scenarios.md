@@ -31,6 +31,8 @@ artifact chains site-side.
 `session_snapshot` → re-run the final computation under the snapshot
 EnvID → that manifest is the citable record.
 
-**After anything weird.** `doctor()` → `reconcile()` (controller restart)
+**After anything weird.** `doctor()` → `reconcile()` (restart recovery is
+automatic at construction — `Weft(resume=)`; the verb additionally
+re-drives rows whose driver died before submit)
 → `task_logs` / `site_exec(site, cmd, why=...)` for eyes on the machine →
 `env_repair` for corrupt realizations → `site_probe` for capability drift.
