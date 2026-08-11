@@ -42,6 +42,28 @@ def tool(fn):
     return wrapper
 
 
+def _vocab(value: str | None, vocab: tuple, param: str,
+           fold=str.lower) -> str | None:
+    """Fold-and-validate a fixed-vocabulary filter/mode parameter. A
+    wrong-case or wrong-word filter used to return [] silently —
+    indistinguishable from "nothing exists" — and the casing CONVENTION
+    differs by entity (job states are uppercase, kernel/service states
+    lowercase), so a model was near-guaranteed to hit it (vocab sweep
+    B2). Folding fixes case; unknown words refuse with the vocabulary."""
+    if value is None:
+        return None
+    v = fold(str(value).strip())
+    if v not in vocab:
+        raise WeftError(
+            "task.invalid", f"unknown {param}: {value!r}", stage="infra",
+            hints={"known": sorted(vocab)})
+    return v
+
+
+JOB_STATES = ("PENDING", "RESOLVING_ENV", "STAGING", "QUEUED", "RUNNING",
+              "COLLECTING", "DONE", "FAILED", "CANCELLED")
+
+
 DENY_PATTERNS = [
     re.compile(r"\brm\s+(-[a-zA-Z]*\s+)*/(?!\S*weft)"),   # recursive rm outside weft root
     re.compile(r"\b(scontrol|sacctmgr)\s+(update|delete|modify)"),
@@ -652,8 +674,14 @@ class Weft:
 
     def _adapter(self, name: str) -> SiteAdapter:
         if name not in self.adapters:
-            raise WeftError("task.invalid", f"unknown site: {name}", stage="infra",
-                            hints={"registered": sorted(self.adapters)})
+            hints = {"registered": sorted(self.adapters)}
+            if name.strip().lower() == "auto":
+                # the reserved value, not a site name — the old hint
+                # listed site names and pointed AWAY from the fix
+                hints["note"] = ('the placement sentinel is lowercase '
+                                 '"auto" (task {"site": "auto"})')
+            raise WeftError("task.invalid", f"unknown site: {name}",
+                            stage="infra", hints=hints)
         return self.adapters[name]
 
     # -- environments ---------------------------------------------------------
@@ -1081,6 +1109,7 @@ class Weft:
         at= (site with a present copy). Keyset pagination: pass
         `next_cursor` back as cursor= — refs are content addresses, so
         a page can never shift or duplicate under writes."""
+        kind = _vocab(kind, ("file", "tree", "chunked"), "data kind")
         limit = max(1, min(int(limit), 1000))
         rows = self.store.datarefs_page(kind=kind, at_site=at, limit=limit,
                                         after_ref=cursor)
@@ -1296,6 +1325,7 @@ class Weft:
             return e.to_dict()
 
     def task_status(self, job_id: str | None = None, state: str | None = None) -> list[dict]:
+        state = _vocab(state, JOB_STATES, "job state", fold=str.upper)
         jobs = [self.store.get_job(job_id)] if job_id else self.store.jobs_where(state=state)
         out = []
         for j in jobs:
@@ -1659,6 +1689,7 @@ class Weft:
         RUNNING kernel is attached. state=None lists stopped ones too.
         (Active sessions hold their base env against env_evict — the
         refusal's in_use list carries these same fields.)"""
+        state = _vocab(state, ("active", "stopped"), "session state")
         import time as _t
         now = _t.time()
         running = {k.get("session_id")
@@ -1696,12 +1727,13 @@ class Weft:
                      label: str = "",
                      session_id: str | None = None,
                      capture: str = "transcript") -> dict:
-        """resources={"gpus": 1, "partition": "gpu"} on a scheduler site
-        holds a node allocation and runs the kernel INSIDE it — live
-        interactive analysis on a GPU node; no ports, the shared
-        filesystem is the channel. label ("phonon exploration") is a
-        display handle, carried into status/lists/death events and
-        inherited by kernel_restart's successor.
+        """lang: "python" | "r" | "julia" (case-insensitive). resources=
+        {"gpus": 1, "partition": "gpu"} on a scheduler site holds a node
+        allocation and runs the kernel INSIDE it — live interactive
+        analysis on a GPU node; no ports, the shared filesystem is the
+        channel. label ("phonon exploration") is a display handle,
+        carried into status/lists/death events and inherited by
+        kernel_restart's successor.
 
         session_id (mutually exclusive with env_id) attaches the kernel
         to a LIVE session prefix: session_install lands in the running
@@ -1811,6 +1843,7 @@ class Weft:
         keyset, so concurrent inserts never shift or duplicate a page.
         offset= is kept for compatibility but is unreliable past one
         page under writes (use the cursor)."""
+        state = _vocab(state, JOB_STATES, "job state", fold=str.upper)
         if offset:
             rows = self.store.jobs_where(state=state, site=site,
                                          limit=limit, offset=offset)
@@ -1832,11 +1865,15 @@ class Weft:
     def list_kernels(self, state: str | None = None) -> dict:
         """Kernels this workspace knows (optionally filtered by state,
         e.g. 'running'). kernel_status(kernel_id) gives live truth."""
+        state = _vocab(state, ("running", "stopped", "died"),
+                       "kernel state")
         return {"kernels": self.store.list_kernels(state=state)}
 
     def list_services(self, state: str | None = None) -> dict:
         """Services this workspace knows (optionally filtered by state).
         service_status(service_id) re-checks endpoints and liveness."""
+        state = _vocab(state, ("starting", "ready", "stopped", "exited"),
+                       "service state")
         return {"services": self.store.list_services(state=state)}
 
     def audit_tail(self, n: int = 50, actor: str | None = None,
@@ -1884,6 +1921,7 @@ class Weft:
         a 2000-element sweep with three failure modes reads as three lines,
         each with sample indices to drill into). The per-element list is
         inlined only for small groups; use array_elements to page."""
+        state = _vocab(state, JOB_STATES, "job state", fold=str.upper)
         counts = self.store.group_counts(group)
         if counts["total"] == 0:
             raise WeftError("task.invalid", f"unknown array group: {group}",
@@ -1928,6 +1966,7 @@ class Weft:
                        offset: int = 0, limit: int = 100) -> dict:
         """Paged element listing for large sweeps (drill-down companion to
         array_status's buckets)."""
+        state = _vocab(state, JOB_STATES, "job state", fold=str.upper)
         counts = self.store.group_counts(group)
         if counts["total"] == 0:
             raise WeftError("task.invalid", f"unknown array group: {group}",
@@ -1976,6 +2015,7 @@ class Weft:
         return {"group": group, "retried": out}
 
     def array_result(self, group: str) -> dict:
+        state = _vocab(state, JOB_STATES, "job state", fold=str.upper)
         counts = self.store.group_counts(group)
         if counts["total"] == 0:
             raise WeftError("task.invalid", f"unknown array group: {group}",

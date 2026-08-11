@@ -35,6 +35,22 @@ def _satisfies(version: str, constraint: str) -> bool:
         return False                       # can't prove it: treat as a move
 
 
+def _conda_provided(canonical: dict) -> dict:
+    """{conda_name: version} for packages the base layer resolves on
+    EVERY locked platform — what eco layers delta against (aba 1.2:
+    25/26 cran installs re-built conda-provided packages from source).
+    A platform-partial package stays OUT of this set so the layer still
+    carries it for the platform conda leaves bare; version is taken from
+    the first platform (delta facts, not identity — the lock's own
+    records stay the truth per platform)."""
+    plats = list((canonical.get("platforms") or {}).values())
+    if not plats:
+        return {}
+    names = set.intersection(*({p["name"] for p in plat} for plat in plats))
+    first = {p["name"]: p.get("version", "") for p in plats[0]}
+    return {n: first.get(n, "") for n in names}
+
+
 def _pep503(name: str) -> str:
     """PEP-503 normalization: the lock stores 'typing-extensions', a spec
     may say 'typing_extensions' — same package."""
@@ -234,7 +250,8 @@ class EnvManager:
                 deps = merged.conda if eco == "conda" else merged.pypi
                 requested = dep
                 deps[i] = relax_dep(dep)
-                relaxed.append({"dep": requested.rstrip("? ").strip(),
+                from .spec import strip_soft
+                relaxed.append({"dep": strip_soft(requested),
                                 "ecosystem": eco,
                                 "relaxed_to": deps[i]})
                 try:
@@ -255,15 +272,31 @@ class EnvManager:
                 return result, relaxed
             first.hints["tried_relaxing"] = [r["dep"] for r in relaxed]
             first.hints["suggestion"] = (
-                "even with every soft constraint relaxed this does not "
-                "solve — a hard pin (or the package set itself) is the "
-                "conflict; the solver_message names it")
+                "soft constraints relax VERSIONS only — packages are "
+                "never dropped (a silent removal would answer a different "
+                "spec than yours). Version-relaxing did not solve this: "
+                "a hard pin, a package with no candidates at any version, "
+                "or the set itself is the conflict; the solver_message "
+                "names it — delete the offending dep to proceed without it")
             raise
 
     def ensure(self, spec_or_id, *, update: bool = False,
                dry_run: bool = False, relax: str = "none") -> dict:
         """Accepts an EnvID string or a spec dict; returns {env_id, status, summary}.
         dry_run solves everything but stores nothing — cheap fix-testing."""
+        if relax not in ("none", "soft"):
+            # unvalidated, relax="Soft"/"yes"/"all" silently meant NO
+            # relaxation — the caller got the exact conflict they asked
+            # to avoid, with nothing saying the flag was ignored
+            # (vocab-sweep find B1: worst tier, silent wrong behavior)
+            raise WeftError(
+                "task.invalid",
+                f"relax must be 'none' or 'soft', got {relax!r}",
+                stage="solve",
+                hints={"known": ["none", "soft"],
+                       "note": "soft relaxes VERSIONS of '?'-marked "
+                               "constraints only; packages are never "
+                               "dropped"})
         if isinstance(spec_or_id, str):
             row = self.store.get_env(spec_or_id)
             if not row:
@@ -381,8 +414,10 @@ class EnvManager:
             merged_body, merged_name = merged.to_dict(), merged.name
         canonical = result.canonical
         layer_summaries = {}
+        conda_pkgs = _conda_provided(canonical)
         for eco, deps in sorted(merged.deps_extra.items()):
-            layer = self.solvers[eco].solve(deps, merged, workdir / eco)
+            layer = self.solvers[eco].solve(deps, merged, workdir / eco,
+                                            conda_packages=conda_pkgs)
             canonical.setdefault("layers", {})[eco] = layer
             layer_summaries[eco] = {
                 "packages": len(layer.get("records", [])),
@@ -540,9 +575,11 @@ class EnvManager:
                                      "parent — or re-ensure with `extends` "
                                      "to free the base"})
         canonical = result.canonical
+        conda_pkgs = _conda_provided(canonical)
         for eco, deps in sorted(merged.deps_extra.items()):
             canonical.setdefault("layers", {})[eco] = \
-                self.solvers[eco].solve(deps, merged, workdir / eco)
+                self.solvers[eco].solve(deps, merged, workdir / eco,
+                                        conda_packages=conda_pkgs)
         from .ids import env_id as compute_env_id
         new_id = compute_env_id(canonical)
 

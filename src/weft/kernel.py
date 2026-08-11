@@ -89,11 +89,15 @@ class KernelManager:
         of a frozen env: a session_install lands in the running kernel
         with no restart (visible to the next block). Promotion pins the
         moving target — it auto-snapshots the session into a real EnvID."""
+        # the registry is lowercase and unambiguous — lang="R" is a
+        # vocabulary spelling, not a different ask (live model, aba 1.2)
+        lang = (lang or "").strip().lower()
         if env_id and session_id:
             raise WeftError(
                 "task.invalid",
                 "env_id and session_id are mutually exclusive — a kernel "
                 "attaches to a frozen env OR a live session", stage="infra")
+        capture = (capture or "").strip().lower()
         if capture not in ("transcript", "none"):
             raise WeftError(
                 "task.invalid", f"unknown capture mode {capture!r}",
@@ -544,6 +548,15 @@ class KernelManager:
         transcript), same env/site, optionally replaying the old
         transcript's successful blocks to rebuild interpreter state."""
         k = self._get(kernel_id)
+        replay = (replay or "none").strip().lower()
+        if replay not in ("successful", "none"):
+            # unvalidated, replay="all"/"Successful" silently restarted
+            # with an EMPTY interpreter state — the most destructive
+            # thing this verb can do quietly (vocab-sweep B4)
+            raise WeftError(
+                "task.invalid", f"unknown replay mode {replay!r}",
+                stage="infra",
+                hints={"known": ["successful", "none"]})
         codes = []
         if replay == "successful":
             for entry in self.transcript(kernel_id, last=10**6):

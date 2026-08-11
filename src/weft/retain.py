@@ -232,7 +232,18 @@ class RetainManager:
         sub = f"runs/{label}/{target}" if layout == "label" \
             else f"runs/{target}"
         if dest is not None:
-            if dest == "@workspace":
+            if str(dest).startswith("@") and dest.lower() != "@workspace":
+                # sentinel space: dest="@Workspace" fell through to the
+                # path branch and wrote a LITERAL ./@Workspace directory
+                # (vocab-sweep B6 — the one that put bytes in the wrong
+                # place)
+                raise WeftError(
+                    "task.invalid", f"unknown dest sentinel {dest!r}",
+                    stage="infra",
+                    hints={"known": ["@workspace"],
+                           "note": "anything not starting with '@' is a "
+                                   "literal path"})
+            if dest.lower() == "@workspace":
                 return {"mode": "home", "in_place": False, "moved": True,
                         "location": str(self.workspace / sub)}
             return {"mode": "home", "in_place": False, "moved": True,

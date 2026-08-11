@@ -369,9 +369,15 @@ class JobRunner:
     def _place(self, task: Task) -> str:
         if task.site != "auto":
             if task.site not in self.adapters:
+                hints = {"registered": sorted(self.adapters)}
+                if task.site.strip().lower() == "auto":
+                    # the reserved value, not a site name — a hint that
+                    # only lists site names points AWAY from the fix
+                    hints["note"] = ('the placement sentinel is lowercase '
+                                     '"auto" ({"site": "auto"})')
                 raise WeftError(
                     "task.invalid", f"unknown site: {task.site}", stage="submit",
-                    hints={"registered": sorted(self.adapters)},
+                    hints=hints,
                 )
             self._check_capabilities(task, task.site)
             return task.site

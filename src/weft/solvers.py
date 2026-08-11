@@ -26,19 +26,182 @@ class Solver(Protocol):
     # cross-layer contract, enforced generically before any solve)
     conda_requirements: tuple[str, ...]
 
-    def solve(self, deps: list[str], spec, workdir: Path) -> dict:
+    def solve(self, deps: list[str], spec, workdir: Path,
+              conda_packages: dict | None = None) -> dict:
         """-> layer dict: {"records": [...sorted, hashed...],
-        "native": <native lockfile text>, "requires": {...}}"""
+        "native": <native lockfile text>, "requires": {...}}.
+        conda_packages: {conda_name: version} resolved in the base layer
+        on EVERY platform — layers delta against it (a package the conda
+        layer already provides must not be re-installed from source;
+        aba 1.2 measured 25/26 cran installs buying nothing)."""
         ...
 
-    def realize_layer(self, layer: dict, adapter, env_rel: str) -> str:
+    def realize_layer(self, layer: dict, adapter, env_rel: str,
+                      progress=None, build_jobs: int | None = None) -> str:
         """Install the layer into the realized env dir on the site;
-        return activation lines to append (e.g. R_LIBS exports)."""
+        return activation lines to append (e.g. R_LIBS exports).
+        progress: optional callback(done=, total=) invoked periodically
+        during long installs; build_jobs caps source-build parallelism."""
         ...
 
     def why(self, env_row: dict, package: str, workdir: Path) -> str:
         """Reverse-dependency explanation for a package in this layer."""
         ...
+
+
+# R's OWN base packages — the STATIC list, not `installed.packages(
+# priority=...)` of whatever R runs the solve: conda r-base ships no
+# "recommended" packages, so the priority query answered differently per
+# controller and the closure (the LOCK) inherited that nondeterminism.
+# Recommended packages (Matrix, MASS, ...) are deliberately NOT here:
+# they are real dependencies — the conda delta or the layer provides them.
+BASE_R_PACKAGES = (
+    "base", "compiler", "datasets", "grDevices", "graphics", "grid",
+    "methods", "parallel", "splines", "stats", "stats4", "tcltk",
+    "tools", "translations", "utils",
+)
+
+
+def ppm_platform_url(url: str, os_id: str, codename: str) -> str:
+    """THE Posit-Package-Manager URL platformizer (one owner): normalize
+    any /cran/ PPM URL to its plain (source) form, then insert the
+    __linux__/<codename>/ binary segment ONLY when the site is a distro
+    PPM actually builds for. The old constant hardcoded focal — on
+    non-focal hosts PPM silently serves source tarballs (aba 1.2: 582 s
+    of compiling that binaries would have skipped), and locks minted
+    before this change carry the focal segment, so existing URLs are
+    REWRITTEN here too, keeping identity (the snapshot date) intact."""
+    import re
+    m = re.match(r"(https://packagemanager\.posit\.co/cran)"
+                 r"(?:/__linux__/[^/]+)?(/.*)?$", url)
+    if not m:
+        return url                     # not PPM: caller's URL is law
+    plain = m.group(1) + (m.group(2) or "")
+    if os_id in ("ubuntu", "debian") \
+            and codename in PPM_BINARY_CODENAMES:
+        return (f"{m.group(1)}/__linux__/{codename}" + (m.group(2) or ""))
+    return plain
+
+
+# distro codenames PPM publishes binary trees for — an unsupported
+# codename in the URL 404s the whole repository, which is strictly worse
+# than the honest source fallback
+PPM_BINARY_CODENAMES = {"focal", "jammy", "noble", "bullseye", "bookworm"}
+
+
+def site_ppm_url(url: str, adapter) -> str:
+    """ppm_platform_url against THIS site's distro, detected once per
+    adapter (a cheap os-release read, cached on the adapter object —
+    always current, never a stale capability row). Detection failure =
+    plain source URL: honest and slow beats binary 404s."""
+    if "packagemanager.posit.co" not in url:
+        return url
+    cached = getattr(adapter, "_weft_os_release", None)
+    if cached is None:
+        try:
+            r = adapter.run_cmd(
+                '. /etc/os-release 2>/dev/null; '
+                'echo "${ID:-none}:${VERSION_CODENAME:-none}"', timeout=30)
+            parts = (r.out or "").strip().split(":")
+            cached = (parts[0], parts[1]) if len(parts) == 2 \
+                else ("none", "none")
+        except WeftError:
+            cached = ("none", "none")
+        adapter._weft_os_release = cached
+    return ppm_platform_url(url, cached[0], cached[1])
+
+
+def _build_jobs_prefix(build_jobs: int | None) -> str:
+    """Shell prefix exporting the source-build parallelism pair: R reads
+    WEFT_BUILD_JOBS into options(Ncpus) (across packages), make reads
+    MAKEFLAGS (inside one). Uncapped nproc would be impolite on shared
+    login nodes — the cap is min(nproc, build_jobs or 8), site policy
+    max_build_cores being the lever behind build_jobs."""
+    cap = int(build_jobs) if build_jobs else 8
+    return (f'WEFT_NCPU=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2); '
+            f'WEFT_BUILD_JOBS=$((WEFT_NCPU<{cap}?WEFT_NCPU:{cap})); '
+            f'export WEFT_BUILD_JOBS; '
+            f'export MAKEFLAGS="-j$WEFT_BUILD_JOBS"; ')
+
+
+class _rlib_progress:
+    """Poll the library dir while a long install runs and report the
+    frontier (each completed package = one subdir): the measured trace
+    was 11.7 SILENT minutes and drew two user cancels. Read-only `ls`
+    observation every 5s on its own thread; never touches the install."""
+
+    def __init__(self, adapter, rlib: str, total: int, progress):
+        self.adapter, self.rlib = adapter, rlib
+        self.total, self.progress = total, progress
+        self._stop = None
+
+    def __enter__(self):
+        if self.progress is None or self.total <= 0:
+            return self
+        import shlex
+        import threading
+
+        self._stop = threading.Event()
+
+        def _poll():
+            last = -1
+            while not self._stop.wait(5.0):
+                try:
+                    r = self.adapter.run_cmd(
+                        f"ls {shlex.quote(self.rlib)} 2>/dev/null | "
+                        f"grep -v '^00LOCK' | wc -l", timeout=30)
+                    done = int((r.out or "0").strip() or 0)
+                except (WeftError, ValueError):
+                    continue        # observation only: never fail the install
+                if done != last:
+                    last = done
+                    try:
+                        self.progress(done=min(done, self.total),
+                                      total=self.total)
+                    except Exception:
+                        pass
+        threading.Thread(target=_poll, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc):
+        if self._stop is not None:
+            self._stop.set()
+        return False
+
+
+def _conda_delta(records: list[dict], conda_packages: dict | None,
+                 top_names: set) -> tuple[list[dict], list[dict]]:
+    """Drop closure members the conda layer ALREADY provides (conda-forge
+    spells CRAN's `Pkg` as `r-pkg`): aba 1.2 measured 25 of 26 cran
+    installs re-building, from source, packages the conda layer had
+    binary-installed a minute earlier. Only CLOSURE members are dropped —
+    a top-level cran/github ask is an explicit request for the cran
+    layer's version and always stays. The drop is flat, not graph-walked:
+    if conda provides P, conda's own closure provided P's deps too, so
+    they fall to the same rule; a dep reachable only through a KEPT
+    record is never conda-satisfied-by-construction and stays. Returns
+    (kept_records_with_pruned_dep_edges, substitution_facts) — the facts
+    enter the lock (they ARE part of the solve's answer) with both
+    versions, so a runtime too-old-dep failure is diagnosable."""
+    if not conda_packages:
+        return records, []
+    kept, satisfied = [], []
+    for r in records:
+        conda_name = "r-" + r["name"].lower()
+        if r["name"] not in top_names and not r.get("remote_sha") \
+                and conda_name in conda_packages:
+            satisfied.append({"name": r["name"], "conda": conda_name,
+                              "conda_version": conda_packages[conda_name],
+                              "snapshot_version": r["version"]})
+            continue
+        kept.append(r)
+    if satisfied:
+        kept_names = {r["name"] for r in kept}
+        for r in kept:
+            if r.get("deps"):
+                r["deps"] = [d for d in r["deps"] if d in kept_names]
+    satisfied.sort(key=lambda s: s["name"])
+    return kept, satisfied
 
 
 class PixiSolver:
@@ -51,10 +214,10 @@ class PixiSolver:
     def __init__(self, pixi_bin: str):
         self.pixi_bin = pixi_bin
 
-    def solve(self, deps, spec, workdir):  # handled by lock.solve upstream
+    def solve(self, deps, spec, workdir, **_):  # handled by lock.solve upstream
         raise NotImplementedError("pixi layer is solved via lock.solve")
 
-    def realize_layer(self, layer, adapter, env_rel):
+    def realize_layer(self, layer, adapter, env_rel, **_):
         return ""
 
     def why(self, env_row: dict, package: str, workdir: Path) -> str:
@@ -102,7 +265,11 @@ class CranSolver:
 
     ecosystem = "cran"
     conda_requirements = ("r-base",)
-    PPM = "https://packagemanager.posit.co/cran/__linux__/focal/{date}"
+    # PLAIN snapshot in the lock (platform-neutral identity); the
+    # __linux__/<codename> binary segment is applied at REALIZE time per
+    # site via ppm_platform_url — the old constant baked focal into every
+    # lock and served source tarballs to every non-focal host
+    PPM = "https://packagemanager.posit.co/cran/{date}"
 
     def __init__(self, pixi_bin: str, home: Path | None = None):
         import os
@@ -304,17 +471,27 @@ class CranSolver:
         need = info.get("r_version")
         if not need:
             return
+        import re
         from .spec import split_constraint
-        have = None
+        constraint = None
         for dep in getattr(spec, "conda", []) or []:
-            name, constraint = split_constraint(dep)
-            if name == "r-base" and constraint not in ("*",):
-                have = constraint.lstrip("=").split()[0]
+            name, c = split_constraint(dep)
+            if name == "r-base" and c not in ("*",):
+                constraint = c
                 break
-        if have is None:
+        if constraint is None:
             return      # unpinned r-base: the joint solve may still pick
                         # a compatible one; nothing provable to reject here
-        if not have.startswith(need):
+        # refuse only a PROVABLE contradiction: an exact pin (=/== ) to a
+        # different major.minor. Ranged constraints (>=4.3, <5) may still
+        # admit the release's R — an ad-hoc lstrip("=").split() here read
+        # ">=4.4" as the version and refused specs that were fine
+        # (parser-sweep find #2; same class as the whitespace-split bug)
+        m = re.match(r"={1,2}\s*(\d+(?:\.\d+)*)", constraint)
+        if m is None:
+            return      # not an exact pin: nothing provable to reject
+        have = m.group(1)
+        if not (have == need or have.startswith(need + ".")):
             raise WeftError(
                 "env.layer_conflict",
                 f'release {rr["provider"]}/{rr["release"]} requires '
@@ -325,7 +502,8 @@ class CranSolver:
                                      "or pick the release line matching "
                                      "your R version"})
 
-    def solve(self, deps: list[str], spec, workdir: Path) -> dict:
+    def solve(self, deps: list[str], spec, workdir: Path,
+              conda_packages: dict | None = None) -> dict:
         import json as _json
         workdir.mkdir(parents=True, exist_ok=True)
         parsed = [self._parse(d) for d in deps]
@@ -342,7 +520,11 @@ class CranSolver:
         code = (
             'options(repos=c({repovec}));'
             'ap <- available.packages();'
-            'base <- rownames(installed.packages(priority=c("base","recommended")));'
+            # STATIC base list: `installed.packages(priority=...)` of the
+            # solver's own R made the closure — the LOCK — depend on which
+            # controller solved it (conda r-base has no "recommended"
+            # packages; a distro R does)
+            'base <- c({static_base});'
             'want <- setdiff(c({want}), c(base, ""));'
             'miss <- setdiff(want, rownames(ap));'
             'if (length(miss)) {{ write(paste("MISSING:", paste(miss, collapse=",")), stderr()); quit(status=3) }};'
@@ -359,6 +541,8 @@ class CranSolver:
             'row.names=FALSE, col.names=FALSE, quote=FALSE)'
         ).format(repovec=", ".join(
                      f"R{i}={_json.dumps(u)}" for i, u in enumerate(repos)),
+                 static_base=", ".join(_json.dumps(b)
+                                       for b in BASE_R_PACKAGES),
                  want=", ".join(_json.dumps(x) for x in want) or '""',
                  out=_json.dumps(str(out)))
         if want:
@@ -405,6 +589,9 @@ class CranSolver:
                     "deps": [d for d in (r[2] if len(r) > 2 else ""
                                          ).split(",") if d]}
                    for r in rows]
+        top_names = {p["name"] for p in cran_direct}
+        records, satisfied = _conda_delta(records, conda_packages,
+                                          top_names)
         for p in cran_direct:  # exact-version assertions
             if p["version"]:
                 got = next((r["version"] for r in records
@@ -438,6 +625,7 @@ class CranSolver:
         gh_names = {g["name"] for g in gh}
         return {"records": records, "snapshot": snapshot,
                 "repos": repos, "releases": releases,
+                **({"satisfied_by_conda": satisfied} if satisfied else {}),
                 # what an extends_env child must inherit to re-solve
                 # against the SAME repository universe
                 "spec_config": {
@@ -481,7 +669,8 @@ class CranSolver:
             sysreq["cran_snapshot"] = m.group(1)
         return pins, sysreq
 
-    def realize_layer(self, layer: dict, adapter, env_rel: str) -> str:
+    def realize_layer(self, layer: dict, adapter, env_rel: str,
+                      progress=None, build_jobs: int | None = None) -> str:
         import json as _json
         import shlex
         env_dir = adapter.path(env_rel)
@@ -489,15 +678,26 @@ class CranSolver:
         cran_names = [r["name"] for r in layer["records"]
                       if not r.get("remote_sha")]
         top = layer.get("top_level", [])
-        repos = layer.get("repos") or [layer["snapshot"]]
+        repos = [site_ppm_url(u, adapter)
+                 for u in (layer.get("repos") or [layer["snapshot"]])]
         rcode = (
+            # Ncpus parallelizes ACROSS packages, MAKEFLAGS (set by the
+            # shell wrapper) inside each build — a 226 s single-core
+            # stringi on a many-core box was the measured cost of neither
+            'options(Ncpus=max(1L, as.integer(Sys.getenv('
+            '"WEFT_BUILD_JOBS", "2"))));'
             'options(repos=c({repovec}), HTTPUserAgent=sprintf('
             '"R/%s R (%s)", getRversion(), paste(getRversion(), '
             'R.version$platform, R.version$arch, R.version$os)));'
             'lib <- {lib}; dir.create(lib, showWarnings=FALSE, recursive=TRUE);'
-            'p <- c({pkgs}); p <- setdiff(p, rownames(installed.packages(lib.loc=lib)));'
+            # skip what ANY activated library already provides (conda's
+            # site-library rides .libPaths through activate.sh): pre-delta
+            # locks re-installed 25/26 conda-satisfied packages here
+            'have <- unlist(lapply(.libPaths(), function(l) '
+            'rownames(installed.packages(lib.loc=l))));'
+            'p <- c({pkgs}); p <- setdiff(p, c(have, ""));'
             'if (length(p)) install.packages(p, lib=lib);'
-            # PPM linux binaries assume focal-era glibc; on older hosts they
+            # PPM linux binaries assume distro glibc; on older hosts they
             # install but fail to *load* — detect and rebuild those from source
             'chk <- intersect(c({pkgs}), rownames(installed.packages(lib.loc=lib)));'
             'bad <- Filter(function(x) inherits(tryCatch('
@@ -510,7 +710,11 @@ class CranSolver:
             ' install.packages(bad, lib=lib, repos=srcrepo, type="source") }};'
             '{ghinstall}'
             'need <- c({top});'
-            'ok <- need %in% rownames(installed.packages(lib.loc=lib));'
+            # presence across ALL activated libraries — a top-level ask
+            # satisfied by the conda layer is present, not failed
+            'have2 <- unlist(lapply(.libPaths(), function(l) '
+            'rownames(installed.packages(lib.loc=l))));'
+            'ok <- need %in% c(have2, rownames(installed.packages(lib.loc=lib)));'
             'if (!all(ok)) {{ write(paste("FAILED:", paste(need[!ok], collapse=",")), stderr()); quit(status=4) }}'
         ).format(repovec=", ".join(
                      f"R{i}={_json.dumps(u)}" for i, u in enumerate(repos)),
@@ -524,15 +728,19 @@ class CranSolver:
         # that cut ~45-min commands exist — clip taught us), rerunning
         # picks up the frontier. Retry while the library keeps CHANGING;
         # a real failure repeats with the library frozen and raises.
+        total = len(cran_names) + sum(1 for r in layer["records"]
+                                      if r.get("remote_sha"))
         last_state = None
         for _ in range(8):
-            r = adapter.run_activated(
-                f". {shlex.quote(env_dir)}/activate.sh && "
-                f"Rscript -e {shlex.quote(rcode)}",
-                # on old-glibc hosts every PPM binary fails to load and
-                # the WHOLE layer rebuilds from source (rstan ~20 min)
-                timeout=10800,
-            )
+            with _rlib_progress(adapter, rlib, total, progress):
+                r = adapter.run_activated(
+                    f". {shlex.quote(env_dir)}/activate.sh && "
+                    f"{_build_jobs_prefix(build_jobs)}"
+                    f"Rscript -e {shlex.quote(rcode)}",
+                    # on old-glibc hosts every PPM binary fails to load and
+                    # the WHOLE layer rebuilds from source (rstan ~20 min)
+                    timeout=10800,
+                )
             if r.rc == 0:
                 return f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"'
             probe = adapter.run_cmd(
@@ -626,29 +834,41 @@ class CranSolver:
 
         cran_names = [r["name"] for r in recs if not r.get("remote_sha")]
         rcode = (
+            'options(Ncpus=max(1L, as.integer(Sys.getenv('
+            '"WEFT_BUILD_JOBS", "2"))));'
             'options(repos=c({repovec}), HTTPUserAgent=sprintf('
             '"R/%s R (%s)", getRversion(), paste(getRversion(), '
             'R.version$platform, R.version$arch, R.version$os)));'
             'lib <- {lib}; dir.create(lib, showWarnings=FALSE, recursive=TRUE);'
             '.libPaths(c(lib, {plib}, .libPaths()));'
-            'p <- c({pkgs});'
+            # the parent's conda site-library and rlib both ride
+            # .libPaths here — never rebuild what the stack already has
+            'have <- unlist(lapply(.libPaths(), function(l) '
+            'rownames(installed.packages(lib.loc=l))));'
+            'p <- setdiff(c({pkgs}), c(have, ""));'
             'if (length(p)) install.packages(p, lib=lib);'
             '{ghinstall}'
             'need <- c({need});'
-            'ok <- need %in% rownames(installed.packages(lib.loc=lib));'
+            'have2 <- unlist(lapply(.libPaths(), function(l) '
+            'rownames(installed.packages(lib.loc=l))));'
+            'ok <- need %in% c(have2, rownames(installed.packages(lib.loc=lib)));'
             'if (!all(ok)) {{ write(paste("FAILED:", paste(need[!ok], collapse=",")), stderr()); quit(status=4) }}'
         ).format(repovec=", ".join(
                      f"R{i}={_json.dumps(u)}" for i, u in enumerate(
-                         layer.get("repos") or [layer["snapshot"]])),
+                         [site_ppm_url(u, adapter) for u in
+                          (layer.get("repos") or [layer["snapshot"]])])),
                  lib=_json.dumps(rlib), plib=_json.dumps(parent_rlib),
                  pkgs=", ".join(_json.dumps(x) for x in cran_names) or 'character(0)',
                  ghinstall=_r_gh_install(recs),
                  need=", ".join(_json.dumps(x) for x in added) or 'character(0)')
         _w = pack_tools.get("wrap_cmd") or (lambda s: s)
-        r = adapter.run_activated(_w(
-            prelude +
-            f". {shlex.quote(parent_dir)}/activate.sh && "
-            f"Rscript -e {shlex.quote(rcode)} 2>&1"), timeout=3600)
+        with _rlib_progress(adapter, rlib, len(recs),
+                            pack_tools.get("progress")):
+            r = adapter.run_activated(_w(
+                prelude +
+                f". {shlex.quote(parent_dir)}/activate.sh && "
+                f"{_build_jobs_prefix(pack_tools.get('build_jobs'))}"
+                f"Rscript -e {shlex.quote(rcode)} 2>&1"), timeout=3600)
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed",
@@ -718,9 +938,14 @@ class CranSolver:
                 if rec.get("remote_sha"):        # github: tarball by SHA
                     url, fn = rec["tarball"], f"{rec['name']}.tar.gz"
                 else:            # source tarball from the repo that SERVED
-                                 # it (base snapshot or a secondary repo)
-                    base = (rec.get("source") or layer["snapshot"]).replace(
-                        "__linux__/focal/", "")
+                                 # it (base snapshot or a secondary repo);
+                                 # strip ANY binary segment, not a literal
+                                 # focal (a jammy PPM url from r_repositories
+                                 # survived the old .replace and 404'd —
+                                 # platform-sweep find A4)
+                    import re as _re
+                    base = _re.sub(r"__linux__/[^/]+/", "",
+                                   rec.get("source") or layer["snapshot"])
                     url = (f"{base}/src/contrib/"
                            f"{rec['name']}_{rec['version']}.tar.gz")
                     fn = f"{rec['name']}_{rec['version']}.tar.gz"
@@ -947,7 +1172,8 @@ class JuliaSolver:
             stage="solve",
             hints={"supported": ["Name", "Name ==X.Y.Z", "owner/Repo.jl@ref"]})
 
-    def solve(self, deps: list[str], spec, workdir: Path) -> dict:
+    def solve(self, deps: list[str], spec, workdir: Path,
+              conda_packages: dict | None = None) -> dict:
         import subprocess
         workdir.mkdir(parents=True, exist_ok=True)
         manifest = self._ensure_solver_env()
@@ -1071,7 +1297,8 @@ class JuliaSolver:
             if "/" in dep:
                 pins.append(dep)
                 continue
-            name = dep.split()[0].split("=")[0].strip()
+            from .spec import strip_soft
+            name = strip_soft(dep).split()[0].split("=")[0].strip()
             rec = by_name.get(name)
             if rec and rec.get("version"):
                 pins.append(f'{name} =={rec["version"]}')
@@ -1079,7 +1306,8 @@ class JuliaSolver:
                 pins.append(dep)
         return pins, {}
 
-    def realize_layer(self, layer: dict, adapter, env_rel: str) -> str:
+    def realize_layer(self, layer: dict, adapter, env_rel: str,
+                      **_) -> str:
         import shlex
         env_dir = adapter.path(env_rel)
         proj, _, man = layer["native"].partition("\n###WEFT-MANIFEST###\n")
@@ -1161,7 +1389,12 @@ def check_layer_requirements(spec, layers_present: dict[str, list[str]],
                              solvers: dict[str, object]) -> None:
     """Generic cross-layer contract: each solver declares what it needs
     from the conda layer; checked before any solving is paid for."""
-    conda_names = {d.split()[0].lower() for d in spec.conda}
+    from .spec import split_constraint
+    # ONE parser for the constraint grammar: an ad-hoc whitespace split
+    # here refused "r-base=4.4" (the '=' pin never matched r-base) while
+    # the hint itself told users to version-pin interpreters — aba 1.2,
+    # live; the model dropped its pin to appease the check
+    conda_names = {split_constraint(d)[0].lower() for d in spec.conda}
     for eco, deps in layers_present.items():
         if not deps:
             continue

@@ -562,13 +562,19 @@ class SessionManager:
         # overlay build does (best-effort — pure-R needs none)
         prelude = ""
         try:
+            from .realize import _site_platform
             from .toolchain import build_env_prelude, ensure_toolchain
-            tc = ensure_toolchain(adapter, adapter.pixi_bin)
+            tc = ensure_toolchain(
+                adapter, adapter.pixi_bin,
+                _site_platform((self.store.get_site(adapter.name) or {})
+                               .get("capabilities") or {}))
             if tc:
                 prelude = build_env_prelude(adapter, tc, sdir)
         except WeftError:
             pass
-        parts = [f"repos <- c({repos_vec})"]
+        parts = ['options(Ncpus=max(1L, as.integer(Sys.getenv('
+                 '"WEFT_BUILD_JOBS", "2"))))',
+                 f"repos <- c({repos_vec})"]
         if plain:
             parts.append(
                 f"install.packages(c({vec}), lib=\"{rlib}\", repos=repos)")
@@ -593,7 +599,9 @@ class SessionManager:
                     'cat("\nWEFT-INSTALLED ", '
                     'paste(.nm, collapse=" "), "\n", sep="")')
         rcmd = "; ".join(parts)
+        from .solvers import _build_jobs_prefix
         script = (prelude + act + " && "
+                  f"{_build_jobs_prefix(None)}"
                   f"mkdir -p {shlex.quote(rlib)} && "
                   f"export R_LIBS={shlex.quote(rlib)}\"${{R_LIBS:+:$R_LIBS}}\" && "
                   # standalone: remotes uses ONLY base R — no callr/
@@ -1752,6 +1760,16 @@ class SessionManager:
         # ecosystem's env at it, and the command runs over the mount.
         mode = s.get("materialize_mode",
                      "clone" if s.get("materialized", True) else "none")
+        if writes_to is not None and writes_to not in ("rlib", "pylib"):
+            # validated at INTAKE, warm or cold: on a warm base a
+            # mistyped "RLIB" was silently ignored (the declared layer
+            # never provisioned, nothing echoed); on a cold base the
+            # refusal blamed the cold base instead of the typo
+            # (vocab-sweep B5)
+            raise WeftError(
+                "task.invalid",
+                f"unknown writes_to {writes_to!r}", stage="infra",
+                hints={"known": ["rlib", "pylib"]})
         layer_run = False
         if not full_clone and mode != "clone" \
                 and self._base_cold(s, adapter):

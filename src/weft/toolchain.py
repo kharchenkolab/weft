@@ -32,14 +32,18 @@ TOOLCHAIN_SPEC = [
 ]
 
 
-def toolchain_id(platform: str = "linux-64") -> str:
-    """Identity of the toolchain itself — part of every compile-cache key."""
+def toolchain_id(platform: str) -> str:
+    """Identity of the toolchain itself — part of every compile-cache key.
+    platform is REQUIRED: the old linux-64 default applied silently to
+    every mac/aarch64 site (every caller omitted it), building a manifest
+    the site could never install and keying the cache on a toolchain
+    that was never built (platform-sweep find A1)."""
     return sha256_bytes(canonical_json(
         {"packages": sorted(TOOLCHAIN_SPEC), "platform": platform}))[:16]
 
 
 def ensure_toolchain(adapter: SiteAdapter, pixi_bin: str,
-                     platform: str = "linux-64") -> str | None:
+                     platform: str) -> str | None:
     """Materialize the build toolchain on the site (once). Returns its
     prefix, or None if it cannot be built (the caller then falls back to a
     full prefix realization rather than guessing)."""
@@ -77,7 +81,7 @@ def ensure_toolchain(adapter: SiteAdapter, pixi_bin: str,
 
 
 def toolchain_fingerprint(adapter: SiteAdapter,
-                          platform: str = "linux-64") -> str | None:
+                          platform: str) -> str | None:
     """Identity of the toolchain AS RESOLVED on this site (its lockfile),
     not as requested: two sites solving 'c-compiler = *' a year apart get
     different gcc — their build artifacts must not share a cache key."""
@@ -101,6 +105,13 @@ def build_env_prelude(adapter: SiteAdapter, toolchain_prefix: str,
         f'${{LDFLAGS:-}}"\n'
         f'export PKG_CONFIG_PATH="{parent_env}/lib/pkgconfig:'
         f'${{PKG_CONFIG_PATH:-}}"\n'
+        # the ONE place that knows a compile is coming: every source
+        # build routed through this prelude gets make-level parallelism
+        # (a 226 s single-core stringi was the measured cost of its
+        # absence); bounded — login nodes are shared
+        'WEFT_NCPU=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)\n'
+        'export MAKEFLAGS="-j$((WEFT_NCPU<8?WEFT_NCPU:8)) '
+        '${MAKEFLAGS:-}"\n'
     )
 
 

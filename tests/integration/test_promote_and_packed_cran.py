@@ -100,12 +100,12 @@ def test_unpackable_layer_says_so(tmp_path, pixi_bin):
         ecosystem = "stub"
         conda_requirements = ()
 
-        def solve(self, deps, spec, workdir):
+        def solve(self, deps, spec, workdir, **_):
             return {"records": [{"name": d, "version": "1", "sha256": ""}
                                 for d in deps],
                     "native": "{}", "from_source": [], "top_level": deps}
 
-        def realize_layer(self, layer, adapter, env_rel):
+        def realize_layer(self, layer, adapter, env_rel, **_):
             return "true"
 
     w = Weft(tmp_path / "ws", pixi_bin=pixi_bin)

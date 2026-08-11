@@ -95,22 +95,39 @@ def probe_lanes(packages: list, lanes: list[str],
             display, spellings = pkg, {}
         facts = {}
         for lane in lanes:
-            if lane != "cran" and "/" in display.partition("@")[0]:
-                facts[lane] = _fact(False, display,
-                                    reason="lane grammar cannot speak "
-                                           "github refs")
+            if "/" in display.partition("@")[0]:
+                if lane == "cran":
+                    # a github ref is INSTALLABLE on the cran lane but
+                    # not probeable against crandb — probing the literal
+                    # "owner/repo" 404'd and reported FALSE, a lie an
+                    # agent ranks on (parser-sweep find #3)
+                    facts[lane] = _fact(
+                        "unknown", display,
+                        reason="github refs resolve at solve time "
+                               "(crandb indexes CRAN names only) — "
+                               "unknown, never false")
+                else:
+                    facts[lane] = _fact(False, display,
+                                        reason="lane grammar cannot speak "
+                                               "github refs")
                 continue
             sp = spellings.get(lane) or lane_spelling(display, lane,
                                                       namespace)
-            if lane == "cran" and cran_repos:
-                facts[lane] = _fact(
-                    "unknown", sp.split()[0],
-                    reason="secondary repositories are not probeable "
-                           "(crandb indexes CRAN only) — unknown, "
-                           "never false")
+            if lane == "cran":
+                # ONE parser for the cran grammar: the old sp.split()[0]
+                # passed "Matrix==1.6" (no space) whole to crandb -> 404
+                # -> FALSE for a package that exists
+                from .spec import parse_cran_dep
+                cran_name = parse_cran_dep(sp)["name"]
+                if cran_repos:
+                    facts[lane] = _fact(
+                        "unknown", cran_name,
+                        reason="secondary repositories are not probeable "
+                               "(crandb indexes CRAN only) — unknown, "
+                               "never false")
+                    continue
+                facts[lane] = _BACKENDS[lane](cran_name)
                 continue
-            facts[lane] = _BACKENDS[lane](split_constraint(sp)[0]
-                                          if lane != "cran"
-                                          else sp.split()[0])
+            facts[lane] = _BACKENDS[lane](split_constraint(sp)[0])
         out[display] = facts
     return out

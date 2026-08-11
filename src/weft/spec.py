@@ -91,6 +91,14 @@ def parse_cran_dep(dep: str) -> dict:
                 "subdir": "/".join(segs[2:]) or None,
                 "ref": ref or "HEAD"}
     parts = dep.split()
+    if len(parts) == 1 and "==" in parts[0]:
+        # the no-space pin ("Matrix==1.6") is the same ask as
+        # "Matrix ==1.6" — accept-and-mangle (the whole token as a NAME)
+        # sent it verbatim to crandb, which 404'd and reported the
+        # package unavailable (parser-sweep find #3)
+        name, _, ver = parts[0].partition("==")
+        if name and ver:
+            return {"kind": "cran", "name": name, "version": ver.strip()}
     if len(parts) == 1:
         return {"kind": "cran", "name": parts[0], "version": None}
     name, constraint = parts[0], " ".join(parts[1:])

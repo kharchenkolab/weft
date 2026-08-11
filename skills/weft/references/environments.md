@@ -97,6 +97,17 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     A contradiction raises `env.layer_conflict` naming the package and the
     lever (`extends` for a free re-solve). This is the right tool
     mid-analysis: "add emcee to what I have" without re-solving the world.
+- **The cran layer deltas against the conda layer**: closure members
+  conda already provides (`r-<name>`) never install — the layer keeps
+  only genuinely-new packages (github refs, non-conda deps); the lock
+  records `satisfied_by_conda` with both versions. So the FAST recipe
+  for R envs stands: put everything you can in `deps.conda`
+  (conda-forge binaries), keep `deps.cran` for github refs and
+  CRAN-only packages — the closure around them costs nothing extra now.
+  Realization narrates (`realize.prefix`/`realize.layer`/
+  `realize.progress` events) — poll events during env_realize instead
+  of assuming a silent call hung. Version-pinned interpreters
+  ("r-base=4.4") pass the cross-layer check.
 - **Postconditions**: a spec's `verify` block (same grammar as
   session verify=) is identity-neutral and proven at every realize —
   build always (ready means verified), adopt by default

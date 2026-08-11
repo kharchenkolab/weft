@@ -752,7 +752,29 @@ w.env_ensure(spec, dry_run=True)     # test a fix; nothing stored
 w.env_why(env_id, "data.table")      # what pulls it in / the locked record
 ```
 
-Missing interpreter → `env.layer_conflict` names exactly what to add.
+**The cran layer deltas against the conda layer** (measured on aba 1.2:
+25 of 26 cran installs were re-building, from source, packages the
+conda layer had binary-installed a minute earlier — 11.7 min → seconds).
+Closure members the conda lock already provides on every platform
+(`r-<name>`) are dropped from the layer at solve time and recorded in
+`layers.cran.satisfied_by_conda` with both versions; top-level cran and
+github asks always stay (an explicit ask is an explicit ask). At realize
+the installer additionally skips anything visible on `.libPaths`, so
+old locks realize fast too. Snapshot URLs in locks are PLATFORM-NEUTRAL;
+the Posit binary segment (`__linux__/<codename>`) is applied per site at
+realize from a live os-release read (unsupported distro or macOS →
+plain source URL, honest and slower). Source builds run with
+`Ncpus`/`MAKEFLAGS` parallelism, capped min(nproc, 8) — site policy
+`max_build_cores` is the lever (login nodes are shared). Realization
+narrates: `realize.prefix`(+`.done`) around the conda build,
+`realize.layer`(+`.done`) per layer, `realize.progress`
+{layer, done, total} every ~5 s inside a long install — a
+multi-minute silent call reads as a hang and invites cancels
+(observed live, twice).
+
+Missing interpreter → `env.layer_conflict` names exactly what to add
+(`=`/`==` version pins on the interpreter are fine — the check parses
+constraints with the one shared grammar).
 A spec may carry a `verify` block (same grammar as session verify=):
 it is IDENTITY-NEUTRAL (never forks the EnvID) and is proven every
 time the env realizes — build-time always (ready MEANS verified;

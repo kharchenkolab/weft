@@ -156,7 +156,7 @@ def _staging_plan(caps: dict, site_row: dict, staging: str | None,
                       "needs unshare -rm; building at the destination")
     sub = (f"{env_hash[:24]}-"
            f"{hashlib.sha256(tree.encode()).hexdigest()[:8]}")
-    if choice == "auto":
+    if choice.lower() == "auto":
         return f"stage/publish/{sub}", None
     if not choice.startswith("/"):
         raise WeftError(

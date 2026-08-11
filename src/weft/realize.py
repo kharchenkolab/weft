@@ -339,13 +339,15 @@ def ensure_realization(
                                   modules_init, caps, pack_tools or {})
                 else:
                     _build_prefix(env_id, env_row, adapter, rel, modules,
-                                  modules_init)
+                                  modules_init, emit=store.emit)
                 if not strategy.endswith("squashfs"):
                     _realize_layers(env_id, env_row, adapter, rel,
                                     (pack_tools or {}).get("solvers") or {},
                                     store.emit,
                                     offline=strategy.endswith("packed"),
-                                    pack_tools=pack_tools)
+                                    pack_tools=pack_tools,
+                                    build_jobs=_build_jobs_cap(
+                                        store, adapter.name))
                     # overlays skip post_install by construction: eligibility
                     # requires the child's steps to equal the parent's, whose
                     # prefix (sourced first) already carries their products
@@ -632,6 +634,7 @@ def _wipe_aside(adapter: SiteAdapter, rel: str, *,
 def _build_prefix(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str = "", fresh: bool = True,
+    emit=None,
 ) -> None:
     # fresh=False: the caller already made the wipe-or-resume decision
     # (squashfs resume preserves partial content — this rm was silently
@@ -642,6 +645,16 @@ def _build_prefix(
     adapter.write_file(f"{rel}/pixi.lock", env_row["native_lock"].encode())
     manifest_path = adapter.path(f"{rel}/pixi.toml")
     overrides = _virtual_pkg_overrides(env_row)
+    import time as _t
+    t0 = _t.time()
+    if emit is not None:
+        # this was the LONGEST silent window in a realize (up to the 90
+        # minute timeout below, zero events): the first event a watcher
+        # ever saw arrived after the longest phase was already over
+        emit("realize.prefix", env_id=env_id, site=adapter.name,
+             packages=sum(len(v) for v in
+                          (env_row["canonical"].get("platforms")
+                           or {}).values()))
     build = adapter.run_cmd(
         overrides +
         f"{shlex.quote(adapter.pixi_bin)} install --frozen "
@@ -649,6 +662,9 @@ def _build_prefix(
         timeout=5400,   # published/institutional envs are 10-15 GB with
                         # CUDA stacks; login nodes are often small VMs
     )
+    if emit is not None and build.rc == 0:
+        emit("realize.prefix.done", env_id=env_id, site=adapter.name,
+             elapsed_s=round(_t.time() - t0, 1))
     if build.rc != 0:
         raise WeftError(
             "env.realize_failed",
@@ -683,9 +699,24 @@ def _build_prefix(
     adapter.write_file(f"{rel}/activate.sh", activate.encode())
 
 
+def _build_jobs_cap(store, site: str) -> int:
+    """Source-build parallelism cap for this site: min(8, policy
+    max_build_cores if set). The shell side takes min(cap, nproc) at run
+    time — realization often lands on shared login nodes, where an
+    uncapped -j$(nproc) is impolite; the policy knob is the lever."""
+    row = store.get_site(site) if store is not None else None
+    policy = ((row or {}).get("config") or {}).get("policy") or {}
+    cap = policy.get("max_build_cores")
+    try:
+        return max(1, min(int(cap), 64)) if cap else 8
+    except (TypeError, ValueError):
+        return 8
+
+
 def _realize_layers(env_id: str, env_row: dict, adapter: SiteAdapter,
                     rel: str, solvers: dict, emit,
-                    offline: bool = False, pack_tools: dict | None = None) -> None:
+                    offline: bool = False, pack_tools: dict | None = None,
+                    build_jobs: int | None = None) -> None:
     """Non-conda layers (cran, julia, …) install on top of the base env,
     each appending its activation lines. One progress event per layer —
     source builds can be slow and the agent should see where time goes.
@@ -725,7 +756,14 @@ def _realize_layers(env_id: str, env_row: dict, adapter: SiteAdapter,
                 )
             lines = packer(layer, adapter, rel, pack_tools or {})
         else:
-            lines = solver.realize_layer(layer, adapter, rel)
+            lines = solver.realize_layer(
+                layer, adapter, rel,
+                # in-layer frontier: the measured trace was 11.7 minutes
+                # of silence INSIDE one layer — two live user cancels
+                progress=lambda _eco=eco, **kw: emit(
+                    "realize.progress", env_id=env_id, site=adapter.name,
+                    layer=_eco, **kw),
+                build_jobs=build_jobs)
         if lines:
             current = adapter.read_file(f"{rel}/activate.sh").decode()
             adapter.write_file(f"{rel}/activate.sh",
@@ -1007,9 +1045,13 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     # julia) get it eagerly — they routinely compile; pypi tries wheels
     # first and only summons the toolchain if a build actually fails.
     prelude = ""
+    # the site's platform, not linux-64-by-default: the omitted argument
+    # built mac/aarch64 sites a manifest they could never install and
+    # silently fell back to compiler-less builds (platform-sweep A1)
+    site_plat = pack_tools["site_platform"]
     if delta.get("layers_added"):
         from .toolchain import toolchain_fingerprint
-        tc = ensure_toolchain(adapter, adapter.pixi_bin)
+        tc = ensure_toolchain(adapter, adapter.pixi_bin, site_plat)
         if tc:
             prelude = build_env_prelude(adapter, tc, parent_layout_dir)
             # the compile cache must key on what ACTUALLY builds and links:
@@ -1017,8 +1059,13 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
             # prefix path the artifacts carry in their rpath
             pack_tools = {**pack_tools,
                           "toolchain_fingerprint":
-                              toolchain_fingerprint(adapter),
+                              toolchain_fingerprint(adapter, site_plat),
                           "parent_prefix": parent_layout_dir}
+    pack_tools = {**pack_tools,
+                  "build_jobs": _build_jobs_cap(store, adapter.name),
+                  "progress": lambda **kw: store.emit(
+                      "realize.progress", env_id=env_id,
+                      site=adapter.name, **kw)}
     if parent_is_squashfs:
         pack_tools = {**pack_tools, "parent_layout_dir": parent_layout_dir,
                       "wrap_cmd": wrap}
@@ -1047,7 +1094,7 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
         except WeftError:
             if prelude:
                 raise           # a compiler was already on PATH: real failure
-            tc = ensure_toolchain(adapter, adapter.pixi_bin)
+            tc = ensure_toolchain(adapter, adapter.pixi_bin, site_plat)
             if not tc:
                 raise
             activation.append(_overlay_pypi(
@@ -1523,13 +1570,14 @@ def _build_squashfs(
     # state, run before activation — the outer script carries them)
     if internet:
         _build_prefix(env_id, env_row, build, inner, [], modules_init,
-                      fresh=False)
+                      fresh=False, emit=emit)
     else:
         _build_packed(env_id, env_row, build, inner, [], modules_init,
                       caps, pack_tools, fresh=False)
     _realize_layers(env_id, env_row, build, inner,
                     pack_tools.get("solvers") or {}, emit,
-                    offline=not internet, pack_tools=pack_tools)
+                    offline=not internet, pack_tools=pack_tools,
+                    build_jobs=8)
     _stage_post_install_inputs(env_row, build, inner, pack_tools)
     _run_post_install(env_row, build, inner)
 
