@@ -2014,7 +2014,6 @@ class Weft:
         return {"group": group, "retried": out}
 
     def array_result(self, group: str) -> dict:
-        state = _vocab(state, JOB_STATES, "job state", fold=str.upper)
         counts = self.store.group_counts(group)
         if counts["total"] == 0:
             raise WeftError("task.invalid", f"unknown array group: {group}",

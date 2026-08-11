@@ -115,6 +115,50 @@ def test_kernel_lang_and_capture_fold(w):
     assert ei.value.hints["known"] == ["transcript", "none"]
 
 
+def test_array_result_works(w):
+    """Regression (aba verification catch): the vocab-fold str.replace
+    had a THIRD landing site — array_result, which has no state param,
+    raised UnboundLocalError on EVERY call, and two full green lanes
+    certified it because its only test was docker-marked."""
+    group = w.task_submit({"command": "echo $WEFT_ARRAY_INDEX > out.txt",
+                           "outputs": ["out.txt"], "site": "local",
+                           "array": 2})["group"]
+    deadline = __import__("time").time() + 120
+    while __import__("time").time() < deadline:
+        st = w.array_status(group)
+        if st["done"] + st["failed"] == 2:
+            break
+        __import__("time").sleep(0.3)
+    roll = w.array_result(group)
+    assert roll["group"] == group
+    out = w.array_result("grp_nonexistent")
+    assert out.get("error") == "task.invalid", out
+
+
+def test_vocab_folds_reference_real_parameters():
+    """Static pin for the whole class: every `x = _vocab(x, ...)` fold
+    must name a parameter of its enclosing function — the stray-landing
+    failure mode compiles clean and only explodes at call time, in
+    whatever verb the wayward edit happened to hit."""
+    import ast
+    import inspect
+
+    import weft.api as api_mod
+    tree = ast.parse(inspect.getsource(api_mod))
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        params = {a.arg for a in node.args.args + node.args.kwonlyargs}
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call) \
+                    and getattr(sub.func, "id", "") == "_vocab":
+                name = getattr(sub.args[0], "id", None)
+                if name is not None and name not in params:
+                    bad.append(f"{node.name}:{sub.lineno} folds {name!r}")
+    assert not bad, bad
+
+
 def test_writes_to_vocabulary_at_intake(w):
     from weft.session import SessionManager
     import inspect

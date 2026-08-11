@@ -64,6 +64,20 @@ remotes, removable in one command.
   sweep the codebase for siblings (subagents; see
   misc/sweep_findings_2026-07.md — 4 field bugs generalized to ~35).
   Fixing instances one at a time is how the same class returns.
+  This applies to YOUR OWN misfired edits at any scale: when a bulk
+  edit lands wrong, the blast radius is the PATTERN — grep the
+  inserted/changed text and audit every hit BEFORE trusting any test
+  result (the array_result incident: an unbounded str.replace had
+  three landing sites; the fix-forward repaired only the ones failing
+  tests illuminated, and the third rode two full green lanes).
+  Scripted replaces assert occurrence counts; the Edit tool's
+  uniqueness check exists for exactly this.
+- A green lane certifies ONLY what it covers. Every PUBLIC_TOOLS verb
+  needs a FAST-LANE test (docker/solver suites don't gate pushes);
+  test_public_tools pins the uncovered-verbs allowlist, which may only
+  shrink. Before declaring a fix verified, ask what the lane CANNOT
+  see (array_result's only test was docker-marked — the broken verb
+  shipped under two green confirmations until a consumer drove it).
 - Failure payloads are contracts: a raise with N trigger paths gets N
   tests asserting the DISCRIMINATING fields are true per path (never a
   bare hint whose provenance is ambiguous — install_rc vs verify_rc).

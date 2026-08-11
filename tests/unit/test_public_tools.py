@@ -35,6 +35,40 @@ def test_every_public_method_is_registered_or_excluded():
         f"reason)")
 
 
+# Verbs with NO fast-lane test today (docker/solver suites don't count:
+# the fast lane is what gates pushes). This list may only SHRINK — a
+# NEW verb, or an edit to an old one, must land with fast-lane coverage.
+# Lesson (cran round): a stray line broke array_result outright and TWO
+# full green lanes certified it, because its only test was docker-marked
+# — a green lane proves exactly what it measures, nothing more.
+FAST_LANE_UNCOVERED = {
+    "doctor", "env_adopt", "env_find_near", "env_gpu_hint", "env_publish",
+    "env_repair", "env_revise", "env_unpublish", "gc_packages",
+    "job_node_exec", "module_list", "site_associations", "site_footprint",
+    "site_load", "site_probe", "site_probe_deep", "site_route_probe",
+    "site_teardown",
+}
+
+
+def test_every_public_verb_has_fast_lane_coverage():
+    import re
+    from pathlib import Path
+    tests_dir = Path(__file__).resolve().parents[1]
+    blob = "\n".join(
+        p.read_text() for p in tests_dir.rglob("test_*.py")
+        if not re.search(r"pytestmark\s*=.*mark\.(docker|solver)",
+                         p.read_text()[:2000]))
+    uncovered = {v for v in PUBLIC_TOOLS
+                 if not re.search(rf"\.{re.escape(v)}\s*\(", blob)}
+    new_gaps = uncovered - FAST_LANE_UNCOVERED
+    assert not new_gaps, (
+        f"public verbs with NO fast-lane test: {sorted(new_gaps)} — "
+        "add a test; the push-gating lane cannot see these break")
+    stale = FAST_LANE_UNCOVERED - uncovered
+    assert not stale, (
+        f"now covered — remove from FAST_LANE_UNCOVERED: {sorted(stale)}")
+
+
 def test_registry_and_exclusions_are_coherent():
     public = _public_methods()
     both = set(EXCLUDED) & set(PUBLIC_TOOLS)
