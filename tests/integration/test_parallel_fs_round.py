@@ -836,8 +836,13 @@ def test_installer_undeclared_refused_declared_runs(tmp_path, pixi_bin,
     out = w.session_run_installer(sid, "Rscript -e 'somepkg::install()'")
     assert out["error"] == "session.cold_base"
     assert "writes_to" in out["hints"]["delta_lanes"]["installer"]
+    # DELIBERATE re-freeze (cran-lane round, vocab sweep B5): an unknown
+    # writes_to is a VOCABULARY error and refuses as such — the old
+    # session.cold_base shape blamed the cold base for a typo (and on a
+    # warm base the typo was silently ignored)
     out = w.session_run_installer(sid, "true", writes_to="attic")
-    assert out["error"] == "session.cold_base"   # only rlib|pylib declared
+    assert out["error"] == "task.invalid"
+    assert out["hints"]["known"] == ["rlib", "pylib"]
 
     ad = w.adapters["local"]
     calls = []

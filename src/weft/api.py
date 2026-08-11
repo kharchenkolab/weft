@@ -1921,7 +1921,6 @@ class Weft:
         a 2000-element sweep with three failure modes reads as three lines,
         each with sample indices to drill into). The per-element list is
         inlined only for small groups; use array_elements to page."""
-        state = _vocab(state, JOB_STATES, "job state", fold=str.upper)
         counts = self.store.group_counts(group)
         if counts["total"] == 0:
             raise WeftError("task.invalid", f"unknown array group: {group}",

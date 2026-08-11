@@ -51,7 +51,9 @@ def suggest_gpu_spec(caps: dict, site_name: str = "") -> dict:
         "deps": [f"cuda-version <={driver}"],
         "system_requirements": {"cuda": driver},
         "note": (
-            f"add deps to the spec's {plat} variant along with the GPU "
+            f"add deps to the spec's "
+            f"linux-{'aarch64' if view.get('arch') in ('arm64', 'aarch64') else '64'}"
+            f" variant along with the GPU "
             f"packages you need; cuda-version <={driver} keeps the userland "
             f"within what the driver supports. Packages with separate CPU/GPU "
             f"builds need the GPU variant forced: use the -gpu metapackage "
