@@ -405,6 +405,15 @@ class EnvSpec:
                     f"env_vars key {k!r} is not a valid shell identifier",
                     stage="solve",
                     hints={"rule": "[A-Za-z_][A-Za-z0-9_]*"})
+            if str(k).startswith("WEFT_"):
+                # spec env_vars merge under task env_vars in cmd.sh —
+                # same reserved-namespace clobber as the task-level gate
+                raise WeftError(
+                    "task.invalid",
+                    f"env_vars key {k!r} is in the reserved WEFT_ "
+                    "namespace",
+                    stage="solve",
+                    hints={"reserved": "WEFT_*"})
         return cls(
             name=d.get("name", "unnamed"),
             platforms=platforms,

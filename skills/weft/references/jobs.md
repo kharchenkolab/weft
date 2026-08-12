@@ -69,6 +69,14 @@ via `next_before_seq`). `task_status(job_id)` also carries
 to compare against what actually happened; arrays store one plan for
 the group (`array_status(group)["plan"]`).
 
+**In-job paths refuse collisions at submit**: two inputs on one
+mount path, a duplicated output, or an output at an input's mount all
+refuse `task.invalid` naming the parties (run+rel inputs default to
+the source filename — set `mount_as`). `outputs` are LITERAL paths
+(trailing "/" = directory; NO globs) and a missing declared output
+FAILS the job. `env_vars` starting `WEFT_` are refused (reserved
+facts namespace).
+
 ## Crash & outage semantics (what you can rely on)
 
 - Site unreachable → ONE `site.unreachable` event; detached jobs keep

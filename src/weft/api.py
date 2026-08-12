@@ -338,6 +338,8 @@ class Weft:
         return {"site": name, "capabilities": caps, "storage": storage}
 
     def sites_list(self) -> list[dict]:
+        """Registered sites with health and headline capabilities —
+        the quick map; sites_describe(name) has the full row."""
         out = []
         for row in self.store.list_sites():
             caps = row.get("capabilities") or {}
@@ -356,6 +358,10 @@ class Weft:
         return out
 
     def sites_describe(self, name: str) -> dict:
+        """The full site row: config, capabilities, digested "compute"
+        summary (gpus/cuda/cores — what GPU routing reads), "storage"
+        facts (durable + policy roles), site notebook, and byte routes
+        to peer sites."""
         row = self.store.get_site(name)
         if not row:
             raise WeftError("task.invalid", f"unknown site: {name}", stage="infra",
@@ -691,13 +697,17 @@ class Weft:
         """Resolve a spec (or return a known EnvID). Mark a constraint SOFT
         with a trailing '?' ("scipy ==1.14.1?") and pass relax="soft" to get
         a working env in one call instead of a conflict-relax-retry loop:
-        weft drops only soft constraints, reports what it relaxed, and the
-        result is still fully pinned. Hard pins are never touched.
-        dry_run=True solves without storing."""
+        weft relaxes only soft constraints' VERSIONS — packages are never
+        dropped — reports what it relaxed, and the result is still fully
+        pinned. Hard pins are never touched. dry_run=True solves without
+        storing."""
         return self.envman.ensure(spec_or_id, update=update,
                                   dry_run=dry_run, relax=relax)
 
     def env_status(self, env_id: str) -> dict:
+        """One env's record: spec, lock summary, realizations per site
+        with strategy and state. env_packages lists the resolved set;
+        env_why explains one package."""
         return self.envman.status(env_id)
 
     def env_revise(self, env_id: str, reason: str = "") -> dict:
@@ -1012,16 +1022,20 @@ class Weft:
                       site: str | None = None,
                       expected_sha256: str | None = None,
                       ingest: bool = True, run: str | None = None,
-                      rel: str | None = None) -> dict:
+                      rel: str | None = None,
+                      mime: str | None = None) -> dict:
         """Hash a workspace path — or ingest a URL (http/s/s3/gs/azure) —
-        into a DataRef. With site=, a URL is fetched straight into that
-        site's CAS (hashed site-side; no controller detour), and a plain
-        path may be a FILE or a whole DIRECTORY already on that site
-        (e.g. retained in place): directories mint a tree ref usable as
-        a task input or fetched home as a unit. Pass expected_sha256 to
-        verify against a published checksum (for a directory: the tree
-        hash); otherwise hash-on-arrival is the identity (meta.trust =
-        "first-fetch").
+        into a DataRef. mime= DECLARES the content type (e.g.
+        "text/csv") — carried in the record's meta and served by
+        data_describe/data_list; declared by the caller, never verified
+        or sniffed by weft, and absent stays honest. With site=, a URL
+        is fetched straight into that site's CAS (hashed site-side; no
+        controller detour), and a plain path may be a FILE or a whole
+        DIRECTORY already on that site (e.g. retained in place):
+        directories mint a tree ref usable as a task input or fetched
+        home as a unit. Pass expected_sha256 to verify against a
+        published checksum (for a directory: the tree hash); otherwise
+        hash-on-arrival is the identity (meta.trust = "first-fetch").
 
         ingest=False (site paths only) — REFERENCE-IN-PLACE for big
         data on stable storage when the site CAS sits on scratch: hash
@@ -1036,6 +1050,36 @@ class Weft:
         KEY — "file X from run Y" — resolved wherever the bytes are
         (sandbox or keep); declared outputs reuse the manifest's ref
         with no rehash."""
+        if mime is not None:
+            mime = str(mime).strip()
+            parts = mime.split("/")
+            if (not mime or len(mime) > 127 or len(parts) != 2
+                    or not all(parts)
+                    or any(ord(c) < 33 or ord(c) == 127 for c in mime)):
+                raise WeftError(
+                    "task.invalid",
+                    f"mime must look like type/subtype (got {mime!r})",
+                    stage="staging",
+                    hints={"examples": ["text/csv", "application/x-hdf5",
+                                        "image/png"],
+                           "note": "declared, never verified — omit when "
+                                   "unknown"})
+        out = self._data_register(path=path, site=site,
+                                  expected_sha256=expected_sha256,
+                                  ingest=ingest, run=run, rel=rel)
+        if mime and out.get("ref"):
+            # ONE landing site for every register path (workspace, URL,
+            # site, ingest=False, run+rel). Annotation semantics: the
+            # last declaration wins, like notes — identity-neutral.
+            self.store.update_dataref_meta(out["ref"], {"mime": mime})
+            out["mime"] = mime
+        return out
+
+    def _data_register(self, path: str | None = None,
+                       site: str | None = None,
+                       expected_sha256: str | None = None,
+                       ingest: bool = True, run: str | None = None,
+                       rel: str | None = None) -> dict:
         if run is not None or rel is not None:
             if not (run and rel) or path is not None:
                 raise WeftError(
@@ -1098,6 +1142,10 @@ class Weft:
         return None
 
     def data_describe(self, ref: str) -> dict:
+        """One ref's record: kind, bytes, meta (origin/trust/declared
+        mime), and location rows with the typed `external` flag
+        (reference-in-place homes). Record-based — data_stat answers
+        where bytes ACTUALLY sit."""
         return self.dataman.describe(ref)
 
     def data_list(self, kind: str | None = None, at: str | None = None,
@@ -1291,11 +1339,30 @@ class Weft:
                                   dry_run=dry_run, force=force)
 
     def data_fetch(self, ref: str, to_path: str) -> dict:
+        """Materialize a ref's content at a LOCAL path (trees rebuild
+        as directories, pulling only blobs the workspace lacks).
+        Content-verified on arrival; sources: workspace CAS, site
+        copies, keep anchors — re-obtained hash-checked. Fetch
+        selectively: manifests carry previews; this moves the full
+        artifact."""
         return self.dataman.fetch(ref, to_path, self.adapters, self.transfers)
 
     # -- tasks ------------------------------------------------------------------
 
     def task_submit(self, task: dict, *, force: bool = False, dry_run: bool = False) -> dict:
+        """Submit a batch task: {"command", "site", "env"?, "inputs"?,
+        "outputs"?, ...}. `outputs` are LITERAL sandbox-relative paths —
+        a trailing "/" collects that directory, glob patterns are NOT
+        expanded, and a declared output missing when the run ends FAILS
+        the job (declared = promised). `inputs` mount refs read-only at
+        `mount_as`; two inputs may not share a mount path. Identical
+        tasks are memoized — the recorded manifest returns instantly;
+        force=True re-runs.
+
+        dry_run=True returns the plan (staging bytes, env action)
+        without submitting. site="auto" places by capability. The
+        response's "plan" is the submit-time promise, persisted for
+        comparison against what actually happened."""
         try:
             task = dict(task.get("task", task))
             if isinstance(task.get("env"), dict):
@@ -1325,6 +1392,10 @@ class Weft:
             return e.to_dict()
 
     def task_status(self, job_id: str | None = None, state: str | None = None) -> list[dict]:
+        """Job rows (one, or filtered by state — case-folded UPPERCASE
+        vocabulary). Single-job detail carries "plan", the persisted
+        submit-time promise. Pure record read; task_logs follows the
+        live log."""
         state = _vocab(state, JOB_STATES, "job state", fold=str.upper)
         jobs = [self.store.get_job(job_id)] if job_id else self.store.jobs_where(state=state)
         out = []
@@ -1377,6 +1448,9 @@ class Weft:
         return {"log": r.out, "state": job["state"]}
 
     def task_result(self, job_id: str) -> dict:
+        """A finished job's manifest: outputs with refs and previews,
+        exit code, walltime, logs tail, reproducibility grade. Raises
+        typed errors for unknown/unfinished jobs."""
         job = self.store.get_job(job_id)
         if not job:
             raise WeftError("task.invalid", f"unknown job: {job_id}", stage="infra")
@@ -1433,6 +1507,10 @@ class Weft:
             return e.to_dict()
 
     def session_exec(self, session_id: str, cmd: str) -> dict:
+        """Run a shell command inside the session's activated env
+        (conversational-speed probe; NOT the citable record — assemble
+        proven steps into a task under a snapshot EnvID for that).
+        Returns {rc, out, err}."""
         return self.sessions.exec(session_id, self._session_adapter(session_id), cmd)
 
     def session_install(self, session_id: str, conda: list[str] | None = None,
@@ -1680,6 +1758,9 @@ class Weft:
         return self.sessions.snapshot(session_id, name, notes, verify)
 
     def session_stop(self, session_id: str) -> dict:
+        """Stop the session and settle its bookkeeping. The scratch
+        prefix is reclaimable afterwards; snapshot FIRST if the state
+        should survive as a real EnvID."""
         return self.sessions.stop(session_id, self._session_adapter(session_id))
 
     def list_sessions(self, site: str | None = None,
@@ -1788,6 +1869,10 @@ class Weft:
         return self.kernels.interrupt(kernel_id)
 
     def kernel_restart(self, kernel_id: str, replay: str = "successful") -> dict:
+        """Start a successor kernel; replay="successful" re-runs the
+        transcript\'s rc==0 blocks to rebuild interpreter state (skip a
+        killing block that way), replay="none" starts empty. Label and
+        capture mode carry over; the old transcript stays readable."""
         try:
             return self.kernels.restart(kernel_id, replay)
         except WeftError as e:
@@ -1802,6 +1887,9 @@ class Weft:
         return self.kernels.promote(kernel_id, blocks, dataman=self.dataman)
 
     def kernel_stop(self, kernel_id: str) -> dict:
+        """Stop the kernel process and settle retention pins. The
+        transcript (code/rc/text under capture="transcript") survives
+        in the store; kernel_transcript still serves it."""
         return self.kernels.stop(kernel_id)
 
     # -- services (endpoint-publishing long-lived processes) ----------------------
@@ -2014,6 +2102,9 @@ class Weft:
         return {"group": group, "retried": out}
 
     def array_result(self, group: str) -> dict:
+        """Group roll-up for a finished sweep: per-element states and
+        wall stats, failure summaries. array_status watches progress;
+        this aggregates the outcome."""
         counts = self.store.group_counts(group)
         if counts["total"] == 0:
             raise WeftError("task.invalid", f"unknown array group: {group}",
@@ -2135,6 +2226,11 @@ class Weft:
         }
 
     def reconcile(self) -> list[dict]:
+        """Crash recovery PLUS re-drives: supervision re-attaches
+        automatically at construction (Weft(resume=)); this verb
+        additionally re-drives jobs whose driver died before submit
+        (bounded — repeated deaths end in job.redrive_exhausted).
+        Returns the actions taken."""
         actions = self.runner.reconcile()
         # retains enqueued by a process that died mid-transfer resume
         # here (placement is idempotent — re-copy over partials)
@@ -2448,14 +2544,15 @@ class Weft:
                 raise WeftError("data.missing", f"unknown ref: {target}",
                                 stage="infra")
             origin = row["meta"].get("origin", "")
+            parsed = self.dataman.parse_origin(origin)
             node = {"ref": target, "bytes": row["bytes"], "origin": origin}
-            if origin.startswith("job:jobs/") and depth > 0:
+            if parsed["kind"] == "job" and depth > 0:
                 node["produced_by"] = self.provenance(
-                    origin.split("/", 1)[1], depth - 1)
-            elif origin.startswith("run:") and depth > 0:
+                    parsed["job_id"], depth - 1)
+            elif parsed["kind"] == "run" and depth > 0:
                 # a RETAINED file re-entering compute: the chain walks
                 # THROUGH it into the producing run (retention.md R5)
-                run_target = origin[4:].split("/", 1)[0]
+                run_target = parsed["target"]
                 if self.store.get_job(run_target):
                     node["produced_by"] = self.provenance(
                         run_target, depth - 1)

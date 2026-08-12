@@ -539,6 +539,26 @@ class DataManager:
                                      "checksum is for a different encoding"},
             )
 
+    @staticmethod
+    def parse_origin(origin: str) -> dict:
+        """THE origin grammar (one owner). origin is PROVENANCE — a
+        display fact and a walk key — never a typing signal (a live
+        agent was about to parse '.csv' out of it; mime= is the typing
+        lever). Three consumers used to prefix-parse this ad hoc
+        (gc pinning, the provenance walk twice); a fourth parser was
+        one incident away. Kinds: job {job_id}, run {target, rel},
+        post_install, opaque (URLs, plain paths, free text)."""
+        origin = origin or ""
+        if origin.startswith("job:jobs/"):
+            return {"kind": "job", "job_id": origin.split("/", 1)[1]}
+        if origin.startswith("run:"):
+            target, _, rel = origin[4:].partition("/")
+            return {"kind": "run", "target": target, "rel": rel}
+        if origin.startswith("post_install:"):
+            return {"kind": "post_install",
+                    "detail": origin[len("post_install:"):]}
+        return {"kind": "opaque", "detail": origin}
+
     def describe(self, ref: str) -> dict:
         row = self.store.get_dataref(ref)
         if not row:
@@ -591,8 +611,17 @@ class DataManager:
         out = {
             "ref": ref,
             "total": len(manifest),
-            "members": [{"path": e["path"], "bytes": e.get("bytes"),
-                         "sha256": e.get("sha256"),
+            # the manifest's field is `size` (identity — renaming it would
+            # fork every tree hash); the SERVED name stays `bytes` (the
+            # round-B contract). The old e.get("bytes") mis-key served
+            # None for facts both manifest lanes always had — caught by
+            # aba's conformance freeze, which asserted values where our
+            # test asserted key presence. Links carry no bytes/sha256:
+            # keys are dropped, not served as always-None.
+            "members": [{"path": e["path"],
+                         **({"bytes": e["size"]} if "size" in e else {}),
+                         **({"sha256": e["sha256"]} if e.get("sha256")
+                            else {}),
                          **({"kind": e["kind"]}
                             if e.get("kind") not in (None, "file") else {})}
                         for e in page],

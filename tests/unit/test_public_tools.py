@@ -69,6 +69,18 @@ def test_every_public_verb_has_fast_lane_coverage():
         f"now covered — remove from FAST_LANE_UNCOVERED: {sorted(stale)}")
 
 
+def test_every_public_verb_has_a_docstring():
+    """Generated catalogs surface the docstring (first paragraph
+    especially) — an empty one ships an EMPTY CONTRACT for the verb.
+    Found 14 empty at once (task_submit and data_fetch among them: a
+    live model burned a diagnose-and-resubmit cycle discovering the
+    outputs semantics by experiment — aba leftovers note, item 4)."""
+    import inspect
+    empty = [v for v in PUBLIC_TOOLS
+             if not (inspect.getdoc(getattr(Weft, v)) or "").strip()]
+    assert not empty, f"public verbs with no docstring: {empty}"
+
+
 def test_registry_and_exclusions_are_coherent():
     public = _public_methods()
     both = set(EXCLUDED) & set(PUBLIC_TOOLS)

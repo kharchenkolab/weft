@@ -34,10 +34,12 @@ def _pinned_refs(store) -> set[str]:
         for o in (j["manifest"] or {}).get("outputs", []):
             pinned.add(o["ref"])
     # blobs referenced only from dataref meta, not job provenance
+    from .data import DataManager
     for r in store.all_datarefs():
         meta = r.get("meta") or {}
         if ("archived_blob" in meta or "compile_cache" in meta
-                or str(meta.get("origin", "")).startswith("post_install:")):
+                or DataManager.parse_origin(
+                    str(meta.get("origin", "")))["kind"] == "post_install"):
             pinned.add(r["ref"])
     # captured post_install inputs, referenced from env specs
     for row in store.list_envs():

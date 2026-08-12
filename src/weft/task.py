@@ -134,6 +134,27 @@ class Task:
                     f"env_vars key {k!r} is not a valid shell identifier",
                     stage="submit",
                     hints={"rule": "[A-Za-z_][A-Za-z0-9_]*"})
+            if k.startswith("WEFT_") and k != "WEFT_ARRAY_INDEX":
+                # reserved facts namespace: these export AFTER the
+                # WEFT_* lines in cmd.sh, so a user key here silently
+                # clobbers weft's guaranteed variables (WEFT_CPUS,
+                # WEFT_JOB_ID, WEFT_STORAGE_*) for the job's own tools.
+                # The documented overrides (LC_*, PYTHONNOUSERSITE) are
+                # deliberate levers; WEFT_ is not. WEFT_ARRAY_INDEX is
+                # exempt: weft's own array merge stamps it into element
+                # env_vars, and the job row round-trips through
+                # from_dict at drive time — the gate must not refuse
+                # weft's own stamp (a user-set value is overwritten by
+                # that same merge anyway).
+                raise WeftError(
+                    "task.invalid",
+                    f"env_vars key {k!r} is in the reserved WEFT_ "
+                    "namespace",
+                    stage="submit",
+                    hints={"reserved": "WEFT_*",
+                           "suggestion": "resources/policy set the real "
+                                         "facts; pick a different name "
+                                         "for your own variable"})
         if len(self.label) > 200:
             raise WeftError(
                 "task.invalid",
@@ -157,6 +178,44 @@ class Task:
                     f"paths must not contain tab/newline: {mount!r}",
                     stage="submit",
                 )
+        # ONE in-job path, one writer. Two inputs landing on the same
+        # path silently last-writer-win in the job dir (live campaign:
+        # two run+rel inputs both defaulted to 'status.json'; the model
+        # discovered the clobber only by submitting a probe job). And an
+        # OUTPUT at an input's mount path is worse than a collision:
+        # inputs are hardlink-shared and read-only by contract — writing
+        # there can falsify the content-addressed record.
+        mounts: dict[str, str] = {}
+        for label, m in [(f"inputs[{i}]", inp.mount_as)
+                         for i, inp in enumerate(self.inputs)] + \
+                        ([("code", self.code.mount_as)] if self.code else []):
+            if m in mounts:
+                raise WeftError(
+                    "task.invalid",
+                    f"{mounts[m]} and {label} both mount as {m!r}",
+                    stage="submit",
+                    hints={"path": m,
+                           "suggestion": "set mount_as to distinct in-job "
+                                         "paths (run+rel inputs default to "
+                                         "the source filename)"})
+            mounts[m] = label
+        seen_out: set[str] = set()
+        for o in self.outputs:
+            if o in seen_out:
+                raise WeftError(
+                    "task.invalid", f"output {o!r} is declared twice",
+                    stage="submit")
+            seen_out.add(o)
+            if o in mounts:
+                raise WeftError(
+                    "task.invalid",
+                    f"output {o!r} is also the mount path of {mounts[o]} — "
+                    "inputs are read-only (hardlink-shared: writing there "
+                    "can falsify the content-addressed record)",
+                    stage="submit",
+                    hints={"path": o,
+                           "suggestion": "write the result to a different "
+                                         "declared output path"})
         if self.array is not None and self.array < 1:
             raise WeftError("task.invalid", "array must be >= 1", stage="submit")
         if self.resources.walltime:

@@ -68,13 +68,13 @@ w.data_fetch(m["outputs"][0]["ref"], "results/scan.h5")
 |---|---|
 | `command` | shell command run inside the activated environment |
 | `env` | EnvID, inline spec dict, or `null` for the bare site environment |
-| `inputs` | `[{ref, mount_as}]` — sandbox-relative mounts, read-only by convention. On one filesystem staging is zero-copy hardlinks (the mount, the CAS blob, and possibly the registered original share an inode) — mutating an input in place falsifies the content-addressed record, not just one file; tools that must mutate should copy inside the sandbox first |
+| `inputs` | `[{ref, mount_as}]` — sandbox-relative mounts, read-only by convention; two inputs may not share a mount path (run+rel inputs default to the source filename — set mount_as when they collide, refused at submit). On one filesystem staging is zero-copy hardlinks (the mount, the CAS blob, and possibly the registered original share an inode) — mutating an input in place falsifies the content-addressed record, not just one file; tools that must mutate should copy inside the sandbox first |
 | `code` | same shape; code is just data (hash-addressed like everything) |
-| `outputs` | declared result paths — plain files (`plot.svg`) or directories (`results/`); a declared output that was not produced fails the job |
+| `outputs` | declared result paths — LITERAL, no glob patterns: plain files (`plot.svg`) or directories (`results/`, trailing slash); a declared output that was not produced fails the job; the same path may not be declared twice or coincide with an input's mount |
 | `resources` | `cpus, mem_gb, gpus, walltime, partition` — validated against site capabilities AND user policy |
 | `site` | site name or `"auto"` |
 | `array` | N: fan out N element jobs with `WEFT_ARRAY_INDEX` = 0…N-1 |
-| `env_vars` | exported in the job; `{{cpus}}`/`{{mem_gb}}`/`{{gpus}}` templated |
+| `env_vars` | exported in the job; `{{cpus}}`/`{{mem_gb}}`/`{{gpus}}` templated; `WEFT_*` is weft's reserved facts namespace (refused — the exports would clobber `WEFT_CPUS`/`WEFT_JOB_ID`/`WEFT_STORAGE_*`) |
 | `after` | job_ids that must be DONE first — pipelines without polling; a failed upstream fails this job as `task.dep_failed` (it never starts) |
 
 Weft-launched interpreters are HERMETIC: `PYTHONNOUSERSITE=1` is set

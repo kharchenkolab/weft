@@ -15,6 +15,11 @@ table knows which sites hold what; staging is the set difference.
   tasks on one site never round-trip data through the workspace.
 - **Memoization:** identical task (env+inputs+code+command+outputs) →
   recorded manifest returned instantly; `force=True` to actually re-run.
+- **Declare the type when you know it:** `data_register(path,
+  mime="text/csv")` — declared (never sniffed/verified by weft),
+  carried in meta, served by describe/list. Consumers stop guessing
+  from ".bin"; absence stays honest. Re-declaration wins (annotation,
+  like notes). `origin` is PROVENANCE, never a typing signal.
 - **Fetch selectively:** manifests carry previews (JSON inlined, table
   heads, image thumbs, log tails). `data_fetch(ref, "local/path")` only
   when the full artifact is needed; it verifies content on arrival.
