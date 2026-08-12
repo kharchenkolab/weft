@@ -16,6 +16,13 @@ from .ids import task_id
 
 _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
+# WEFT_* keys weft ITSELF stamps into task env_vars (array element
+# merge, service port injection) — enumerated by sweeping the tree for
+# internal stamps, because their task dicts re-enter from_dict at drive
+# time and the reserved-namespace gate below must not refuse weft's own
+# writes. Adding an internal stamp means adding it HERE.
+_WEFT_STAMPED = frozenset({"WEFT_ARRAY_INDEX", "WEFT_PORT", "WEFT_PORTS"})
+
 
 @dataclass
 class TaskInput:
@@ -134,18 +141,18 @@ class Task:
                     f"env_vars key {k!r} is not a valid shell identifier",
                     stage="submit",
                     hints={"rule": "[A-Za-z_][A-Za-z0-9_]*"})
-            if k.startswith("WEFT_") and k != "WEFT_ARRAY_INDEX":
+            if k.startswith("WEFT_") and k not in _WEFT_STAMPED:
                 # reserved facts namespace: these export AFTER the
                 # WEFT_* lines in cmd.sh, so a user key here silently
                 # clobbers weft's guaranteed variables (WEFT_CPUS,
                 # WEFT_JOB_ID, WEFT_STORAGE_*) for the job's own tools.
                 # The documented overrides (LC_*, PYTHONNOUSERSITE) are
-                # deliberate levers; WEFT_ is not. WEFT_ARRAY_INDEX is
-                # exempt: weft's own array merge stamps it into element
-                # env_vars, and the job row round-trips through
-                # from_dict at drive time — the gate must not refuse
-                # weft's own stamp (a user-set value is overwritten by
-                # that same merge anyway).
+                # deliberate levers; WEFT_ is not. _WEFT_STAMPED are
+                # weft's OWN stamps (arrays, services) whose task dicts
+                # round-trip through from_dict at drive time — the gate
+                # must not refuse them (the first version exempted only
+                # the array stamp and killed every service; user-set
+                # values for stamped keys are overwritten by the stamp).
                 raise WeftError(
                     "task.invalid",
                     f"env_vars key {k!r} is in the reserved WEFT_ "
