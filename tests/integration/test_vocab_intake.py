@@ -99,11 +99,14 @@ def test_auto_site_hint_names_the_sentinel(w):
 
 def test_kernel_lang_and_capture_fold(w):
     """lang='R' must fold and pass the registry check — proven by the
-    refusal moving PAST lang to the next gate (an unrealized env)."""
+    refusal moving PAST lang to the next gate (an unknown EnvID; was
+    env.not_realized until the aba2 round made kernel_start realize
+    solved envs itself — deliberate re-freeze)."""
     with pytest.raises(WeftError) as ei:
         w.kernels.start("local", lang="R", env_id="env_nonexistent")
-    assert ei.value.code == "env.not_realized", \
-        f"lang='R' still tripped the registry: {ei.value.code}"
+    assert ei.value.code == "task.invalid" \
+        and "unknown EnvID" in ei.value.detail, \
+        f"lang='R' still tripped the registry: {ei.value}"
     with pytest.raises(WeftError) as ei:
         w.kernels.start("local", lang="Fortran", env_id="env_x")
     assert ei.value.code == "task.invalid"

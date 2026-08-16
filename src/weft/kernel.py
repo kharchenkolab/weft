@@ -122,13 +122,38 @@ class KernelManager:
             real = self.store.get_realization(env_id, site)
             rel = (real or {}).get("location") or env_dir_rel(env_id)
             if not adapter.file_exists(f"{rel}/.weft-ready"):
-                raise WeftError(
-                    "env.not_realized",
-                    f"env {env_id} is not realized on {site}",
-                    stage="realize",
-                    hints={"suggestion": f"env_realize({env_id!r}, "
-                                         f"{site!r}) — kernels attach to "
-                                         "realized envs"})
+                # realizing the base is weft's errand, not the agent's
+                # (session_start's doctrine, now uniform across all
+                # three attach verbs — this refusal's hint was followed
+                # verbatim twice per aba2 thread: a round-trip tax, not
+                # a decision point). realize.* events narrate the slow
+                # case; the typed refusal survives for UNKNOWN envs.
+                env_row = self.store.get_env(env_id)
+                if not env_row:
+                    raise WeftError(
+                        "task.invalid", f"unknown EnvID: {env_id}",
+                        stage="solve",
+                        hints={"suggestion": "env_ensure the spec first "
+                                             "— kernels attach to solved "
+                                             "envs"})
+                if self.runner is None:
+                    raise WeftError(
+                        "env.not_realized",
+                        f"env {env_id} is not realized on {site}",
+                        stage="realize",
+                        hints={"suggestion": f"env_realize({env_id!r}, "
+                                             f"{site!r})"})
+                from .realize import ensure_realization, runner_pack_tools
+                site_row = self.store.get_site(site)
+                ensure_realization(
+                    env_id, env_row, adapter, self.store,
+                    caps=(site_row or {}).get("capabilities"),
+                    site_config=(site_row or {}).get("config"),
+                    pack_tools=runner_pack_tools(
+                        self.runner, self.runner.envman.solvers,
+                        self.store))
+                real = self.store.get_realization(env_id, site)
+                rel = (real or {}).get("location") or env_dir_rel(env_id)
             activate = f". {shlex.quote(adapter.path(rel))}/activate.sh"
         elif session_id:
             if self.sessions is None:
@@ -450,7 +475,7 @@ class KernelManager:
         return {"kernel_id": kernel_id, "state": "stopped"}
 
     def promote(self, kernel_id: str, blocks: list[int],
-                dataman=None) -> dict:
+                dataman=None, label: str = "") -> dict:
         """Elevate exploratory kernel results into the record — honestly.
 
         Captures the FULL ordered transcript through the last promoted
@@ -492,11 +517,19 @@ class KernelManager:
             env_id = snap["env_id"]
             snapshot_note = {"session_id": k["session_id"],
                              "snapshotted_at_promote": True}
+        # display handle for the minted job row — every other submission
+        # path takes one; a promoted row rendered as a truncated command
+        # string was unrecognizable in campaign groupings (aba2). Default
+        # inherits the kernel's own label. NOT identity: task_hash below
+        # is {kernel_transcript, env} — relabeling can never fork the
+        # record (pinned by test).
+        label = (label or k.get("label") or "").strip()
         from .task import Task
         pseudo = Task.from_dict({
             "command": f"[kernel promotion of blocks {blocks}]",
             "env": env_id,
             "outputs": [f"blocks/{b:04d}.artifacts/" for b in blocks],
+            **({"label": label} if label else {}),
             "site": k["site"]})
         entries, total = dataman.collect_outputs(adapter, k["jobdir"], pseudo)
         from .ids import task_id
@@ -536,8 +569,26 @@ class KernelManager:
         # the kernel's allocation IS where the promoted blocks ran
         self.store.update_job(job_id, manifest=manifest,
                               sched_handle=k["handle"])
+        # terminal receipt: "terminal state implies a receipt exists"
+        # must hold for promoted jobs too — both run_inventory doors
+        # refused before (no receipt written, no jobs/<jid> sandbox to
+        # scan live; aba2). Synthesized from the promoted artifacts we
+        # just collected: {path, bytes} rows, no mtime (we did not stat
+        # — honest absence over a fabricated timestamp), no scaffold
+        # (promoted artifacts are user files by construction). The
+        # BYTES stay reachable through the manifest's refs
+        # (data_fetch) and, while the kernel sandbox lives, through the
+        # KERNEL target's run_file_* — the receipt is knowledge.
+        self.store.put_run_inventory(
+            job_id, k["site"],
+            [{"path": e["path"], "bytes": e.get("bytes")}
+             for e in entries],
+            truncated=False, total=len(entries))
+        self.store.emit("run.inventoried", target=job_id, site=k["site"],
+                        files=len(entries), total=len(entries))
         self.store.emit("kernel.promoted", kernel=kernel_id, job_id=job_id,
-                        blocks=blocks)
+                        blocks=blocks,
+                        **({"label": label} if label else {}))
         self.store.audit_log(None, "kernel.promote", site=k["site"],
                              command=f"{kernel_id} blocks={blocks}")
         return manifest

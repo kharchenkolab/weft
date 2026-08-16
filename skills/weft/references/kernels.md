@@ -107,3 +107,9 @@ Interactive sessions want SHORT walltimes and a restart, not a day hold.
   set); R auto-prints visible top-level values (console semantics);
   julia shows the last non-nothing value. No print/cat needed to see
   a value.
+
+- `kernel_start(env_id=...)` auto-realizes a SOLVED env (watch
+  realize.* events on a cold site) — never pre-run a placebo task.
+- `kernel_promote(k, blocks, label="phase 9")`: label the minted job
+  (defaults to the kernel's label; never identity). Promoted jobs have
+  a run_inventory receipt; fetch bytes via the manifest's refs.

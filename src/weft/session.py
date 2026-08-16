@@ -263,17 +263,14 @@ class SessionManager:
                     f"env {base_env_id} is not realized on {adapter.name}",
                     stage="realize",
                     hints={"suggestion": "run any task with it there first"})
-            from .realize import ensure_realization
+            from .realize import ensure_realization, runner_pack_tools
             ensure_realization(
                 base_env_id, env_row, adapter, self.store,
                 caps=(site_row or {}).get("capabilities"),
                 site_config=(site_row or {}).get("config"),
-                pack_tools={"pixi_pack": self.runner.pixi_pack,
-                            "cas": self.runner.cas,
-                            "transfers": self.runner.transfers,
-                            "solvers": self.envman.solvers,
-                            "store": self.store,
-                            "dataman": self.runner.dataman})
+                pack_tools=runner_pack_tools(self.runner,
+                                             self.envman.solvers,
+                                             self.store))
         session_id = "ses_" + uuid.uuid4().hex[:10]
         rel = f"sessions/{session_id}"
         # a home for kernels/sidecars now, the prefix later (on demand)

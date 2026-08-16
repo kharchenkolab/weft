@@ -790,6 +790,16 @@ one Solver class + one registry entry (`solvers.default_solvers`).
 
 ### Kernels (incremental interactive execution)
 
+A solved env auto-realizes at `kernel_start` (weft's errand, like
+`session_start` and `task_submit` — `realize.*` events narrate a slow
+first realize). `kernel_promote(kernel_id, blocks, label=)` labels the
+minted job row (defaults to the kernel's label; display only, never
+identity) and records a terminal `run_inventory` receipt synthesized
+from the promoted artifacts — "terminal state implies a receipt"
+holds for promoted jobs too; the bytes stay reachable through the
+manifest's refs and, while the kernel sandbox lives, the KERNEL
+target's `run_file_*`.
+
 ```python
 k = w.kernel_start("beamlab", "python", env_id=env_id)["kernel_id"]
 w.kernel_exec(k, "grid = load_grid()")            # state persists

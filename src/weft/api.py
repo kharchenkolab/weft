@@ -1808,7 +1808,9 @@ class Weft:
                      label: str = "",
                      session_id: str | None = None,
                      capture: str = "transcript") -> dict:
-        """lang: "python" | "r" | "julia" (case-insensitive). resources=
+        """lang: "python" | "r" | "julia" (case-insensitive). A solved
+        env auto-realizes on the site (realize.* events narrate; same
+        door session_start uses) — no env_realize round-trip. resources=
         {"gpus": 1, "partition": "gpu"} on a scheduler site holds a node
         allocation and runs the kernel INSIDE it — live interactive
         analysis on a GPU node; no ports, the shared filesystem is the
@@ -1878,13 +1880,18 @@ class Weft:
         except WeftError as e:
             return e.to_dict()
 
-    def kernel_promote(self, kernel_id: str, blocks: list[int]) -> dict:
+    def kernel_promote(self, kernel_id: str, blocks: list[int],
+                       label: str = "") -> dict:
         """Promote successful kernel blocks into the record: a manifest
         with reproducibility="transcript" — the full ordered transcript
         (replayable) plus the blocks' artifacts as content-addressed
-        outputs. Explicit and honestly labeled; the default doctrine
-        (re-run as a task for "task"-grade reproducibility) is unchanged."""
-        return self.kernels.promote(kernel_id, blocks, dataman=self.dataman)
+        outputs, and a terminal run_inventory receipt. label names the
+        minted job row (defaults to the kernel's own label; display
+        only, never identity). Explicit and honestly labeled; the
+        default doctrine (re-run as a task for "task"-grade
+        reproducibility) is unchanged."""
+        return self.kernels.promote(kernel_id, blocks, dataman=self.dataman,
+                                    label=label)
 
     def kernel_stop(self, kernel_id: str) -> dict:
         """Stop the kernel process and settle retention pins. The

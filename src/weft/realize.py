@@ -699,6 +699,16 @@ def _build_prefix(
     adapter.write_file(f"{rel}/activate.sh", activate.encode())
 
 
+def runner_pack_tools(runner, solvers, store) -> dict:
+    """THE pack_tools assembly for attach-verbs that realize on behalf
+    of the caller (session_start's 'realizing the base is weft's errand'
+    doctrine, now shared with kernel_start) — one owner, so the two
+    interactive doors cannot drift."""
+    return {"pixi_pack": runner.pixi_pack, "cas": runner.cas,
+            "transfers": runner.transfers, "solvers": solvers,
+            "store": store, "dataman": runner.dataman}
+
+
 def _build_jobs_cap(store, site: str) -> int:
     """Source-build parallelism cap for this site: min(8, policy
     max_build_cores if set). The shell side takes min(cap, nproc) at run
