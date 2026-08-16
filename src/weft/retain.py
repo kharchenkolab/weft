@@ -82,15 +82,22 @@ def storage_facts(config: dict) -> dict:
 
 # every file weft itself writes into a run sandbox — the CONTRACT that
 # lets a host split "what the run produced" from weft's plumbing without
-# guessing from names (weft-ui ask). Kept next to the writers: runner
-# (cmd.sh/activate.sh/inputs.tsv/ingest.tsv/ns), shim job-start
-# (runner.sh/log/pid*/exit_code/wall_s/rusage), kernel drivers
-# (driver.*, blocks/NNNN.{code,out,err,rc} — but blocks/*.artifacts/**
-# is $WEFT_BLOCK_DIR: USER files).
+# guessing from names (weft-ui ask). The writers are SPREAD OUT — the
+# runner (cmd.sh/activate.sh/inputs.tsv/ingest.tsv/ns/node), the shim
+# script (runner.sh/log/pid*/pid.epoch/exit_code/wall_s/rusage), kernel
+# machinery (driver.*, kernel.stop, blocks/NNNN.{code,out,err,rc} —
+# but blocks/*.artifacts/** is $WEFT_BLOCK_DIR: USER files) — and
+# "kept next to the writers" failed as a drift defense twice (node and
+# pid.epoch shipped unflagged and rendered as retainable files on
+# aba2's Run cards; kernel.stop was caught by the test, not by anyone).
+# The contract is now held by tests/integration/test_scaffold_drift.py,
+# which enumerates REAL jobdirs — a new dropping breaks it the day it
+# lands. Add the name HERE and the writer note above.
 _SCAFFOLD_EXACT = {
     "cmd.sh", "activate.sh", "inputs.tsv", "ingest.tsv", "ns",
-    "runner.sh", "log", "log.err", "pid", "pid.real", "exit_code",
-    "wall_s", "rusage", "driver.py", "driver.R", "driver.jl",
+    "runner.sh", "log", "log.err", "pid", "pid.real", "pid.epoch",
+    "exit_code", "wall_s", "rusage", "node",
+    "driver.py", "driver.R", "driver.jl", "kernel.stop",
 }
 
 
