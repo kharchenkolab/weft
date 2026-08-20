@@ -13,8 +13,10 @@ discard and forget alike.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -23,9 +25,20 @@ import time
 from pathlib import Path
 
 from .errors import WeftError
+from .fileio import sha256_shell
 
 TERMINAL_JOB = ("DONE", "FAILED", "CANCELLED")
 TERMINAL_KERNEL = ("stopped", "died")
+
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def _sha256_local(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def storage_facts(config: dict) -> dict:
@@ -125,6 +138,25 @@ class RetainManager:
         self.adapters = adapters
         self.workspace = Path(workspace)
         self.cas = cas          # workspace CAS (record_only checks)
+        # one capture writer per target IN THIS PROCESS: the retained
+        # row is INSERT OR REPLACE, so a second retain racing a live
+        # capture thread is two writers on one record. Row state can't
+        # be the guard — reconcile() legitimately resumes queued/
+        # inflight rows a dead process left behind. Cross-process
+        # double-capture stays unguarded (same trust level as before).
+        self._active: set[str] = set()
+        self._active_lock = threading.Lock()
+
+    def _claim(self, target: str) -> bool:
+        with self._active_lock:
+            if target in self._active:
+                return False
+            self._active.add(target)
+            return True
+
+    def _release(self, target: str) -> None:
+        with self._active_lock:
+            self._active.discard(target)
 
     # -- target facts -------------------------------------------------------
 
@@ -150,7 +182,6 @@ class RetainManager:
         if kind == "kernel" and state in TERMINAL_KERNEL:
             return
         if kind == "kernel":     # live kernel: completed-block dirs only
-            import re
             bad, checked = [], {}
             for e in selected:
                 m = re.match(r"blocks/(\d{4})\.artifacts/", e["path"])
@@ -287,7 +318,8 @@ class RetainManager:
     def retain(self, target: str, include=None, exclude=None,
                dest: str | None = None, max_gb: float | None = None,
                label: str = "", background: bool = True,
-               headroom_gb: float = 20.0, layout: str = "target") -> dict:
+               headroom_gb: float = 20.0, layout: str = "target",
+               settle: str = "end") -> dict:
         if label and len(label) > 200:
             raise WeftError("task.invalid", "label max 200 chars",
                             stage="infra")
@@ -299,97 +331,181 @@ class RetainManager:
                             f"site {site!r} not registered", stage="infra",
                             hints={"suggestion": "register_site first — "
                                                  "this is not an outage"})
-        # the placement decision is made NOW — a pin on a no-durable
-        # site must ask its question at retain time, not at settlement
-        place = self._placement(target, site, jobdir_rel, dest, label,
-                                layout, adapter)
-        location, in_place = place["location"], place["in_place"]
-        selection = {"include": include, "exclude": exclude, "dest": dest,
-                     "max_gb": max_gb, "headroom_gb": headroom_gb,
-                     "layout": layout}
-        selected = self._select(self._scan(adapter, jobdir_rel),
-                                include, exclude)
+        snapshot = settle == "now"
+        prev = self.store.get_retained(target)
+        if not self._claim(target):
+            raise WeftError(
+                "state.conflict",
+                f"a capture for {target} is already in flight in this "
+                f"process", stage="staging", retryable=True,
+                hints={"suggestion": "wait for retain.done/retain.failed "
+                                     "(or poll retained_runs) and call "
+                                     "again"})
+        handed = False
+        try:
+            # the placement decision is made NOW — a pin on a no-durable
+            # site must ask its question at retain time, not at settlement
+            place = self._placement(target, site, jobdir_rel, dest, label,
+                                    layout, adapter)
+            location, in_place = place["location"], place["in_place"]
+            selection = {"include": include, "exclude": exclude,
+                         "dest": dest, "max_gb": max_gb,
+                         "headroom_gb": headroom_gb, "layout": layout,
+                         **({"settle": "now"} if snapshot else {})}
+            selected = self._select(self._scan(adapter, jobdir_rel),
+                                    include, exclude)
 
-        if not self._is_finished(kind, row):
-            # LIVE target. Completed-block-only selections settle now
-            # (immutable by protocol); anything else — INCLUDING files
-            # that don't exist yet ("retain the eventual complete
-            # file") — becomes a PIN: decide now, settle at run end.
-            immediate_ok = False
-            if selected and place["mode"] != "mark":
-                try:
-                    self._guard_finished(kind, row, selected, adapter)
-                    immediate_ok = True
-                except WeftError:
-                    pass
-            if not immediate_ok:
+            if not self._is_finished(kind, row) and not snapshot:
+                # LIVE target. Completed-block-only selections settle now
+                # (immutable by protocol); anything else — INCLUDING files
+                # that don't exist yet ("retain the eventual complete
+                # file") — becomes a PIN: decide now, settle at run end.
+                immediate_ok = False
+                if selected and place["mode"] != "mark":
+                    try:
+                        self._guard_finished(kind, row, selected, adapter)
+                        immediate_ok = True
+                    except WeftError:
+                        pass
+                if not immediate_ok:
+                    if prev and prev["state"] == "done" and \
+                            (json.loads(prev.get("selection") or "{}")
+                             ).get("settle") == "now":
+                        # the row would REPLACE a deliberate snapshot;
+                        # settlement would then overwrite the banked
+                        # bytes with end-state bytes, silently
+                        raise WeftError(
+                            "retain.keep_exists",
+                            f"{target} has a settled snapshot keep; a "
+                            f"pin would hide it until run end and its "
+                            f"settlement would overwrite the banked "
+                            f"bytes", stage="staging",
+                            hints={"levers": {
+                                "recapture": "run_retain(..., "
+                                             "settle='now') again — a "
+                                             "new capture, drift stays "
+                                             "honest via the digests",
+                                "release": "run_forget(target=...) "
+                                           "first, then pin"}})
+                    self.store.put_retained(target, site, label or None,
+                                            location, in_place, 0, 0,
+                                            state="pinned-pending",
+                                            selection=selection,
+                                            moved=place["moved"])
+                    self.store.emit("retain.pinned", target=target,
+                                    site=site, matched_now=len(selected),
+                                    **({"label": label} if label else {}))
+                    return {"target": target, "state": "pinned-pending",
+                            "matched_now": len(selected),
+                            "moved": place["moved"],
+                            "location": {"site": site if in_place
+                                         else "@workspace",
+                                         "path": location},
+                            "note": "settled when the run ends (stop/"
+                                    "death/completion); run_forget "
+                                    "cancels the pin"}
+
+            live = not self._is_finished(kind, row)
+            if not selected:
+                raise WeftError(
+                    "data.missing",
+                    "selection matched no files", stage="staging",
+                    hints={"include": include, "exclude": exclude,
+                           **({"note": "settle='now' captures only bytes "
+                                       "that exist now; the default "
+                                       "retain pins for capture at run "
+                                       "end"} if snapshot and live
+                              else {})})
+            # settle="now" honesty bookkeeping: the caller asserted
+            # "these are done" — literal asks with nothing behind them
+            # are NEWS (reported), never a silent residual pin; a
+            # replaced pending pin will not settle, say so.
+            not_yet = self._literal_misses(include, selected) \
+                if snapshot else []
+            pin_replaced = bool(snapshot and prev
+                                and prev["state"] == "pinned-pending")
+            total = sum(e["bytes"] for e in selected)
+
+            if place["mode"] == "mark":
+                # retention2.md: the sandbox IS durable — pin, move
+                # nothing. No budgets (zero new bytes), no background
+                # (instant).
                 self.store.put_retained(target, site, label or None,
-                                        location, in_place, 0, 0,
-                                        state="pinned-pending",
-                                        selection=selection,
-                                        moved=place["moved"])
-                self.store.emit("retain.pinned", target=target, site=site,
-                                matched_now=len(selected),
+                                        location, in_place,
+                                        len(selected), total,
+                                        state="done", selection=selection,
+                                        moved=False)
+                self.store.update_retained(target, method="mark")
+                extras = {}
+                if snapshot:
+                    extras = self._snapshot_finalize(
+                        target, site, adapter, jobdir_rel, selected,
+                        location, in_place, True, not_yet, pin_replaced)
+                self._sidecar_into(adapter, jobdir_rel, target, site,
+                                   selected, snapshot=snapshot)
+                self._link_keeps(target, kind, row, site, selected,
+                                 location, True, False)
+                self.store.emit("retain.marked", target=target, site=site,
+                                files=len(selected), bytes=total,
+                                **extras,
                                 **({"label": label} if label else {}))
-                return {"target": target, "state": "pinned-pending",
-                        "matched_now": len(selected),
-                        "moved": place["moved"],
-                        "location": {"site": site if in_place
-                                     else "@workspace", "path": location},
-                        "note": "settled when the run ends (stop/death/"
-                                "completion); run_forget cancels the pin"}
+                return {"target": target, "files": len(selected),
+                        "bytes": total, "moved": False, "in_place": True,
+                        "state": "done",
+                        "location": {"site": site, "path": location},
+                        "note": "durable root: marked in place — nothing "
+                                "moved; paths stay valid",
+                        **extras,
+                        **({"label": label} if label else {})}
 
-        if not selected:
-            raise WeftError("data.missing",
-                            "selection matched no files", stage="staging",
-                            hints={"include": include, "exclude": exclude})
-        total = sum(e["bytes"] for e in selected)
-
-        if place["mode"] == "mark":
-            # retention2.md: the sandbox IS durable — pin, move nothing.
-            # No budgets (zero new bytes), no background (instant).
+            self._check_budgets(total, len(selected), max_gb, headroom_gb,
+                                location, in_place)
             self.store.put_retained(target, site, label or None, location,
                                     in_place, len(selected), total,
-                                    state="done", selection=selection,
-                                    moved=False)
-            self.store.update_retained(target, method="mark")
-            self._sidecar_into(adapter, jobdir_rel, target, site, selected)
-            self._link_keeps(target, kind, row, site, selected,
-                             location, True, False)
-            self.store.emit("retain.marked", target=target, site=site,
-                            files=len(selected), bytes=total,
-                            **({"label": label} if label else {}))
+                                    state="queued", selection=selection,
+                                    moved=True)
+
+            cap_extras: dict = {}       # sync captures hand their
+                                        # honesty fields back (unstable,
+                                        # digests); background ones
+                                        # publish them on retain.done
+
+            def work():
+                try:
+                    got = self._capture(
+                        target, kind, row, jobdir_rel, adapter, site,
+                        selected, location, in_place, label,
+                        snapshot=snapshot, not_yet=not_yet,
+                        pin_replaced=pin_replaced)
+                    if got:
+                        cap_extras.update(got)
+                finally:
+                    self._release(target)
+
+            if background:
+                handed = True
+                threading.Thread(target=work, daemon=True).start()
+                state = "queued"
+            else:
+                handed = True
+                work()
+                state = self.store.get_retained(target)["state"]
             return {"target": target, "files": len(selected),
-                    "bytes": total, "moved": False, "in_place": True,
-                    "state": "done",
-                    "location": {"site": site, "path": location},
-                    "note": "durable root: marked in place — nothing "
-                            "moved; paths stay valid",
+                    "bytes": total, "moved": True,
+                    "location": {"site": site if in_place
+                                 else "@workspace", "path": location},
+                    "in_place": in_place, "state": state,
+                    **({"settle": "now"} if snapshot else {}),
+                    **({"not_yet": not_yet} if not_yet else {}),
+                    **({"pin_replaced": True,
+                        "note": "replaced a pending pin — its "
+                                "settlement will not run"}
+                       if pin_replaced else {}),
+                    **cap_extras,
                     **({"label": label} if label else {})}
-
-        self._check_budgets(total, len(selected), max_gb, headroom_gb,
-                            location, in_place)
-        self.store.put_retained(target, site, label or None, location,
-                                in_place, len(selected), total,
-                                state="queued", selection=selection,
-                                moved=True)
-
-        def work():
-            self._capture(target, kind, row, jobdir_rel, adapter, site,
-                          selected, location, in_place, label)
-
-        if background:
-            threading.Thread(target=work, daemon=True).start()
-            state = "queued"
-        else:
-            work()
-            state = self.store.get_retained(target)["state"]
-        return {"target": target, "files": len(selected), "bytes": total,
-                "moved": True,
-                "location": {"site": site if in_place else "@workspace",
-                             "path": location},
-                "in_place": in_place, "state": state,
-                **({"label": label} if label else {})}
+        finally:
+            if not handed:
+                self._release(target)
 
     def _check_budgets(self, total, nfiles, max_gb, headroom_gb,
                        location, in_place) -> None:
@@ -415,8 +531,103 @@ class RetainManager:
                            "suggestion": "narrow the selection or lower "
                                          "policy headroom deliberately"})
 
+    def _snapshot_finalize(self, target, site, adapter, jobdir_rel,
+                           selected, location, in_place, local_like,
+                           not_yet, pin_replaced) -> dict:
+        """settle='now' honesty pass, ONE owner for both landing modes
+        (mark and capture): digest the KEEP (the drift ledger), re-stat
+        the SOURCE (weft cannot verify the caller's "these are done" —
+        it detects the tear instead), flag and announce what moved.
+        Mutates `selected` entries; returns the extra result/event
+        fields."""
+        digests_ok = self._snapshot_digests(adapter, selected, location,
+                                            in_place, local_like)
+        changed = self._recheck_stability(adapter, jobdir_rel, selected)
+        if changed:
+            self.store.emit(
+                "retain.unstable", target=target, site=site,
+                paths=changed[:20],
+                note="source bytes moved during capture — the keep "
+                     "holds a point-in-time copy; entries are flagged "
+                     "changed_during_capture")
+        out = {"settle": "now"}
+        if changed:
+            out["unstable"] = changed[:20]
+        if not digests_ok:
+            out["digests"] = "unavailable"
+        if not_yet:
+            out["not_yet"] = not_yet
+        if pin_replaced:
+            out["pin_replaced"] = True
+        return out
+
+    def _snapshot_digests(self, adapter, selected, location, in_place,
+                          local_like) -> bool:
+        """sha256 each KEEP file (what was actually kept) into its
+        entry. Site-resident keeps hash in one batched shell — order
+        carries identity, no filename parsing; transferred keeps hash
+        locally. Broken site tooling => the entry keeps NO digest and
+        the caller reports digests unavailable: a landed capture never
+        fails over its ledger, and no fallback identity is minted
+        (data._require_digest doctrine, soft form)."""
+        try:
+            if in_place or local_like:
+                lines = []
+                for e in selected:
+                    q = shlex.quote(f"{location}/{e['path']}")
+                    lines.append(f"h=$({sha256_shell(q)}); "
+                                 f"printf '%s\\n' \"${{h%% *}}\"")
+                r = adapter.run_cmd("\n".join(lines), timeout=3600)
+                got = (r.out or "").splitlines()
+                if r.rc != 0 or len(got) != len(selected):
+                    return False
+                ok = True
+                for e, h in zip(selected, got):
+                    if _HEX64.fullmatch(h.strip()):
+                        e["sha256"] = h.strip()
+                    else:
+                        ok = False
+                return ok
+            ok = True
+            for e in selected:
+                try:
+                    e["sha256"] = _sha256_local(Path(location) / e["path"])
+                except OSError:
+                    ok = False
+            return ok
+        except Exception:   # noqa: BLE001 — the ledger is best-effort,
+            return False    # its ABSENCE is reported, never invented
+
+    def _recheck_stability(self, adapter, jobdir_rel, selected) -> list:
+        """Post-capture compensating check for settle='now': re-stat
+        the SOURCE. A (bytes, mtime) that moved — or a path that
+        vanished — flags the entry; the keep stays (the bytes landed),
+        the flag and the retain.unstable event make the tear loud."""
+        try:
+            now = {e["path"]: (e["bytes"], e["mtime"])
+                   for e in self._scan(adapter, jobdir_rel)}
+        except WeftError:
+            return []       # source unreachable mid-check: no verdict
+        changed = []
+        for e in selected:
+            if now.get(e["path"]) != (e["bytes"], e["mtime"]):
+                e["changed_during_capture"] = True
+                changed.append(e["path"])
+        return changed
+
+    @staticmethod
+    def _literal_misses(include, selected) -> list:
+        """Literal includes (files OR directories-as-units) with no
+        selected path behind them — the one owner for both settlement's
+        pin_missing and settle='now''s not_yet."""
+        return [p for p in (include or [])
+                if not any(ch in p for ch in "*?[")
+                and not any(e["path"] == p or e["path"].startswith(
+                    p.rstrip("/") + "/") for e in selected)]
+
     def _capture(self, target, kind, row, jobdir_rel, adapter, site,
-                 selected, location, in_place, label) -> None:
+                 selected, location, in_place, label, snapshot=False,
+                 not_yet=None, pin_replaced=False) -> None:
         """Place + sidecar + row update, with honest failure. Runs on
         the caller's thread (immediate work()) or a settlement hook."""
         local_like = adapter.__class__.__name__ == "LocalAdapter" or \
@@ -438,8 +649,15 @@ class RetainManager:
                         raise
                     time.sleep(backoff)
                     backoff = min(backoff * 2, 30.0)
+            extras = {}
+            if snapshot:
+                extras = self._snapshot_finalize(
+                    target, site, adapter, jobdir_rel, selected,
+                    location, in_place, local_like, not_yet or [],
+                    pin_replaced)
             self._sidecar(kind, row, target, site, label, selected,
-                          location, in_place, method, adapter)
+                          location, in_place, method, adapter,
+                          snapshot=snapshot)
             self.store.update_retained(target, state="done",
                                        method=method, files=len(selected),
                                        nbytes=total)
@@ -447,8 +665,9 @@ class RetainManager:
                              location, in_place, True)
             self.store.emit("retain.done", target=target, site=site,
                             files=len(selected), bytes=total,
-                            method=method, location=location,
+                            method=method, location=location, **extras,
                             **({"label": label} if label else {}))
+            return extras
         except WeftError as e:
             self.store.update_retained(target, state="failed",
                                        error=json.dumps(e.to_dict()))
@@ -467,7 +686,9 @@ class RetainManager:
         the state-machine guard is theirs, not re-checked here. Literal
         pinned paths that never materialized are reported, honestly,
         while the rest capture."""
-        try:
+        if not self._claim(target):
+            return          # a capture is already in flight — its
+        try:                # writer owns the row; settlement bows out
             prow = self.store.get_retained(target)
             if not prow or prow["state"] != "pinned-pending":
                 return
@@ -483,10 +704,7 @@ class RetainManager:
             # (e.g. a .zarr): present when any selected path IS it or
             # lives under it — else a captured directory would still
             # report pin_missing (found by the aba viewer questions)
-            missing = [p for p in (include or [])
-                       if not any(ch in p for ch in "*?[")
-                       and not any(e["path"] == p or e["path"].startswith(
-                           p.rstrip("/") + "/") for e in selected)]
+            missing = self._literal_misses(include, selected)
             if missing:
                 self.store.emit("retain.pin_missing", target=target,
                                 paths=missing,
@@ -528,6 +746,8 @@ class RetainManager:
                                 error="internal.error", detail=repr(e))
             except Exception:
                 pass
+        finally:
+            self._release(target)
 
     # -- placement ----------------------------------------------------------
 
@@ -995,22 +1215,25 @@ class RetainManager:
                     "target": target, "rel": e["path"],
                     "site": site if in_place else "@workspace",
                     "path": keep_path,
-                    "bytes": e["bytes"], "mtime": e["mtime"]}})
+                    "bytes": e["bytes"], "mtime": e["mtime"],
+                    **({"sha256": e["sha256"]}
+                       if e.get("sha256") else {})}})
         except Exception:   # noqa: BLE001 — LINK is opportunistic
             pass
 
     def _sidecar_into(self, adapter, jobdir_rel, target, site,
-                      selected) -> None:
+                      selected, snapshot=False) -> None:
         """Sidecar for a MARKED keep: written into the jobdir itself —
         the directory self-describes without weft, at its own path."""
         kind, row, _ = self._target_row(target)
         retained = self.store.get_retained(target) or {}
         self._sidecar(kind, row, target, site, retained.get("label"),
                       selected, adapter.path(jobdir_rel), True, "mark",
-                      adapter)
+                      adapter, snapshot=snapshot)
 
     def _sidecar(self, kind, row, target, site, label, selected,
-                 location, in_place, method, adapter) -> None:
+                 location, in_place, method, adapter,
+                 snapshot=False) -> None:
         manifest = (row.get("manifest") or {}) if kind == "job" else {}
         doc = {
             "schema": "weft-run:v1",
@@ -1018,13 +1241,20 @@ class RetainManager:
             "label": label or None,
             "retained_at": time.time(),
             "method": method,
+            **({"settle": "now"} if snapshot else {}),
             "node": manifest.get("node"),
             "env_id": (row.get("task") or {}).get("env")
             if kind == "job" else row.get("env_id"),
             "command": (row.get("task") or {}).get("command")
             if kind == "job" else f"[kernel {target} transcript in "
                                   f"workspace store]",
-            "files": [{k: e[k] for k in ("path", "bytes", "mtime")}
+            # bytes/mtime are SCAN-time observations; an entry flagged
+            # changed_during_capture says the source moved after them
+            "files": [{**{k: e[k] for k in ("path", "bytes", "mtime")},
+                       **({"sha256": e["sha256"]}
+                          if e.get("sha256") else {}),
+                       **({"changed_during_capture": True}
+                          if e.get("changed_during_capture") else {})}
                       for e in selected],
         }
         body = json.dumps(doc, indent=1).encode()

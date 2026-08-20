@@ -17,6 +17,7 @@ from pathlib import Path
 from .adapters.base import SiteAdapter
 from .cas import LocalCAS, StagingPlan, staging_plan
 from .errors import WeftError
+from .fileio import sha256_shell
 from .ids import canonical_json, sha256_bytes
 from .preview import preview_for
 from .store import Store
@@ -122,7 +123,7 @@ class DataManager:
                             stage="staging",
                             hints={"detail": (probe.err or probe.out)[-200:]})
         r = adapter.run_cmd(
-            f"h=$(sha256sum {q} 2>/dev/null || shasum -a 256 {q}); "
+            f"h=$({sha256_shell(q)}); "
             f"m=$(stat -c %Y {q} 2>/dev/null || stat -f %m {q}); "
             f"printf '%s %s %s' \"${{h%% *}}\" "
             f"\"$(wc -c < {q} | tr -d ' ')\" \"$m\"",
@@ -436,7 +437,7 @@ class DataManager:
         q = _sh.quote(keep["path"])
         r = adapter.run_cmd(
             f"[ -f {q} ] || exit 9; "
-            f"h=$(sha256sum {q} 2>/dev/null || shasum -a 256 {q}); "
+            f"h=$({sha256_shell(q)}); "
             f"[ \"${{h%% *}}\" = {digest} ] || exit 8; "
             f"mkdir -p {_sh.quote(blob_dir)} && "
             f"([ -f {_sh.quote(blob_dir + '/' + digest)} ] || "

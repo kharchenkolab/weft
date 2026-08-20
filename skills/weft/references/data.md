@@ -66,6 +66,25 @@ w.run_retain(target, include=["figs/**"], label="proj-9")
                                        # (scaffold stays out). LIVE run →
                                        # PIN: decision now, settled at
                                        # stop/death/completion.
+w.run_retain(target, include=[...], settle="now")
+                                       # "these are DONE, keep them, the
+                                       # run keeps living": captures the
+                                       # CURRENT bytes immediately (no
+                                       # block attribution needed — days-
+                                       # long kernels' root files land
+                                       # durable NOW), per-file sha256 in
+                                       # the sidecar, source re-statted
+                                       # after capture (a moved file =>
+                                       # changed_during_capture flag +
+                                       # retain.unstable event, never
+                                       # silent). Nothing pins: literal
+                                       # asks matching nothing return as
+                                       # not_yet. Repeat = new capture.
+                                       # A later default-lane PIN over a
+                                       # settled snapshot refuses
+                                       # (retain.keep_exists) — settling
+                                       # it would clobber banked bytes;
+                                       # run_forget first, or re-snapshot.
 w.retained_runs(label="proj-9")        # the catalog: what's kept, WHERE
 w.run_file_stat(t, rel); w.run_file_read(t, rel)
                                        # the (run, relpath) KEY — resolves

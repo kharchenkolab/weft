@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .adapters.base import SiteAdapter
 from .errors import WeftError
+from .fileio import sha256_shell
 from .ids import ENVID_SCHEME
 from .store import Store
 
@@ -1549,9 +1550,7 @@ def _build_squashfs(
     have = ""
     if adapter.file_exists(f"{content}/pixi.lock"):
         r0 = adapter.run_cmd(
-            f"sha256sum {shlex.quote(adapter.path(content))}/pixi.lock "
-            f"2>/dev/null || shasum -a 256 "
-            f"{shlex.quote(adapter.path(content))}/pixi.lock 2>/dev/null",
+            sha256_shell(f"{shlex.quote(adapter.path(content))}/pixi.lock"),
             timeout=300)
         if r0.rc != 0 or not (r0.out or "").strip():
             # unknown ≠ mismatch: a probe that CANNOT verify must never
@@ -1605,8 +1604,7 @@ def _build_squashfs(
             "env.realize_failed", "mksquashfs failed on site",
             stage="realize", hints={"log_tail": (r.err or r.out)[-1500:]})
     meta = adapter.run_cmd(
-        f"h=$(sha256sum {shlex.quote(img)} 2>/dev/null || "
-        f"shasum -a 256 {shlex.quote(img)}); "
+        f"h=$({sha256_shell(shlex.quote(img))}); "
         f"printf '%s %s' \"${{h%% *}}\" \"$(wc -c < {shlex.quote(img)} | tr -d ' ')\"",
         timeout=600)
     parts = meta.out.strip().split()

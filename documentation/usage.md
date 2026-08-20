@@ -159,6 +159,20 @@ site's one storage fact, `durable`:
   (background transfer home, progress events) or the call refuses
   with `retain.no_durable` and the three levers in its hints.
 
+On a LIVE run the default retain records a PIN (captured when the run
+settles — the caller usually means the eventual complete file). When
+the files are already final but the run keeps living (a days-long
+kernel whose root files no block can claim), `settle="now"` captures
+the CURRENT bytes immediately: per-file sha256 lands in the sidecar
+(the drift ledger), and the source is re-statted after placement — a
+file that moved during capture is flagged `changed_during_capture`
+with a `retain.unstable` event, never silently. Nothing is pinned on
+this lane; literal includes that match nothing come back as `not_yet`,
+and repeating the call is a new capture, not an error. A default-lane
+pin over a settled snapshot refuses (`retain.keep_exists`) because its
+settlement would overwrite the banked bytes — `run_forget` first, or
+snapshot again.
+
 `run_forget` is the INVERSE of retain: it removes what retain created
 (the pin always; copies only where a move made them) — unmarking
 deletes nothing. `run_discard` alone destroys sandbox bytes, and on a

@@ -2254,11 +2254,16 @@ class Weft:
         for row in self.store.retained_where(state="queued") + \
                 self.store.retained_where(state="inflight"):
             sel = _json.loads(row.get("selection") or "{}")
+            # resume re-drives the SAME selection — dropping stored
+            # knobs (max_gb was lost here once) makes the resumed
+            # capture a different ask than the recorded one
             self.run_retain(row["target"], include=sel.get("include"),
                             exclude=sel.get("exclude"),
                             dest=sel.get("dest"),
+                            max_gb=sel.get("max_gb"),
                             label=row["label"] or "", background=True,
-                            layout=sel.get("layout") or "target")
+                            layout=sel.get("layout") or "target",
+                            settle=sel.get("settle") or "end")
             actions.append({"retain": row["target"],
                             "action": "resume-retain"})
         return actions
@@ -2434,7 +2439,7 @@ class Weft:
                    exclude: list[str] | None = None,
                    dest: str | None = None, max_gb: float | None = None,
                    label: str = "", background: bool = True,
-                   layout: str = "target") -> dict:
+                   layout: str = "target", settle: str = "end") -> dict:
         """Keep chosen files from a run as PLAIN FILES — in
         <workspace>/runs/<target>/ (background transfer for remote
         sites), or in place under the site's declared retain.dir.
@@ -2446,9 +2451,22 @@ class Weft:
         (.weft-run.json) carries run-level provenance. `label` groups
         several targets into one host-side unit; layout="label" nests
         the retained tree as runs/<label>/<target>/ so it mirrors the
-        host's own run structure."""
+        host's own run structure.
+
+        settle="now" is the caller's assertion "these are done": it
+        captures the CURRENT bytes immediately — live run or not, block
+        attribution or not — records per-file sha256 in the sidecar
+        (the drift ledger), and re-stats the source after placement
+        (a file that moved is flagged changed_during_capture + a
+        retain.unstable event — never silent). Nothing is pinned:
+        literal includes that match nothing come back as `not_yet`.
+        Repeating it is a new capture, not an error. The default
+        (settle="end") remains the lane for "retain the eventual
+        complete file"."""
+        settle = _vocab(settle, ("end", "now"), "settle mode") or "end"
         return self.retains.retain(target, include, exclude, dest, max_gb,
-                                   label, background, layout=layout)
+                                   label, background, layout=layout,
+                                   settle=settle)
 
     def run_file_stat(self, target: str, rel: str | None = None,
                       rels: list[str] | None = None) -> dict:

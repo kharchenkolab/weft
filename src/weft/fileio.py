@@ -21,6 +21,15 @@ RANGE_CAP_DEFAULT = 16 << 20        # 16 MiB per call — a transport tier
                                     # bounds ONE call, never the file
 
 
+def sha256_shell(qpath: str) -> str:
+    """The one shell recipe for hashing a file on a site (coreutils
+    sha256sum, perl shasum fallback). `qpath` arrives ALREADY quoted.
+    Output is the tool's raw line — callers take `${h%% *}` and must
+    validate hex64 (data._require_digest doctrine: a real hash or a
+    loud absence, never a fallback identity)."""
+    return f"sha256sum {qpath} 2>/dev/null || shasum -a 256 {qpath}"
+
+
 def range_cap(default: int = RANGE_CAP_DEFAULT) -> int:
     """WEFT_RANGE_READ_CAP is read PER CALL (an env var honored only
     before import is a silent no-op for embedders); malformed values
