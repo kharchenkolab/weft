@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 from .errors import WeftError
-from .fileio import sha256_shell
+from .fileio import sha256_batch_shell
 
 TERMINAL_JOB = ("DONE", "FAILED", "CANCELLED")
 TERMINAL_KERNEL = ("stopped", "died")
@@ -572,19 +572,26 @@ class RetainManager:
         (data._require_digest doctrine, soft form)."""
         try:
             if in_place or local_like:
-                lines = []
-                for e in selected:
-                    q = shlex.quote(f"{location}/{e['path']}")
-                    lines.append(f"h=$({sha256_shell(q)}); "
-                                 f"printf '%s\\n' \"${{h%% *}}\"")
-                r = adapter.run_cmd("\n".join(lines), timeout=3600)
-                got = (r.out or "").splitlines()
-                if r.rc != 0 or len(got) != len(selected):
-                    return False
+                # ONE hashing process per chunk (a fork per file is the
+                # aba2-measured spawn tax); rows match back by PATH so a
+                # vanished file is an honest absence, never a shifted
+                # attribution
+                by_rel: dict = {}
+                for i in range(0, len(selected), 500):
+                    chunk = selected[i:i + 500]
+                    qs = " ".join(shlex.quote(f"{location}/{e['path']}")
+                                  for e in chunk)
+                    r = adapter.run_cmd(sha256_batch_shell(qs),
+                                        timeout=3600)
+                    for line in (r.out or "").splitlines():
+                        parts = line.split(None, 1)
+                        if len(parts) == 2 and _HEX64.fullmatch(parts[0]):
+                            by_rel[parts[1].strip()] = parts[0]
                 ok = True
-                for e, h in zip(selected, got):
-                    if _HEX64.fullmatch(h.strip()):
-                        e["sha256"] = h.strip()
+                for e in selected:
+                    h = by_rel.get(f"{location}/{e['path']}")
+                    if h:
+                        e["sha256"] = h
                     else:
                         ok = False
                 return ok
@@ -756,14 +763,19 @@ class RetainManager:
         src_root = adapter.path(jobdir_rel)
         if in_place or local_like:
             # same machine as the files (site-side or local): the
-            # discovered chain — reflink -> hardlink -> copy
-            script = [f"set -e; mkdir -p {shlex.quote(location)}"]
+            # discovered chain — reflink -> hardlink -> copy. Dirs are
+            # deduped up front (one mkdir per unique dir, not per file
+            # — the per-file fork class), chunked under ARG_MAX
+            dirs = sorted({os.path.dirname(f"{location}/{e['path']}")
+                           for e in selected} | {location})
+            script = ["set -e"]
+            for i in range(0, len(dirs), 500):
+                script.append("mkdir -p " + " ".join(
+                    shlex.quote(d) for d in dirs[i:i + 500]))
             for e in selected:
                 s = shlex.quote(f"{src_root}/{e['path']}")
                 d = shlex.quote(f"{location}/{e['path']}")
-                dd = shlex.quote(os.path.dirname(f"{location}/{e['path']}"))
                 script.append(
-                    f"mkdir -p {dd}; "
                     f"cp -c {s} {d} 2>/dev/null || "
                     f"cp --reflink=always {s} {d} 2>/dev/null || "
                     f"ln -f {s} {d} 2>/dev/null || cp -p {s} {d}")

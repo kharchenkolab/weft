@@ -30,6 +30,21 @@ def sha256_shell(qpath: str) -> str:
     return f"sha256sum {qpath} 2>/dev/null || shasum -a 256 {qpath}"
 
 
+def sha256_batch_shell(qpaths: str) -> str:
+    """The multi-file sibling: one process hashes the whole (already
+    quoted, space-joined) list — the per-file variant is a fork per
+    file (~1.4ms of pure spawn each; the aba2 list-tree measurement).
+    Tool selection is by PRESENCE (if/else), never the single-file
+    recipe's `||`: there a partial failure (one vanished file, rc!=0)
+    would re-run the whole batch through the fallback tool and emit
+    duplicate lines. Output is one 'HASH  PATH' line per surviving
+    file; callers match by PATH, not by order, so vanished files
+    become honest absences."""
+    return (f"if command -v sha256sum >/dev/null 2>&1; "
+            f"then sha256sum {qpaths} 2>/dev/null; "
+            f"else shasum -a 256 {qpaths} 2>/dev/null; fi")
+
+
 def range_cap(default: int = RANGE_CAP_DEFAULT) -> int:
     """WEFT_RANGE_READ_CAP is read PER CALL (an env var honored only
     before import is a silent no-op for embedders); malformed values

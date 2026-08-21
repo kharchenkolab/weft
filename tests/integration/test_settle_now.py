@@ -233,6 +233,28 @@ def test_snapshot_replaces_pending_pin_with_note(w):
     assert (dest / "c.txt").read_text() == "now-bytes"  # banked, kept
 
 
+def test_multi_file_snapshot_digests_batch(w):
+    """The digest pass is ONE hashing process per chunk, matched back
+    by path — spaces in names must survive the batch parse and every
+    file must get its own digest."""
+    k = w.kernel_start("local", "python")["kernel_id"]
+    assert w.kernel_exec(
+        k, "open('a.txt', 'w').write('alpha')\n"
+           "open('b name.txt', 'w').write('beta-content')\n"
+           "open('c.txt', 'w').write('gamma')", timeout=60)["rc"] == 0
+    out = w.run_retain(k, include=["a.txt", "b name.txt", "c.txt"],
+                       dest="@workspace", background=False, settle="now")
+    assert out["state"] == "done" and "digests" not in out
+    sidecar = json.loads(
+        (Path(out["location"]["path"]) / ".weft-run.json").read_text())
+    by = {f["path"]: f["sha256"] for f in sidecar["files"]}
+    assert by == {
+        "a.txt": hashlib.sha256(b"alpha").hexdigest(),
+        "b name.txt": hashlib.sha256(b"beta-content").hexdigest(),
+        "c.txt": hashlib.sha256(b"gamma").hexdigest()}
+    w.kernel_stop(k)
+
+
 def test_digest_tooling_failure_is_soft_and_honest(w):
     """Broken site sha256 tooling: the capture stands, the entry gets
     NO digest (never a fallback identity), the caller sees

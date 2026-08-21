@@ -5,7 +5,10 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=10  # v10: runner re-anchors cwd after sourced
+WEFT_SHIM_VERSION=11  # v11: list-tree/hash-tree batched stat+hash
+                      #      (per-file fork loops were 31-88x the cost;
+                      #      WEFT_TREE_BATCH=0 forces the old loops)
+                      # v10: runner re-anchors cwd after sourced
                       #      activation/prelude (exit record safety)
                       # v9: read-from --with-size (atomic SIZE/ABSENT);
                       #     read-multi (batched member reads)
@@ -468,7 +471,17 @@ cmd_head() {
 # path, bytes, mtime[, sha256]. Stat-only by default (an inventory
 # receipt, not an integrity pass); hashes only files <= the threshold
 # when asked. Total count on stderr as '#total <n>' for truncation
-# honesty. Paths with newlines are skipped by construction (find|read).
+# honesty. Paths with newlines are skipped by construction (find|line
+# splits); a TAB-carrying name cannot ride a TSV row — it used to
+# GARBLE the row and kill the consumer's parse — so those are excluded
+# and counted on stderr as '#skipped_malformed <n>'. Stat-only rows
+# come from ONE batched stat per few hundred paths: the per-file loop
+# was two forks per file (~1.4ms of pure spawn each — 2.6s vs 0.03s
+# measured on 930 files; every run-card open and every collect paid
+# it). A file vanishing mid-walk DROPS its row (no phantom `0 0`).
+# A batch that returns NOTHING for a non-empty list falls back to the
+# per-file loop (broken stat must not read as an empty tree), and
+# WEFT_TREE_BATCH=0 forces that fallback (site debugging lever).
 cmd_list_tree() {
     root=""; hash_under=0; maxn=5000
     while [ $# -gt 0 ]; do
@@ -497,24 +510,53 @@ cmd_list_tree() {
     [ -d "$root" ] || { echo "list-tree: no such dir: $root" >&2; exit 2; }
     root=$(cd "$root" && pwd)
     if stat -c %s "$root" >/dev/null 2>&1; then st=gnu; else st=bsd; fi
-    total=$(cd "$root" && find . -type f 2>/dev/null | wc -l | tr -d ' ')
-    printf '#total %s\n' "$total" >&2
+    tab=$(printf '\t')
+    lt="${TMPDIR:-/tmp}/weft-lt.$$"
     ( cd "$root" && find . -type f 2>/dev/null | sed 's|^\./||' \
-        | LC_ALL=C sort | head -n "$maxn" ) | \
-    while IFS= read -r p; do
-        full="$root/$p"
+        | LC_ALL=C sort ) > "$lt.all" || true
+    total=$(wc -l < "$lt.all" | tr -d ' ')
+    printf '#total %s\n' "$total" >&2
+    grep -v "$tab" "$lt.all" > "$lt.ok" || true
+    skipped=$((total - $(wc -l < "$lt.ok" | tr -d ' ')))
+    if [ "$skipped" -gt 0 ]; then
+        printf '#skipped_malformed %s\n' "$skipped" >&2
+    fi
+    head -n "$maxn" "$lt.ok" > "$lt.cap"
+    : > "$lt.rows"
+    if [ "$hash_under" -eq 0 ] && [ "${WEFT_TREE_BATCH:-1}" != 0 ] \
+        && [ -s "$lt.cap" ]; then
         if [ "$st" = gnu ]; then
-            set -- $(stat -c '%s %Y' "$full" 2>/dev/null || echo 0 0)
+            ( cd "$root" && tr '\n' '\000' < "$lt.cap" \
+              | xargs -0 stat -c "%n$tab%s$tab%Y$tab" 2>/dev/null ) \
+              > "$lt.rows" || true
         else
-            set -- $(stat -f '%z %m' "$full" 2>/dev/null || echo 0 0)
+            ( cd "$root" && tr '\n' '\000' < "$lt.cap" \
+              | xargs -0 stat -f '%N%t%z%t%m%t' 2>/dev/null ) \
+              > "$lt.rows" || true
         fi
-        sz=${1:-0}; mt=${2:-0}
-        h=""
-        if [ "$hash_under" -gt 0 ] && [ "$sz" -le "$hash_under" ]; then
-            h=$(sha256_of "$full")
-        fi
-        printf '%s\t%s\t%s\t%s\n' "$p" "$sz" "$mt" "$h"
-    done
+    fi
+    if [ -s "$lt.rows" ]; then
+        cat "$lt.rows"
+    else
+        # hash-under lane, batch disabled, or the honesty fallback
+        # (non-empty list, zero batched rows: broken stat, not an
+        # empty tree) — the original per-file loop
+        while IFS= read -r p; do
+            full="$root/$p"
+            if [ "$st" = gnu ]; then
+                set -- $(stat -c '%s %Y' "$full" 2>/dev/null || echo 0 0)
+            else
+                set -- $(stat -f '%z %m' "$full" 2>/dev/null || echo 0 0)
+            fi
+            sz=${1:-0}; mt=${2:-0}
+            h=""
+            if [ "$hash_under" -gt 0 ] && [ "$sz" -le "$hash_under" ]; then
+                h=$(sha256_of "$full")
+            fi
+            printf '%s\t%s\t%s\t%s\n' "$p" "$sz" "$mt" "$h"
+        done < "$lt.cap"
+    fi
+    rm -f "$lt.all" "$lt.ok" "$lt.cap" "$lt.rows"
 }
 
 # hash-tree --root R [--rel] : TSV of kind, path, exec, size, sha256/target
@@ -537,6 +579,68 @@ cmd_hash_tree() {
     fi
     [ -d "$root" ] || { echo "hash-tree: no such file or directory: $root" >&2; exit 2; }
     root=$(cd "$root" && pwd)
+    if [ "${WEFT_TREE_BATCH:-1}" = 0 ]; then
+        hash_tree_slow "$root"
+        return 0
+    fi
+    # file facts from batched passes (stat sizes, sha256 hashes; each
+    # ~4 per-file forks before — 8.4s vs 0.3s measured on 930 files at
+    # every output collection), zipped by LINE NUMBER: both tools emit
+    # one line per argument in argument order. These are IDENTITY rows
+    # (tree refs are minted from them), so alignment is verified by
+    # row counts and ANY mismatch (a file vanishing mid-walk) falls
+    # back to the per-file loop — a misaligned zip would attribute one
+    # file's hash to another's path. Exec bit stays the [ -x ] builtin
+    # (fork-free) so its semantics cannot drift from the old loop.
+    if stat -c %s "$root" >/dev/null 2>&1; then st=gnu; else st=bsd; fi
+    tab=$(printf '\t')
+    ht="${TMPDIR:-/tmp}/weft-ht.$$"
+    ( cd "$root" && find . -type f | sed 's|^\./||' | LC_ALL=C sort ) \
+        > "$ht.f" || true
+    : > "$ht.rows"
+    if [ -s "$ht.f" ]; then
+        if [ "$st" = gnu ]; then
+            ( cd "$root" && tr '\n' '\000' < "$ht.f" \
+              | xargs -0 stat -c '%s' 2>/dev/null ) > "$ht.sz" || true
+        else
+            ( cd "$root" && tr '\n' '\000' < "$ht.f" \
+              | xargs -0 stat -f '%z' 2>/dev/null ) > "$ht.sz" || true
+        fi
+        if command -v sha256sum >/dev/null 2>&1; then
+            ( cd "$root" && tr '\n' '\000' < "$ht.f" \
+              | xargs -0 sha256sum 2>/dev/null ) > "$ht.hs" || true
+        else
+            ( cd "$root" && tr '\n' '\000' < "$ht.f" \
+              | xargs -0 shasum -a 256 2>/dev/null ) > "$ht.hs" || true
+        fi
+        # first token only; strip the GNU escape marker ("\HASH  name"
+        # for backslash/newline names) so the hash stays a hash
+        awk '{sub(/^\\/,"",$1); print $1}' "$ht.hs" > "$ht.h"
+        nf=$(wc -l < "$ht.f" | tr -d ' ')
+        if [ "$(wc -l < "$ht.sz" | tr -d ' ')" != "$nf" ] || \
+           [ "$(wc -l < "$ht.h" | tr -d ' ')" != "$nf" ]; then
+            rm -f "$ht.f" "$ht.sz" "$ht.hs" "$ht.h" "$ht.rows"
+            hash_tree_slow "$root"
+            return 0
+        fi
+        paste "$ht.f" "$ht.sz" "$ht.h" | \
+        while IFS="$tab" read -r p sz h; do
+            x=0; [ -x "$root/$p" ] && x=1
+            printf 'file\t%s\t%s\t%s\t%s\n' "$p" "$x" "$sz" "$h"
+        done > "$ht.rows"
+    fi
+    ( cd "$root" && find . -type l | sed 's|^\./||' ) | \
+    while IFS= read -r p; do
+        printf 'link\t%s\t0\t0\t%s\n' "$p" "$(readlink "$root/$p")"
+    done >> "$ht.rows"
+    LC_ALL=C sort -t "$tab" -k2,2 "$ht.rows"
+    rm -f "$ht.f" "$ht.sz" "$ht.hs" "$ht.h" "$ht.rows"
+}
+
+# the original per-file walk: the batch's fallback (count mismatch,
+# WEFT_TREE_BATCH=0) and the conformance oracle the tests diff against
+hash_tree_slow() {
+    root=$1
     ( cd "$root" && find . \( -type f -o -type l \) | sed 's|^\./||' | LC_ALL=C sort ) | \
     while IFS= read -r p; do
         full="$root/$p"
