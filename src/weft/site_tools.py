@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -134,3 +136,59 @@ def ensure_site_tools(adapter, site_platform: str) -> dict:
         except WeftError as e:
             report[tool] = f"unavailable: {e.detail}"
     return report
+
+
+def tools_state(report: dict) -> str:
+    """ready = every tool verified runnable; partial = some; failed =
+    none. 'pushed but not runnable' and 'unavailable' are NOT ok."""
+    ok = [v for v in report.values()
+          if v == "ok" or str(v).startswith("pushed for ")]
+    if len(ok) == len(report) and report:
+        return "ready"
+    return "partial" if ok else "failed"
+
+
+# one tools push per (site, root) per process: the retained-capture
+# claim pattern (retain._claim) — a register-time background push and a
+# realize-time ensure racing each other were two ~50 MB writers. The
+# owner runs the ensure and writes the terminal row + event; joiners
+# WAIT and re-read the row. Cross-process races stay byte-safe (unique
+# tmp + hash-verify + atomic mv publish identical content).
+_INFLIGHT: dict = {}
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def ensure_site_tools_once(adapter, site_platform: str, store,
+                           site: str) -> dict:
+    """Claimed ensure: never raises (tooling must not break the calling
+    verb — registration or a build); the row and the site.tools event
+    carry the honest outcome either way."""
+    key = (site, getattr(adapter, "root", ""))
+    with _INFLIGHT_LOCK:
+        ev = _INFLIGHT.get(key)
+        owner = ev is None
+        if owner:
+            ev = threading.Event()
+            _INFLIGHT[key] = ev
+    if not owner:
+        ev.wait(timeout=1800)
+        row = store.get_site(site) or {}
+        return (row.get("tools") or {}).get("detail") or {}
+    try:
+        try:
+            report = ensure_site_tools(adapter, site_platform)
+            store.set_site_tools(site, {"state": tools_state(report),
+                                        "detail": report,
+                                        "at": time.time()})
+            store.emit("site.tools", site=site, **report)
+        except Exception as e:  # noqa: BLE001 — outcome goes to the row
+            report = {"error": str(e)[:200]}
+            store.set_site_tools(site, {"state": "failed",
+                                        "detail": report,
+                                        "at": time.time()})
+            store.emit("site.tools", site=site, error=str(e)[:200])
+        return report
+    finally:
+        with _INFLIGHT_LOCK:
+            _INFLIGHT.pop(key, None)
+        ev.set()

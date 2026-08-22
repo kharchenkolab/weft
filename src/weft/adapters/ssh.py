@@ -399,11 +399,19 @@ class SSHAdapter(SiteAdapter):
     def _push_binary(self, local: Path, rel: str) -> None:
         digest = hashlib.sha256(local.read_bytes()).hexdigest()
         dest = self.path(rel)
+        # UNIQUE tmp: a background tools push and a realize-time ensure
+        # racing into one fixed ".tmp" interleave into a torn file —
+        # the hash check failed BOTH (fail-closed but spurious); unique
+        # tmps + atomic mv make concurrent pushes of identical content
+        # benign (non-blocking-tools round)
+        import uuid as _uuid
+        tmp = shlex.quote(f"{dest}.tmp.{_uuid.uuid4().hex[:8]}")
         r = self._run(
-            f"cat > {shlex.quote(dest)}.tmp && "
+            f"cat > {tmp} && "
             # busybox sha256sum has no --quiet; discard the OK lines instead
-            f"echo {digest}  {shlex.quote(dest)}.tmp | sha256sum -c - >/dev/null && "
-            f"chmod 755 {shlex.quote(dest)}.tmp && mv {shlex.quote(dest)}.tmp {shlex.quote(dest)}",
+            f"echo {digest}  {tmp} | sha256sum -c - >/dev/null && "
+            f"chmod 755 {tmp} && mv {tmp} {shlex.quote(dest)} || "
+            f"{{ rm -f {tmp}; exit 9; }}",
             input_bytes=local.read_bytes(), timeout=600,
         )
         if r.rc != 0:

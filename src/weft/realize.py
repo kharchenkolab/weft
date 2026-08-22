@@ -84,6 +84,40 @@ def module_prelude(modules: list[str], modules_init: str = "") -> str:
     return "\n".join(lines)
 
 
+def _ensure_tools_at_use(adapter, store, site_plat: str) -> None:
+    """Build-time tools invariant (non-blocking-tools round): a `ready`
+    row costs two file_exists round-trips per BUILD (noise against a
+    build); anything else — preparing (a live background push: JOIN
+    it), failed, partial, skipped, or a legacy NULL row — runs the
+    claimed ensure. If bin/pixi still isn't real afterwards, refuse
+    HERE with the levers, instead of letting `pixi install` die with
+    an unclassified log tail."""
+    if not hasattr(adapter, "_push_binary"):
+        return
+    row = store.get_site(adapter.name) or {}
+    if (row.get("tools") or {}).get("state") == "ready" \
+            and adapter.file_exists("bin/pixi") \
+            and adapter.file_exists("bin/pixi-unpack"):
+        return
+    from .site_tools import ensure_site_tools_once
+    ensure_site_tools_once(adapter, site_plat, store, adapter.name)
+    if not adapter.file_exists("bin/pixi"):
+        tools = (store.get_site(adapter.name) or {}).get("tools") or {}
+        raise WeftError(
+            "env.realize_failed",
+            f"site tools unavailable on {adapter.name}: bin/pixi could "
+            f"not be provisioned", stage="realize", retryable=True,
+            hints={"tools": tools.get("detail"),
+                   "levers": {
+                       "pixi_source": "re-register with pixi_source= "
+                                      "pointing at a binary for the "
+                                      "site's platform",
+                       "manual": f"place a {site_plat} pixi at "
+                                 f"{adapter.path('bin/pixi')}",
+                       "version": "WEFT_PIXI_VERSION overrides the "
+                                  "pinned release"}})
+
+
 def ensure_realization(
     env_id: str, env_row: dict, adapter: SiteAdapter, store: Store,
     *, caps: dict | None = None, site_config: dict | None = None,
@@ -279,6 +313,12 @@ def ensure_realization(
                                            site_config, caps=caps)
             if adopted:
                 return adopted
+
+        # every path from here BUILDS, and builds need bin/pixi (packed
+        # ones bin/pixi-unpack): registration may still be pushing them
+        # in the background — join it; a failed/interrupted/skipped push
+        # self-heals here (tool-less is legal AND self-healing)
+        _ensure_tools_at_use(adapter, store, site_plat)
 
         # shared roots (multiple users, one filesystem): in-process locks
         # don't reach across users — take a site-side lease around the build

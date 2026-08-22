@@ -395,6 +395,15 @@ w.register_site("beamlab", "ssh", {
 # site's own platform (cross-platform controllers just work; cache:
 # ~/.cache/weft/site-tools, override versions via WEFT_PIXI_VERSION)
 #
+# the ~50 MB tools push runs in the BACKGROUND by default: register_site
+# returns after shim+probe (seconds); the site row's `tools` state goes
+# preparing → ready|partial|failed (sites_list/describe show it, a
+# site.tools event fires on completion). Every mode is safe — the first
+# env build on the site ensures/joins/heals the tools itself, and
+# refuses with levers (pixi_source, WEFT_PIXI_VERSION, manual placement)
+# if they truly cannot be provisioned. tools="sync" blocks until pushed
+# (ready-on-return); tools="skip" defers entirely to first use.
+#
 # registration narrates progress as bootstrap.step events (bootstrap →
 # probe → tools → routes). probe_only=True bootstraps + probes and
 # registers NOTHING (check-before-commit; the shim — ~100KB — is still

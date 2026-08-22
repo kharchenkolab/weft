@@ -133,17 +133,30 @@ class LocalAdapter(SiteAdapter):
     def _push_binary(self, local: Path, rel: str) -> None:
         # same seam the ssh adapter exposes, so site-tools acquisition
         # (pixi/pixi-unpack for THIS platform) covers local sites too —
-        # a bare `pixi` on PATH has no pixi-unpack sibling to link
+        # a bare `pixi` on PATH has no pixi-unpack sibling to link.
+        # Unique tmp + atomic replace: concurrent pushes (background
+        # tools thread vs realize-time ensure) must never expose a
+        # missing or torn destination
+        import uuid as _uuid
         dst = self._root / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         if dst.exists():
-            dst.unlink()
+            try:
+                if os.path.samefile(local, dst):
+                    return       # already published via hardlink — done
+            except OSError:
+                pass
+        tmp = dst.parent / f"{dst.name}.tmp.{_uuid.uuid4().hex[:8]}"
         try:
-            os.link(local, dst)
+            os.link(local, tmp)
         except OSError:
             import shutil
-            shutil.copy2(local, dst)
-        dst.chmod(0o755)
+            shutil.copy2(local, tmp)
+        tmp.chmod(0o755)
+        os.replace(tmp, dst)
+        # rename(a, b) with a and b hardlinks to ONE inode is a POSIX
+        # no-op that leaves `a` behind (concurrent first-pushes hit it)
+        tmp.unlink(missing_ok=True)
 
     # -- job control ------------------------------------------------------
 

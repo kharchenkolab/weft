@@ -24,7 +24,13 @@ w.register_site("beamlab", "ssh", {
 # build+mount. capabilities.squashfs shows what the probe measured.
 #
 # registration narrates bootstrap.step events (bootstrap → probe →
-# tools → routes). Check a host BEFORE committing with
+# tools → routes) and returns after shim+probe (seconds): the ~50 MB
+# pixi/pixi-unpack push continues in the BACKGROUND — the site row's
+# `tools` state (sites_list/describe) goes preparing → ready, with a
+# site.tools event on completion. Using the site immediately is safe:
+# bare tasks never needed the tools, and the first env build joins or
+# self-heals the push (tools="sync" blocks until ready-on-return;
+# tools="skip" defers entirely). Check a host BEFORE committing with
 # register_site(..., probe_only=True): full capabilities, nothing
 # registered (the ~100KB shim is still written — a real probe needs it).
 # site_unregister(name) forgets a registration (site untouched; refuses

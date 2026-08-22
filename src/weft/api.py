@@ -263,13 +263,25 @@ class Weft:
         return adapter
 
     def register_site(self, name: str, kind: str, config: dict,
-                      probe_only: bool = False) -> dict:
+                      probe_only: bool = False,
+                      tools: str = "background") -> dict:
         """User-confirmed action (doc 05 §6): registering a site is always
         explicit. probe_only=True bootstraps and probes WITHOUT
         registering (no store row, no routes, no site tooling) — the
         wizard's check-before-commit. Honest caveat: the real probe needs
         the shim, so ~100KB is written under the configured root even
-        then (re-used by the eventual registration)."""
+        then (re-used by the eventual registration).
+
+        tools= controls the ~50 MB pixi/pixi-unpack push, the dominant
+        cost on a healthy network (measured: 33s of a 37s registration):
+        "background" (default) returns after shim+probe and pushes in a
+        background thread — the site row's `tools` state goes
+        preparing→ready|partial|failed and a site.tools event fires on
+        completion; "sync" blocks until pushed (ready-on-return);
+        "skip" defers entirely. Every mode is safe: the first build on
+        the site ensures/joins/heals the tools itself."""
+        tools = _vocab(tools, ("background", "sync", "skip"),
+                       "tools mode") or "background"
         from .retain import storage_facts
         storage = storage_facts(config)   # validates `durable` up front
         adapter = self._make_adapter(name, kind, config)
@@ -294,19 +306,34 @@ class Weft:
                             "register_site without probe_only to commit"}
         self.store.set_capabilities(name, caps)
         # the site needs pixi/pixi-unpack built for ITS platform; push the
-        # controller's copy when compatible, else fetch the pinned release
-        # (best-effort: bare tasks run without them; realize hints name this)
-        if hasattr(adapter, "_push_binary"):
+        # controller's copy when compatible, else fetch the pinned release.
+        # The push (~50 MB, 33s of a 37s registration measured) runs in
+        # the BACKGROUND by default — tool-less is legal AND self-healing:
+        # every build ensures/joins/heals via ensure_realization's hook
+        if hasattr(adapter, "_push_binary") and tools != "skip":
             from .realize import _site_platform
-            from .site_tools import ensure_site_tools
-            self.store.emit("bootstrap.step", site=name, step="tools",
-                            note="ensuring platform-correct pixi/pixi-unpack")
-            try:
-                tools = ensure_site_tools(adapter, _site_platform(caps))
-                self.store.emit("site.tools", site=name, **tools)
-            except Exception as e:  # never fail a registration on tooling
-                self.store.emit("site.tools", site=name,
-                                error=str(e)[:200])
+            from .site_tools import ensure_site_tools_once
+            plat = _site_platform(caps)
+            if tools == "sync":
+                self.store.emit("bootstrap.step", site=name, step="tools",
+                                note="ensuring platform-correct "
+                                     "pixi/pixi-unpack")
+                ensure_site_tools_once(adapter, plat, self.store, name)
+            else:
+                self.store.set_site_tools(name, {"state": "preparing",
+                                                 "at": time.time()})
+                self.store.emit("bootstrap.step", site=name, step="tools",
+                                note="preparing pixi/pixi-unpack in the "
+                                     "background (site.tools event on "
+                                     "completion)")
+                import threading as _threading
+                _threading.Thread(
+                    target=ensure_site_tools_once,
+                    args=(adapter, plat, self.store, name),
+                    daemon=True).start()
+        elif hasattr(adapter, "_push_binary"):
+            self.store.set_site_tools(name, {"state": "skipped",
+                                             "at": time.time()})
         self.store.audit_log("user", "site.register", site=name)
         self.store.emit("site.registered", site=name, site_kind=kind)
         if isinstance(storage.get("durable"), str):
@@ -335,7 +362,9 @@ class Weft:
                     self.site_route_probe(s, d)
                 except Exception:
                     pass
-        return {"site": name, "capabilities": caps, "storage": storage}
+        return {"site": name, "capabilities": caps, "storage": storage,
+                **({"tools": (self.store.get_site(name) or {}).get("tools")}
+                   if hasattr(adapter, "_push_binary") else {})}
 
     def sites_list(self) -> list[dict]:
         """Registered sites with health and headline capabilities —
@@ -350,6 +379,8 @@ class Weft:
                 "scheduler": (caps.get("scheduler") or {}).get("type"),
                 "internet": caps.get("internet"),
             }
+            if row.get("tools"):
+                entry["tools"] = row["tools"].get("state")
             from .policy import site_policy
             policy = site_policy(row)
             if policy:
@@ -2266,6 +2297,27 @@ class Weft:
                             settle=sel.get("settle") or "end")
             actions.append({"retain": row["target"],
                             "action": "resume-retain"})
+        # a tools push cut by process death left the row "preparing"
+        # forever — resume it (ensure-at-use remains the backstop when
+        # reconcile never runs). Joining an already-live claim in this
+        # process is harmless: the resume thread just waits it out.
+        for row in self.store.list_sites():
+            if (row.get("tools") or {}).get("state") != "preparing":
+                continue
+            adapter = self.adapters.get(row["name"])
+            if adapter is None or not hasattr(adapter, "_push_binary"):
+                continue
+            from .realize import _site_platform
+            from .site_tools import ensure_site_tools_once
+            import threading as _threading
+            _threading.Thread(
+                target=ensure_site_tools_once,
+                args=(adapter, _site_platform(row.get("capabilities")
+                                              or {}),
+                      self.store, row["name"]),
+                daemon=True).start()
+            actions.append({"site": row["name"],
+                            "action": "resume-tools"})
         return actions
 
     # -- garbage collection / retention ------------------------------------------

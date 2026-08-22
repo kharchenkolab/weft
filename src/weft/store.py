@@ -198,6 +198,13 @@ class Store:
         for col, ddl in _SESSION_MIGRATIONS:
             if col not in scols:
                 self._conn.execute(ddl)
+        stcols = {r[1] for r in self._conn.execute("PRAGMA table_info(sites)")}
+        if "tools" not in stcols:
+            # non-blocking site tools: queryable tools state — events
+            # narrate, the ROW remembers (a settings card must tell
+            # preparing from failed from ready after a controller
+            # restart). NULL = legacy row; first build converges it.
+            self._conn.execute("ALTER TABLE sites ADD COLUMN tools TEXT")
         ecols = {r[1] for r in self._conn.execute("PRAGMA table_info(envs)")}
         if "parent_env_id" not in ecols:
             self._conn.execute("ALTER TABLE envs ADD COLUMN parent_env_id TEXT")
@@ -745,6 +752,10 @@ class Store:
     def set_health(self, name: str, health: str) -> None:
         self._write("UPDATE sites SET health=? WHERE name=?", (health, name))
 
+    def set_site_tools(self, name: str, tools: dict) -> None:
+        self._write("UPDATE sites SET tools=? WHERE name=?",
+                    (_j(tools), name))
+
     def get_site(self, name: str) -> dict | None:
         r = self._row("SELECT * FROM sites WHERE name=?", (name,))
         if not r:
@@ -753,6 +764,7 @@ class Store:
             "name": r["name"], "kind": r["kind"], "config": json.loads(r["config"]),
             "capabilities": json.loads(r["capabilities"]) if r["capabilities"] else None,
             "health": r["health"], "probed_at": r["probed_at"],
+            "tools": json.loads(r["tools"]) if r["tools"] else None,
         }
 
     def list_sites(self) -> list[dict]:
