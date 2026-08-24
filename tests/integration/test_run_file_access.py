@@ -11,8 +11,12 @@ from weft.api import Weft
 @pytest.fixture
 def w(tmp_path, pixi_bin):
     w = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
+    # tools="sync": this file COUNTS run_cmd invocations — the default
+    # background tools push races the counting window under lane load
+    # (its --version probes landed in cmds; 3 != 1, once in ~3 lanes)
     w.register_site("local", "local", {"root": str(tmp_path / "site"),
-                                       "pixi_source": pixi_bin})
+                                       "pixi_source": pixi_bin},
+                    tools="sync")
     w.runner.poll_interval = 0.2
     return w
 
