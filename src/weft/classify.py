@@ -11,6 +11,9 @@ import re
 # ordered most-specific first: the primary signature is the earliest entry
 # here that matches anywhere in the tail; generic shapes come last
 _SIGNATURES: list[tuple[str, re.Pattern]] = [
+    # first: weft's own activation guard — the user command never ran,
+    # so every other signature would be a misattribution
+    ("activation-failed", re.compile(r"weft: activation did not take")),
     ("oom-killed", re.compile(r"\bKilled\b|Out [Oo]f [Mm]emory|MemoryError|oom-kill")),
     ("walltime", re.compile(r"DUE TO TIME LIMIT|CANCELLED AT .* DUE TO TIME")),
     ("cuda-error", re.compile(r"CUDA (error|out of memory)|cudaError")),

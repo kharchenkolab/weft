@@ -2,7 +2,36 @@
 
 from __future__ import annotations
 
+import shlex
+
 from .errors import WeftError
+
+
+def activation_guard_lines(env_id: str | None) -> list[str]:
+    """The activation CONTRACT (aba2 ask 5): consumers used to infer
+    "weft activated the env" from CONDA_PREFIX — pixi shell-hook
+    fallout anything in the chain can clobber, with no way to tell
+    "activation failed" from "submitted without an env". These lines
+    open cmd.sh for env-carrying runs: activation demonstrably took
+    (CONDA_PREFIX set, its bin real) => export WEFT_ENV_ID (weft's own
+    fact, compare against the task record) + WEFT_PREFIX; else exit 78
+    BEFORE user code — classified env.activation_failed, never a
+    user-code failure. Envless runs get no marker: absence + no env in
+    the task record = deliberately bare. Lives in cmd.sh, not
+    activate.sh: activate.sh is SOURCED by the runner shell, where an
+    exit would kill the runner before the exit record is written."""
+    if not env_id:
+        return []
+    return [
+        'if [ -n "$CONDA_PREFIX" ] && [ -d "$CONDA_PREFIX/bin" ]; then',
+        f"  export WEFT_ENV_ID={shlex.quote(env_id)}",
+        '  export WEFT_PREFIX="$CONDA_PREFIX"',
+        "else",
+        '  echo "weft: activation did not take '
+        '(CONDA_PREFIX=${CONDA_PREFIX:-unset})" >&2',
+        "  exit 78",
+        "fi",
+    ]
 
 
 def walltime_to_s(t: str) -> float | None:

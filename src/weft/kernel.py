@@ -230,9 +230,12 @@ class KernelManager:
             (self.runner.site_prelude(site)
              + "export PYTHONNOUSERSITE=1\n"
              + activate + "\n").encode())
+        from .runner_util import activation_guard_lines
+        guard = "\n".join(activation_guard_lines(env_id or ns_env_id))
         adapter.write_file(
             f"{jobdir_rel}/cmd.sh",
-            f"mkdir -p blocks\nexec {interp} {driver_file}\n".encode())
+            ((guard + "\n" if guard else "")
+             + f"mkdir -p blocks\nexec {interp} {driver_file}\n").encode())
         if (env_id or ns_env_id) \
                 and self.runner.ns_wrap_needed(env_id or ns_env_id, site):
             # the kernel's whole life runs inside one mount namespace;

@@ -34,6 +34,7 @@ from .placement import rank_sites
 from .policy import enforce_policy, site_policy, storage_env_vars
 from .poller import SitePoller, Watch
 from .realize import ensure_realization
+from .runner_util import activation_guard_lines
 from .store import Store
 from .task import Task
 
@@ -254,6 +255,8 @@ class JobRunner:
                 "note": f"one sbatch --array submission ({handle}); watch "
                         f"array.progress events"}
 
+    ACTIVATION_EXIT = 78     # cmd.sh's guard rc: activation didn't take
+
     def _ensure_env_for(self, task: Task, site: str,
                         job_id: str | None = None) -> tuple[str, dict]:
         """Realize the task's env on the site; -> (activation line, spec vars).
@@ -328,7 +331,13 @@ class JobRunner:
 
     def _cmd_lines(self, task: Task, spec_env_vars: dict, site: str,
                    job_id_expr: str) -> list[str]:
-        lines = [
+        # activation contract FIRST (aba2 ask 5): cmd.sh runs as a
+        # child of the runner shell that sourced activate.sh, so the
+        # check happens here — an exit inside SOURCED activate.sh would
+        # kill the runner before the exit record is written (a
+        # driverless hang, not a clean failure)
+        lines = activation_guard_lines(task.env)
+        lines += [
             # the control plane runs under LC_ALL=C (parseable tool
             # output); user jobs must NOT inherit it — a hard C locale
             # breaks unicode printing in user python (no PEP 538
@@ -941,6 +950,20 @@ class JobRunner:
                                    "kill happened during allocation — never "
                                    "size down toward it"},
                 )
+            if sig.get("signature") == "activation-failed":
+                # weft's own guard tripped: the USER COMMAND NEVER RAN —
+                # job.nonzero_exit would misattribute weft's activation
+                # failure to user code (code-by-meaning doctrine)
+                raise WeftError(
+                    "env.activation_failed",
+                    "environment activation did not take — the command "
+                    "never ran", stage="running", retryable=True,
+                    hints={"env": task.env, "log_tail": tail[-800:],
+                           "jobdir": adapter.path(jobdir_rel),
+                           "suggestion": "inspect activate.sh output in "
+                                         "the job log; a site_prelude or "
+                                         "module init that clobbers the "
+                                         "environment is the usual cause"})
             raise WeftError(
                 "job.nonzero_exit", f"command exited {exit_code}", stage="running",
                 hints={"exit_code": exit_code, "log_signature": sig,

@@ -398,6 +398,8 @@ def ensure_realization(
             # squashfs anywhere in the chain + userns available: the
             # spot-check mounts in a throwaway namespace (also the only
             # way when the mountpoint is admin-owned or on a parallel FS)
+            _post_link_check(env_id, adapter, rel, strategy, store,
+                             site_config)
             wrap = ""
             if ns_ok and (strategy.endswith("squashfs") or (
                     strategy == "overlay" and overlay_parent and "squashfs"
@@ -1254,6 +1256,68 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
         f"fi; true")
     return (f'export PYTHONPATH="{pylib}${{PYTHONPATH:+:$PYTHONPATH}}"\n'
             f'export PATH="{binw}:$PATH"')
+
+
+def _post_link_check(env_id: str, adapter, rel: str, strategy: str,
+                     store, site_config: dict | None) -> None:
+    """Staged-but-unrun conda post-link scripts mean conda-meta LIES:
+    pixi stages them and never runs them (deliberately — bioconductor
+    data packages' scripts DOWNLOAD unpinned content, which would also
+    break identity), so a package like bioconductor-genomeinfodbdata
+    records as installed while its payload does not exist and DESeq2
+    fails to load three steps later (aba2 ask 1: 'silent success is
+    the part that hurts'). Default REFUSE — any hit means the env was
+    already silently broken. Levers: site policy post_link:"warn"
+    accepts with a loud event; a post_install step that genuinely
+    delivers the payload removes the staged script as its
+    acknowledgment (the script IS the evidence — consuming it is the
+    honest signal the payload exists by other means). squashfs lane:
+    checked at the staging prefix inside its own build, not here (the
+    image's bin is unmounted at this point)."""
+    if strategy.endswith("squashfs"):
+        return
+    d = adapter.path(_bin_dir_rel(rel, strategy))
+    r = adapter.run_cmd(
+        f"ls {shlex.quote(d)}/.*-post-link.sh 2>/dev/null || true",
+        timeout=60)
+    scripts = [ln.strip() for ln in (r.out or "").splitlines()
+               if ln.strip().endswith("-post-link.sh")]
+    if not scripts:
+        return
+    pkgs = sorted({s.rsplit("/", 1)[-1][1:-len("-post-link.sh")]
+                   for s in scripts})
+    policy = ((site_config or {}).get("policy") or {}).get(
+        "post_link", "refuse")
+    if policy == "warn":
+        store.emit("realize.post_link_unrun", env_id=env_id,
+                   site=adapter.name, packages=pkgs)
+        return
+    # consume the ready marker a builder may already have written: the
+    # next attempt must re-check, never cache-hit past the refusal
+    adapter.run_cmd(f"rm -f {shlex.quote(adapter.path(rel))}/.weft-ready",
+                    timeout=30)
+    raise WeftError(
+        "env.post_link_scripts",
+        f"{len(pkgs)} package(s) stage conda post-link scripts that "
+        f"pixi does not run — conda-meta records them installed, but "
+        f"their payloads may not exist",
+        stage="realize",
+        hints={"packages": pkgs,
+               "scripts": [s.rsplit("/", 1)[-1] for s in scripts[:10]],
+               "levers": {
+                   "post_install": "add a post_install step that "
+                                   "performs the payload step with "
+                                   "PINNED content, ending with "
+                                   "`rm $PREFIX/bin/.<pkg>-post-link.sh`"
+                                   " — removing the script is the "
+                                   "acknowledgment",
+                   "accept": "site policy {\"post_link\": \"warn\"} "
+                             "realizes anyway and emits "
+                             "realize.post_link_unrun"},
+               "note": "running the scripts is deliberately not "
+                       "offered: several download unpinned content at "
+                       "install time, which would fork this EnvID's "
+                       "meaning between realizations"})
 
 
 def _bin_dir_rel(rel: str, strategy: str) -> str:

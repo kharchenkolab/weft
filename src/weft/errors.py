@@ -21,6 +21,8 @@ CODES = {
     "env.unsatisfiable_on_site": "spec needs something this site lacks; hints list alternative sites",
     "env.platform_mismatch": "environment locked for platforms that do not include this site's; hints name both and the spec fix",
     "env.evict_blocked": "overlay environments stack on this prefix; hints name them and the cascade lever",
+    "env.post_link_scripts": "the realized prefix stages conda post-link scripts pixi does not run — listed packages may be missing their payloads; hints carry the packages and the levers (post_install with acknowledgment, or site policy post_link:'warn')",
+    "env.activation_failed": "the job's environment activation did not take (CONDA_PREFIX absent/unusable after sourcing) — the user command never ran; not a user-code failure",
     "retain.no_durable": "the site declares no durable storage; hints carry the levers (dest='@workspace', durable=true, durable='/path')",
     "retain.keep_exists": "a settled snapshot keep exists for this run; a new pin would hide it and its settlement would overwrite the banked bytes — run_forget first, or re-capture with settle='now'",
     "env.unavailable_in_lanes": "no ranked lane could provide the request; hints.attempts carries each lane's typed verdict — each attempt names its own remedy",
