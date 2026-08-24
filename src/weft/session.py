@@ -1702,6 +1702,9 @@ class SessionManager:
                 if rlib_out:
                     fast_out["installed"]["cran"] = rlib_out["installed"]
                     fast_out["rlib"] = rlib_out["rlib"]
+                    for k in ("validated", "shadows_base"):
+                        if rlib_out.get(k):
+                            fast_out[k] = rlib_out[k]
                 return fast_out
             fallback_tail = (out or {}).get("detail")
         manifest = adapter.path(f"{s['location']}/pixi.toml")
@@ -1744,6 +1747,9 @@ class SessionManager:
         if rlib_out:
             out["installed"]["cran"] = rlib_out["installed"]
             out["rlib"] = rlib_out["rlib"]
+            for k in ("validated", "shadows_base"):
+                if rlib_out.get(k):
+                    out[k] = rlib_out[k]
         if clone_note:
             out["materialized_note"] = clone_note
         if upgrade_note:

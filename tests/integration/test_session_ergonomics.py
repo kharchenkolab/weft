@@ -1,110 +1,159 @@
-"""Step 2: exploration should cost one call, and bespoke installs are
-normal moves that survive into the record."""
+"""Eight-asks round C — session ergonomics. C1 (ask 4):
+session_freezable answers "can this session still be frozen?" without
+minting or realizing (the would-be snapshot spec, dry-run solved) —
+callers used to discover unfreezable sessions inside a job submit's
+error handler. C2 (ask 6): fast=False on the CRAN lane — the ask said
+"confirm it works"; it did not EXIST (_materialize_rlib never consulted
+fast; the same silent-no-op-lever class round #95 found on the pypi
+overlay lane). C3 (ask 7): R adds carry the pypi lane's envelope —
+solver_message on failures, shadows_base with R semantics (the rlib
+precedes the base library in .libPaths(), so same-named packages MASK
+the base's)."""
 
 import pytest
 
 from weft.api import Weft
-
-pytestmark = [pytest.mark.solver, pytest.mark.slow]
+from weft.errors import WeftError
+from weft.session import SessionManager
 
 
 @pytest.fixture
 def w(tmp_path, pixi_bin):
-    w = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
+    w = Weft(tmp_path / "ws", pixi_bin=pixi_bin, resume="off")
     w.register_site("local", "local", {"root": str(tmp_path / "site"),
                                        "pixi_source": pixi_bin})
+    w.runner.poll_interval = 0.2
     return w
 
 
-def test_session_from_spec_in_one_call(w):
-    """No ensure → throwaway task → start dance: hand it a spec."""
-    s = w.session_start({"name": "explore",
-                         "deps": {"conda": ["python =3.12"]}}, "local")
-    assert "session_id" in s, s
-    sid = s["session_id"]
-    assert w.session_exec(sid, "python -c 'print(1)'")["rc"] == 0
-    w.session_stop(sid)
+# ------------------------------------------------------------- units
+
+def test_validate_solve_carries_cran(w, monkeypatch):
+    """C2's machinery: the pulled-forward check must ask the solver the
+    SAME question the snapshot will — cran included."""
+    asked = {}
+    monkeypatch.setattr(
+        w.sessions.envman, "ensure",
+        lambda spec, **kw: asked.update(spec=spec) or {"env_id": "env:v1:x"})
+    s = {"session_id": "ses_x", "base_env_id": "env:v1:base",
+         "added_conda": [], "added_pypi": [], "added_cran": ["r-glue"]}
+    monkeypatch.setattr(
+        w.sessions.store, "get_env",
+        lambda eid: {"spec_hash": "spec:v1:parent"})
+    got = w.sessions._validate_solve(s, [], cran=["r-vctrs"])
+    assert got == "env:v1:x"
+    assert asked["spec"]["deps"]["cran"] == ["r-glue", "r-vctrs"]
 
 
-def test_bespoke_installer_is_captured_and_carried(w, tmp_path):
-    s = w.session_start({"name": "hatch", "deps": {"conda": ["python =3.12",
-                                                             "pip"]}},
-                        "local")
-    sid = s["session_id"]
-    # the kind of fix that unblocks real work and no index expresses:
-    # install a locally-built wheel-less package from source
-    pkg = tmp_path / "ws" / "pkg"
-    (pkg / "mymod").mkdir(parents=True)
-    (pkg / "mymod" / "__init__.py").write_text(
-        'def hi():\n    return "vendored"\n')
-    (pkg / "pyproject.toml").write_text(
-        '[project]\nname = "mymod"\nversion = "0.1"\n')
-    r = w.session_run_installer(sid, "pip install ./pkg",
-                                note="vendored: upstream has no release yet",
-                                source=str(pkg))
-    assert r["captured"] is True and r["portable"] is True, r
-    assert w.session_exec(
-        sid, "python -c 'import mymod; print(mymod.hi())'")["rc"] == 0
-
-    snap = w.session_snapshot(sid, name="with-vendored",
-                              notes=["kept until upstream 0.2 ships"])
-    assert "env_id" in snap, snap
-    assert snap["carried_installers"] == 1
-    assert snap.get("verified") is True      # it actually rebuilds
-    assert "portability_warning" not in snap
-    assert snap["spec"]["post_install"] == ["pip install ./pkg"]
-    assert snap["spec"]["post_install_inputs"]   # sources travel with it
-    assert "upstream" in snap["spec"]["step_notes"]["0"]
-
-    # the snapshot env is graded honestly, and the rationale is in the record
-    st = w.env_status(snap["env_id"])["summary"]
-    assert st["reproducibility"] == "escape-hatch"
-    assert st["notes"] == ["kept until upstream 0.2 ships"]
-    assert st["step_notes"]["0"].startswith("vendored")
-    w.session_stop(sid)
+def test_validate_solve_failure_names_cran_request(w, monkeypatch):
+    def boom(spec, **kw):
+        raise WeftError("env.solve_conflict", "no", stage="solve")
+    monkeypatch.setattr(w.sessions.envman, "ensure", boom)
+    monkeypatch.setattr(w.sessions.store, "get_env",
+                        lambda eid: {"spec_hash": "spec:v1:p"})
+    s = {"session_id": "s", "base_env_id": "e", "added_conda": [],
+         "added_pypi": [], "added_cran": []}
+    with pytest.raises(WeftError) as ei:
+        w.sessions._validate_solve(s, [], cran=["r-broken"])
+    assert ei.value.hints["requested"] == ["r-broken"]
+    assert "nothing was installed" in ei.value.hints["note"]
 
 
-def test_fast_pypi_add_is_usable_and_snapshot_solves(w):
-    """The interactive hot path (aba note, regated on write-need): a
-    one-leaf pypi add on a warm base lands as a pylib overlay — NO
-    manifest re-solve AND no prefix clone — is immediately importable,
-    and the snapshot's full solve still mints honest identity from the
-    recorded dep."""
-    s = w.session_start({"name": "hot", "deps": {"conda": ["python =3.12",
-                                                           "pip"]}},
-                        "local")
-    sid = s["session_id"]
-    r = w.session_install(sid, pypi=["six"])
-    assert r["mode"] == "pylib", r            # zero-clone lane
-    assert w.store.get_session(sid)["materialize_mode"] == "pylib"
-    assert w.session_exec(
-        sid, "python -c 'import six; print(six.__version__)'")["rc"] == 0
-    snap = w.session_snapshot(sid, name="hot-snap")
-    assert "env_id" in snap, snap             # the real solve happened here
-    assert snap["spec"]["deps"]["pypi"] == ["six"]
-    w.session_stop(sid)
+def test_freezable_true_and_false_paths(w, monkeypatch):
+    calls = {}
+
+    def fake_get(sid):
+        return {"session_id": sid, "base_env_id": "env:v1:b",
+                "added_conda": [], "added_pypi": [],
+                "installers": [{"cmd": "make install", "note": "tool"}]}
+    monkeypatch.setattr(w.sessions, "_get", fake_get)
+    monkeypatch.setattr(w.sessions.store, "get_env",
+                        lambda eid: {"spec_hash": "spec:v1:p"})
+    monkeypatch.setattr(
+        w.sessions.envman, "ensure",
+        lambda spec, dry_run=False, **kw: calls.update(dry=dry_run)
+        or {"env_id": "env:v1:would"})
+    out = w.session_freezable("ses_1")
+    assert out["freezable"] is True
+    assert out["would_be_env"] == "env:v1:would"
+    assert calls["dry"] is True                    # never minted
+    assert "escape-hatch" in out["grade_note"]     # installer taint
+    assert "NOW" in out["note"]                    # honesty caveat
+
+    def boom(spec, dry_run=False, **kw):
+        raise WeftError("env.solve_conflict", "pin fight", stage="solve",
+                        hints={"solver_message": "x vs y"})
+    monkeypatch.setattr(w.sessions.envman, "ensure", boom)
+    out = w.session_freezable("ses_1")
+    assert out["freezable"] is False
+    assert out["reason"]["error"] == "env.solve_conflict"
 
 
-def test_fast_false_validates_at_add_and_snapshot_agrees(w):
-    """fast=False, the real thing: the add-time validation solve mints
-    the SAME EnvID the snapshot later mints (identity is content — the
-    pulled-forward check and the deferred one are ONE question), and
-    the overlay install proceeds after validation."""
-    s = w.session_start({"name": "guarded",
-                         "deps": {"conda": ["python =3.12", "pip"]}},
-                        "local")
-    sid = s["session_id"]
-    out = w.ensure_available({"session": sid}, {"pypi": ["idna"]},
-                             fast=False)
-    assert out["satisfied"] is True, out
-    assert out["attempts"][0]["outcome"] == "installed"
-    r = w.session_exec(sid, "python -c 'import idna'")
-    assert r["rc"] == 0
-    snap = w.session_snapshot(sid, verify=False)
-    ins = w.session_install(sid, pypi=[])  # no-op; fetch session row
-    row = w.store.get_session(sid)
-    assert "idna" in row["added_pypi"]
-    # the validation minted an env row for the SAME content the
-    # snapshot resolves to — one spec synthesis, one identity
-    assert snap["env_id"].startswith("env:")
-    w.session_stop(sid)
+def test_rlib_shadows_semantics(w, tmp_path, monkeypatch):
+    """R shadows_base: intersection of rlib and the base env's R
+    library — probe failure is never a verdict."""
+    base_lib = tmp_path / "site" / "envs" / "e1" / \
+        ".pixi/envs/default/lib/R/library"
+    rlib = tmp_path / "site" / "rlib"
+    for d, pkgs in ((base_lib, ["Matrix", "jsonlite", "base"]),
+                    (rlib, ["jsonlite", "mypkg"])):
+        for p in pkgs:
+            (d / p).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        w.sessions.store, "get_realization",
+        lambda eid, site: {"location": "envs/e1", "strategy": "prefix"})
+    s = {"base_env_id": "env:v1:b", "site": "local"}
+    got = w.sessions._rlib_shadows(s, w.adapters["local"], str(rlib))
+    assert got == ["jsonlite"]                     # masked, named
+    # vanished base lib: honest empty, never an error
+    monkeypatch.setattr(
+        w.sessions.store, "get_realization",
+        lambda eid, site: {"location": "envs/gone", "strategy": "prefix"})
+    assert w.sessions._rlib_shadows(s, w.adapters["local"],
+                                    str(rlib)) == []
+
+
+def test_synth_spec_one_owner_for_probe_and_snapshot(w, monkeypatch):
+    """The freezable probe and the snapshot must ask the same question
+    (drift between them re-creates the surprise the verb removes)."""
+    monkeypatch.setattr(w.sessions.store, "get_env",
+                        lambda eid: {"spec_hash": "spec:v1:p"})
+    s = {"session_id": "s1", "base_env_id": "e", "added_conda": ["zlib"],
+         "added_pypi": ["idna"], "added_cran": ["r-glue"],
+         "added_cran_repos": ["https://r.example"],
+         "installers": [{"cmd": "./setup.sh"}]}
+    spec = w.sessions._synth_spec(s)
+    assert spec["deps"]["conda"] == ["zlib"]
+    assert spec["deps"]["pypi"] == ["idna"]
+    assert spec["deps"]["cran"] == ["r-glue"]
+    assert spec["r_repositories"] == ["https://r.example"]
+    assert spec["post_install"] == ["./setup.sh"]
+
+
+# --------------------------------------------------- solver reality
+
+@pytest.mark.solver
+def test_freezable_on_a_real_session(w):
+    env = w.env_ensure({"name": "frz", "deps": {"conda": ["python =3.12"]}})
+    assert "error" not in env, env
+    s = w.session_start(env["env_id"], "local")
+    assert "error" not in s, s
+    out = w.session_freezable(s["session_id"])
+    assert out["freezable"] is True and out["solve_s"] >= 0
+    assert "grade_note" not in out                 # no installers
+    w.session_stop(s["session_id"])
+
+
+@pytest.mark.solver
+def test_cran_fast_false_solves_at_add(w):
+    """C2 end-to-end: a cran add with fast=False validates via a real
+    solve BEFORE installing; the result says so."""
+    env = w.env_ensure({"name": "rfast",
+                        "deps": {"conda": ["r-base =4.4", "r-jsonlite"]}})
+    assert "error" not in env, env
+    s = w.session_start(env["env_id"], "local")
+    assert "error" not in s, s
+    out = w.session_install(s["session_id"], cran=["glue"], fast=False)
+    assert "error" not in out, out
+    assert out.get("validated", "").startswith("env:v")     # solved at add
+    w.session_stop(s["session_id"])

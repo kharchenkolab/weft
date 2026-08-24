@@ -1801,6 +1801,18 @@ class Weft:
         error. `notes` records the rationale."""
         return self.sessions.snapshot(session_id, name, notes, verify)
 
+    def session_freezable(self, session_id: str) -> dict:
+        """Can this session still be frozen? — answered WITHOUT minting
+        or realizing anything (the would-be snapshot spec, dry-run
+        solved). {freezable, would_be_env | reason, solve_s}; sessions
+        with captured installer steps answer freezable WITH a
+        grade_note (snapshot works; reproducibility caps at
+        escape-hatch). Honest caveat: this is a real solve (seconds)
+        and a statement about NOW — channels move between probe and
+        snapshot, so it reduces surprise, it cannot guarantee the
+        mint."""
+        return self.sessions.freezable(session_id)
+
     def session_stop(self, session_id: str) -> dict:
         """Stop the session and settle its bookkeeping. The scratch
         prefix is reclaimable afterwards; snapshot FIRST if the state
@@ -2827,6 +2839,7 @@ PUBLIC_TOOLS = [
     "env_evict", "site_footprint",
     "session_start", "session_exec", "session_install", "session_snapshot",
     "session_run_installer", "session_stop", "session_runtime",
+    "session_freezable",
     "ensure_available",
     "list_sessions",
     "kernel_start", "kernel_exec", "kernel_poll", "kernel_peek",

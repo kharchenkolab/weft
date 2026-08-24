@@ -497,6 +497,14 @@ w.session_exec(s["session_id"], "python -c 'import emcee'")   # probe
 w.session_install(s["session_id"], conda=["emcee"])           # FIRST mutation
                                                  # clones the prefix (seconds
                                                  # against a warm cache)
+w.session_freezable(s["session_id"])             # "can this still freeze?"
+                                                 # WITHOUT minting/realizing:
+                                                 # dry-run solve of the
+                                                 # would-be snapshot; a real
+                                                 # solve, a statement about
+                                                 # NOW. Installer-tainted
+                                                 # sessions: freezable + a
+                                                 # grade_note (escape-hatch).
 snap = w.session_snapshot(s["session_id"])       # minimal delta → real EnvID
 # re-run the final computation under snap["env_id"] → enters provenance
 ```

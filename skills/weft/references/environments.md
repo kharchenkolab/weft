@@ -237,6 +237,12 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   `session_exec`, `session_install(conda=[...])`,
   `session_run_installer(cmd, note=...)`; when it stabilizes,
   `session_snapshot(notes=[...])` → a real EnvID carrying whatever you did.
+  `session_freezable(id)` answers "can this still freeze?" WITHOUT the
+  mint (dry-run solve; honest: seconds, and a statement about NOW).
+  `fast=False` now solves at ADD TIME on the cran lane too (it silently
+  didn't before); R add failures carry `solver_message`, and R adds
+  report `shadows_base` — rlib packages MASKING same-named base-library
+  packages via .libPaths() order.
   Iterate freely here — that's what it's for. See "Adaptive moves" below.
 - **Reuse:** identical resolutions share EnvIDs; realizations re-adopt
   across workspaces from the site marker; `env_status(env_id)` shows the
