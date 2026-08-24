@@ -374,7 +374,8 @@ def ensure_realization(
                     # layers + post_install happen INSIDE the image build
                     marker_extra = _build_squashfs(
                         env_id, env_row, adapter, rel, modules,
-                        modules_init, caps, pack_tools or {}, store.emit)
+                        modules_init, caps, pack_tools or {}, store.emit,
+                        store=store, site_config=site_config)
                 elif strategy.endswith("packed"):
                     _build_packed(env_id, env_row, adapter, rel, modules,
                                   modules_init, caps, pack_tools or {})
@@ -1272,8 +1273,13 @@ def _post_link_check(env_id: str, adapter, rel: str, strategy: str,
     delivers the payload removes the staged script as its
     acknowledgment (the script IS the evidence — consuming it is the
     honest signal the payload exists by other means). squashfs lane:
-    checked at the staging prefix inside its own build, not here (the
-    image's bin is unmounted at this point)."""
+    the image's bin is unmounted at this call, so _build_squashfs runs
+    this check itself on the STAGING content before mksquashfs —
+    pinned by test_integrity_pair's every-build-lane conformance test.
+    (The first version of this docstring CLAIMED that call and it did
+    not exist — the consumer's published packs, the motivating
+    incident's own lane, realized clean around the check. A coverage
+    claim without a pinning test is that defect class.)"""
     if strategy.endswith("squashfs"):
         return
     d = adapter.path(_bin_dir_rel(rel, strategy))
@@ -1579,6 +1585,7 @@ def _build_squashfs(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str, caps: dict | None,
     pack_tools: dict, emit, staging_rel: str | None = None,
+    store=None, site_config: dict | None = None,
 ) -> dict:
     """One mounted image instead of ~100k files on the shared FS.
 
@@ -1693,6 +1700,16 @@ def _build_squashfs(
                     build_jobs=8)
     _stage_post_install_inputs(env_row, build, inner, pack_tools)
     _run_post_install(env_row, build, inner)
+    # post-link detection on the STAGING content, before it is squashed
+    # immutable — AFTER post_install (removing the staged script is the
+    # acknowledgment). This call was CLAIMED by a docstring and absent
+    # (consumer audit, 2026-08-24): published squashfs packs — the
+    # motivating incident's own lane — realized clean around the check.
+    # The staging layout follows the branch above: prefix or packed.
+    if store is not None:
+        _post_link_check(env_id, build, inner,
+                         "prefix" if internet else "packed",
+                         store, site_config)
 
     img = adapter.path(f"{rel}/image.sqfs")
     t0 = __import__("time").time()

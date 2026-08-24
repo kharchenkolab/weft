@@ -236,3 +236,36 @@ def test_real_channel_extends_unperturbed(w, tmp_path):
                     "python")
     assert _lock_entry(child_lock, "python") == p
     assert p["url"].startswith("https://")
+
+
+def test_channel_hint_rides_the_FAILURE(w, tmp_path):
+    """Gap-2 pin (consumer audit 2026-08-24): a bioconductor-* spec
+    without bioconda essentially ALWAYS fails to solve — the failure
+    is not an edge case of the hint's scenario, it IS the scenario.
+    The first wiring attached channel_hint only on success/cached
+    returns, where the problem it warns about had not occurred. The
+    hint must ride the env.solve_conflict the caller actually sees."""
+    chan = tmp_path / "chan-nh"
+    url = _mk_channel(chan, {"somepkg": [("1.0", "h0_0")]})
+    out = w.env_ensure({"name": "bio-no-bioconda", "channels": [url],
+                        "platforms": [_subdir()],
+                        "deps": {"conda": ["bioconductor-deseq2"]}})
+    assert out["error"] == "env.solve_conflict", out
+    hint = out["hints"].get("channel_hint")
+    assert hint, "the hint missed its own motivating scenario"
+    assert hint["packages"] == ["bioconductor-deseq2"]
+    assert "bioconda" in hint["fix"]
+
+
+@pytest.mark.solver
+def test_channel_hint_on_reporters_exact_transcript(w):
+    """The consumer's live check, replayed verbatim: r-base pin +
+    bioconductor-genomeinfodb against default channels (no bioconda)
+    -> env.solve_conflict WITH channel_hint. Their audit showed hints
+    = [solver_message, suggestion, user_pins] and no channel_hint."""
+    out = w.env_ensure({"name": "reporter-spec",
+                        "deps": {"conda": ["r-base =4.4.*",
+                                           "bioconductor-genomeinfodb"]}})
+    assert out["error"] == "env.solve_conflict", out
+    assert out["hints"].get("channel_hint", {}).get("packages") == \
+        ["bioconductor-genomeinfodb"]

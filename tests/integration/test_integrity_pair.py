@@ -193,3 +193,31 @@ def test_clobbered_activation_fails_typed_before_user_code(w):
     assert "env.activation_failed" in text, text
     jd = Path(ad.path(f"jobs/{bad['job_id']}"))
     assert not (jd / "ran.txt").exists()            # user code never ran
+
+
+def test_every_build_lane_runs_post_link_check():
+    """The gap-1 pin (consumer audit 2026-08-24): a DOCSTRING claimed
+    the squashfs lane's check happened 'at the staging prefix inside
+    its own build' — and no such call existed; published squashfs
+    packs (the motivating incident's own lane) realized clean around
+    the detection. This conformance test holds the claim: every build
+    lane must ROUTE THROUGH _post_link_check — the main build tail
+    covers prefix/packed/overlay, and _build_squashfs must call it on
+    the staging content BEFORE mksquashfs (and AFTER post_install,
+    whose script-removal is the acknowledgment). A lane losing the
+    call drifts here, not in a consumer's published pack."""
+    import inspect
+
+    from weft import realize
+    tail = inspect.getsource(realize.ensure_realization)
+    assert "_post_link_check" in tail                # main build tail
+    sq = inspect.getsource(realize._build_squashfs)
+    assert "_post_link_check" in sq, \
+        "squashfs staging lost the post-link check"
+    assert sq.index("_run_post_install") < sq.index("_post_link_check")
+    # before the IMAGE WRITE (the invocation flags — "mksquashfs" the
+    # word first appears in the capability lookup near the top)
+    assert sq.index("_post_link_check") < sq.index("-noappend")
+    # the staging layout follows the build branch — both strategies
+    # must be discriminated, or the packed branch globs the wrong dir
+    assert '"prefix" if internet else "packed"' in sq

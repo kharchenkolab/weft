@@ -124,4 +124,23 @@ remotes, removable in one command.
   the setwd incident killed kernels with an ordinary idiom while
   every kernel test used clean blocks (field note #5's lesson,
   re-learned on the least-validated input surface).
+- A comment claiming a check exists ELSEWHERE must name the test that
+  pins that elsewhere. No pinning test => write the check inline, or
+  write "UNCOVERED: <lane>" and a report line. A coverage claim
+  without a pin is the 2026-08-24 squashfs class: the docstring said
+  "checked at the staging prefix inside its own build", no such call
+  existed, and the claim stopped everyone — author included — from
+  looking; the consumer's published packs (the motivating incident's
+  own lane) realized clean around the detection.
+- Advisory/hint fields ship with their MOTIVATING INCIDENT replayed
+  as a test — the reporter's spec/commands, verbatim where possible.
+  A hint matrix that exercises content and the success path but never
+  the failure it was built for ratifies decoration (channel_hint
+  attached only on solve SUCCESS while its whole scenario — a
+  bioconductor spec without bioconda — essentially always FAILS to
+  solve; found live by the consumer, same day).
+- Ask-driven rounds close by replaying the ask's reported transcript
+  as a test where one exists. The incident IS the acceptance test;
+  a green round that never ran the reporter's input proved something
+  adjacent to the report, not the report.
 - No biological examples in specs, tests, or docs.

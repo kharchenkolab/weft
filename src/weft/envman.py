@@ -422,6 +422,15 @@ class EnvManager:
                 solve_dir=str(workdir),
                 tail=str(e.hints.get("solver_message")
                          or e.hints.get("stderr_tail") or "")[-800:])
+            # the hint's MOTIVATING scenario is this failure: a
+            # bioconductor-* spec without bioconda essentially always
+            # fails to solve — the first wiring attached channel_hint
+            # only on success/cached returns, where the problem it warns
+            # about had not occurred (consumer audit, 2026-08-24)
+            hint = self._channel_hint(merged)
+            if hint:
+                e.hints = dict(e.hints or {})
+                e.hints.setdefault("channel_hint", hint)
             if parent_env is None or e.code != "env.solve_conflict":
                 raise
             # the delta cannot be satisfied with the base frozen: that IS the
@@ -463,6 +472,9 @@ class EnvManager:
                     "a rotated-away build fails exactly like this. "
                     "Re-ensure the parent's spec to mint a lock-carrying "
                     "row, then extend that.")
+            hint = self._channel_hint(merged)
+            if hint:                # the failure IS the hint's scenario
+                hints["channel_hint"] = hint
             raise WeftError(
                 "env.layer_conflict",
                 "the delta does not fit on this parent without moving base "
