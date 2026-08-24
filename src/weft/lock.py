@@ -77,11 +77,97 @@ def parent_pypi_pins(parent_canonical: dict, platform: str = "linux-64") -> list
             if p["kind"] == "pypi"]
 
 
-def render_pixi_manifest(spec: EnvSpec) -> str:
+def synth_parent_channel(native_lock_text: str,
+                         channel_dir: Path) -> tuple[str, dict[str, str]]:
+    """A local conda channel synthesized from a parent's OWN lock, so an
+    extends solve never depends on the parent's builds still existing in
+    live repodata (bioconda rotates builds away; exact `==version build`
+    pins then find no candidates and every published pack has a shelf
+    life). The lock records everything repodata needs — name, version,
+    build, depends, sha256 — per package.
+
+    Returns (file:// channel URL, {synth_url: original_url}) — the map
+    drives rewrite_lock_urls: packages the solver takes from this
+    channel must leave the lock pointing at their REAL homes (a remote
+    realize cannot fetch file://); content identity is untouched (same
+    filename, same sha).
+    """
+    doc = yaml.safe_load(native_lock_text)
+    by_subdir: dict[str, dict] = {}
+    url_map: dict[str, str] = {}
+    channel_dir = Path(channel_dir)
+    for rec in doc.get("packages", []):
+        url = rec.get("conda")
+        if not url:
+            continue                     # pypi rotation is a different story
+        subdir, _, fname = url.rsplit("/", 2)[-2], None, url.rsplit("/", 1)[-1]
+        name, version, build = _conda_url_fields(url)
+        entry = {
+            "name": name, "version": version, "build": build,
+            "build_number": _build_number(build),
+            "subdir": subdir,
+            "depends": list(rec.get("depends") or []),
+            **({"constrains": list(rec["constrains"])}
+               if rec.get("constrains") else {}),
+            **({"sha256": rec["sha256"]} if rec.get("sha256") else {}),
+            **({"md5": rec["md5"]} if rec.get("md5") else {}),
+            **({"license": rec["license"]} if rec.get("license") else {}),
+            **({"size": rec["size"]} if rec.get("size") else {}),
+        }
+        key = "packages.conda" if fname.endswith(".conda") else "packages"
+        by_subdir.setdefault(subdir, {"packages": {},
+                                      "packages.conda": {}})[key][fname] = entry
+        # pixi records file-channel packages as BARE PATHS (no scheme)
+        # while channel URLs keep file:// — map both forms (probed
+        # against real pixi.lock output; the uri-only first version
+        # rewrote nothing and the guard caught it)
+        url_map[f"{channel_dir.as_uri()}/{subdir}/{fname}"] = url
+        url_map[str(channel_dir / subdir / fname)] = url
+    for subdir in set(by_subdir) | {"noarch"}:   # rattler wants noarch
+        d = channel_dir / subdir
+        d.mkdir(parents=True, exist_ok=True)
+        data = by_subdir.get(subdir, {"packages": {}, "packages.conda": {}})
+        (d / "repodata.json").write_text(json.dumps({
+            "info": {"subdir": subdir}, **data}, sort_keys=True))
+    return channel_dir.as_uri(), url_map
+
+
+def _build_number(build: str) -> int:
+    tail = build.rsplit("_", 1)[-1]
+    return int(tail) if tail.isdigit() else 0
+
+
+def rewrite_lock_urls(lock_text: str, url_map: dict[str, str],
+                      synth_root: str | Path | None = None) -> str:
+    """Point synth-channel lock entries back at their real homes. A pure
+    pointer fix — filename and sha are unchanged, so the canonical form
+    (identity) is identical before and after; conformance tests assert
+    the child's parent entries are field-identical to the parent lock's.
+    Plain string replace is safe: the path appears verbatim in both the
+    packages section and the environments section (longest keys first so
+    the file:// form wins over its bare-path substring). The lock's own
+    CHANNELS list keeps a line naming the synth channel — dropped: a
+    remote --frozen install must never be pointed at controller disk."""
+    for synth in sorted(url_map, key=len, reverse=True):
+        lock_text = lock_text.replace(synth, url_map[synth])
+    if synth_root is not None:
+        root = str(synth_root)
+        lock_text = "\n".join(
+            ln for ln in lock_text.splitlines() if root not in ln) + "\n"
+    return lock_text
+
+
+def render_pixi_manifest(spec: EnvSpec,
+                         extra_channels_first: list[str] | None = None) -> str:
+    # extra_channels_first is a SOLVE-TIME mechanic (the synthesized
+    # parent channel), never part of the spec: it must not perturb
+    # spec_hash, and the lock URL rewrite erases it from the result —
+    # identity comes from content, and the content is the parent's
+    channels = list(extra_channels_first or []) + list(spec.channels)
     lines = [
         "[workspace]",
         f"name = {_toml_str('weft-env')}",
-        f"channels = [{', '.join(_toml_str(c) for c in spec.channels)}]",
+        f"channels = [{', '.join(_toml_str(c) for c in channels)}]",
         f"platforms = [{', '.join(_toml_str(p) for p in spec.platforms)}]",
     ]
     # only pixi-known keys go into the manifest; others (e.g. cran_snapshot)
@@ -233,17 +319,23 @@ _CACHE_MARKERS = ("cache error", "file still doesn't exist",
                   "conda-pypi mapping")
 
 
-def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi") -> LockResult:
+def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi",
+          extra_channels: list[str] | None = None) -> LockResult:
     """Solve a (fully merged) spec into a lockfile. Requires index access.
 
     The subprocess gets a hermetic PIXI_CACHE_DIR when the default cache
     sits on a network filesystem (rattler's cache locking breaks there —
     controller-on-login-node deployments); ambient PIXI_CACHE_DIR is
-    always respected as the user's explicit choice."""
+    always respected as the user's explicit choice.
+
+    extra_channels are prepended for THIS solve only (the synthesized
+    parent channel of an extends solve) — never part of the spec or its
+    hash; the caller rewrites the resulting lock's URLs back to real
+    homes."""
     from .cachedir import local_cache_dir
     import os as _os
     workdir.mkdir(parents=True, exist_ok=True)
-    manifest = render_pixi_manifest(spec)
+    manifest = render_pixi_manifest(spec, extra_channels_first=extra_channels)
     (workdir / "pixi.toml").write_text(manifest)
     lockfile = workdir / "pixi.lock"
     if lockfile.exists():

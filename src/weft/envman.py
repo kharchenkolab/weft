@@ -110,6 +110,28 @@ class EnvManager:
         body = self.store.get_spec(spec_hash)
         return EnvSpec.from_dict(body) if body else None
 
+    @staticmethod
+    def _channel_hint(spec: EnvSpec) -> dict | None:
+        """Spec-hygiene warning (aba2's suggestion after their isolated-
+        env incident): bioconductor-* packages live ONLY on bioconda —
+        a hand-authored spec naming them without the channel gets a
+        conflict/no-candidates later with no pointer to the real cause.
+        Deliberately scoped to bioconductor-* (r-* also lives on
+        conda-forge; warning there would false-fire on every pure
+        conda-forge R spec). A warning, never a refusal."""
+        from .spec import split_constraint
+        bio = sorted({split_constraint(d)[0] for d in spec.conda
+                      if split_constraint(d)[0].startswith("bioconductor-")})
+        if bio and not any("bioconda" in c for c in spec.channels):
+            return {"packages": bio,
+                    "note": "bioconductor-* packages are published on the "
+                            "bioconda channel, which this spec does not "
+                            "list — the solve will not find them",
+                    "fix": "add \"bioconda\" to the spec's channels "
+                           "(conda-forge first, bioconda second is the "
+                           "conventional order)"}
+        return None
+
     def _pin_to_parent(self, spec: EnvSpec, parent_env: dict) -> EnvSpec:
         """Freeze the base: parent's exact packages + the child's delta.
 
@@ -156,6 +178,18 @@ class EnvManager:
 
         out.conda = resolve(parent_pins(canonical, plat), spec.conda, "conda")
         out.pypi = resolve(parent_pypi_pins(canonical, plat), spec.pypi, "pypi")
+        # channels inherit (child's prepend, like the spec-hash extends
+        # merge): a child spec authored without the parent's bioconda
+        # made every parent bioconda package invisible to the DELTA
+        # solve (aba2's isolated-env incident — their #3, root-caused
+        # to the authored spec; inheritance makes extends_env carry the
+        # base's universe by default). Solve-side only: merged_hash was
+        # captured before pinning, so identity is the authored spec's.
+        parent_spec = self._lookup_spec(parent_env["spec_hash"])
+        if parent_spec is not None:
+            from .spec import _prepend_unique
+            out.channels = _prepend_unique(out.channels,
+                                           parent_spec.channels)
         # the parent's extras carry over and MERGE with the child's: the
         # child's identity must account for everything the parent's does
         # (post_install products, modules), or the same child EnvID behaves
@@ -223,7 +257,8 @@ class EnvManager:
             out.deps_extra[eco] = merged
         return out
 
-    def _solve_forgiving(self, merged: EnvSpec, workdir: Path, relax: str):
+    def _solve_forgiving(self, merged: EnvSpec, workdir: Path, relax: str,
+                         extra_channels: list[str] | None = None):
         """Solve as written; under relax="soft", greedily drop SOFT
         constraints (trailing '?') until it solves. Hard pins are never
         touched — a silent version drop is precisely what a substrate must
@@ -231,7 +266,8 @@ class EnvManager:
         path to a solve, not in what you got."""
         from .spec import is_soft, relax_dep
         try:
-            return solve(merged, workdir, self.pixi_bin), []
+            return solve(merged, workdir, self.pixi_bin,
+                         extra_channels=extra_channels), []
         except WeftError as first:
             if relax != "soft" or first.code != "env.solve_conflict":
                 raise
@@ -255,7 +291,8 @@ class EnvManager:
                                 "ecosystem": eco,
                                 "relaxed_to": deps[i]})
                 try:
-                    result = solve(merged, workdir, self.pixi_bin)
+                    result = solve(merged, workdir, self.pixi_bin,
+                                   extra_channels=extra_channels)
                 except WeftError as e:
                     if e.code != "env.solve_conflict":
                         raise    # network/index trouble is NOT "still
@@ -334,11 +371,15 @@ class EnvManager:
                 self.store.put_spec(spec.spec_hash(), spec.name,
                                     spec.to_dict())
                 self.store.put_spec(merged_hash, merged_name, merged_body)
+                hint = self._channel_hint(merged)
                 return {"env_id": cached, "status": "cached",
-                        "summary": self._summary(self.store.get_env(cached))}
+                        "summary": self._summary(self.store.get_env(cached)),
+                        **({"channel_hint": hint} if hint else {})}
 
         # extends_env: pin the parent's resolution, solve only the delta
         parent_env = None
+        synth_url_map: dict[str, str] = {}
+        extra_channels: list[str] | None = None
         if merged.extends_env:
             parent_env = self.store.get_env(merged.extends_env)
             if not parent_env:
@@ -356,8 +397,22 @@ class EnvManager:
         check_layer_requirements(merged, merged.deps_extra, self.solvers)
 
         workdir = self.solve_dir / merged_hash.split(":")[-1][:16]
+        if parent_env is not None and parent_env.get("native_lock"):
+            # the parent's OWN lock as a local channel: the exact-pin
+            # solve no longer depends on the parent's builds surviving
+            # in live repodata (bioconda rotates builds away — every
+            # published pack had a shelf life of weeks; aba2's
+            # "isolated env as a real delta over the base" was blocked
+            # on exactly this). Solve-time only; the lock rewrite below
+            # erases it from the result.
+            from .lock import synth_parent_channel
+            workdir.mkdir(parents=True, exist_ok=True)
+            channel_url, synth_url_map = synth_parent_channel(
+                parent_env["native_lock"], workdir / "parent-channel")
+            extra_channels = [channel_url]
         try:
-            result, relaxed = self._solve_forgiving(merged, workdir, relax)
+            result, relaxed = self._solve_forgiving(
+                merged, workdir, relax, extra_channels=extra_channels)
         except WeftError as e:
             # the failure exists OUTSIDE the exception too: an event a
             # UI can render even when the caller swallows the raise
@@ -390,19 +445,48 @@ class EnvManager:
                               "the base to move, costs a full solve and a "
                               "full prefix, and is the right call when the "
                               "delta genuinely needs a newer base")
+            hints = {
+                "parent": merged.extends_env,
+                "delta": merged.conda + merged.pypi
+                + [d for deps in merged.deps_extra.values() for d in deps],
+                "solver_message": solver_msg,
+                "suggestion": suggestion,
+            }
+            if not parent_env.get("native_lock") and \
+                    "no candidates" in str(solver_msg).lower():
+                # legacy env row (pre-native_lock): the failing exact
+                # pin is likely BUILD ROTATION (channels prune old
+                # builds), which the synthesized parent channel would
+                # have absorbed — but there is no lock to synthesize from
+                hints["rotation"] = (
+                    "the parent env row predates stored locks, so its "
+                    "exact builds must still exist on live channels — "
+                    "a rotated-away build fails exactly like this. "
+                    "Re-ensure the parent's spec to mint a lock-carrying "
+                    "row, then extend that.")
             raise WeftError(
                 "env.layer_conflict",
                 "the delta does not fit on this parent without moving base "
                 "package versions",
-                stage="solve",
-                hints={
-                    "parent": merged.extends_env,
-                    "delta": merged.conda + merged.pypi
-                    + [d for deps in merged.deps_extra.values() for d in deps],
-                    "solver_message": solver_msg,
-                    "suggestion": suggestion,
-                },
+                stage="solve", hints=hints,
             ) from e
+        if synth_url_map:
+            # packages the solver took from the synthesized channel point
+            # at file:// — a remote realize cannot fetch that. Rewrite to
+            # the parent's recorded real URLs (pure pointer fix: same
+            # filename, same sha — identity is content and the content is
+            # the parent's; conformance-pinned in test_extends_rotation)
+            from .lock import rewrite_lock_urls
+            result.native_lock = rewrite_lock_urls(
+                result.native_lock, synth_url_map,
+                synth_root=workdir / "parent-channel")
+            if "parent-channel" in result.native_lock:
+                raise WeftError(
+                    "internal.error",
+                    "synth-channel URL survived the lock rewrite — the "
+                    "child lock would be unrealizable off-controller",
+                    stage="solve",
+                    hints={"parent": merged.extends_env})
         soft_hash = None
         if relaxed:
             # the relaxed spec is what actually got solved — store it as the
@@ -446,6 +530,9 @@ class EnvManager:
             self.store.put_spec_alias(soft_hash, eid)
         out = {"env_id": eid, "status": "solved",
                "summary": self._summary(self.store.get_env(eid))}
+        hint = self._channel_hint(merged)   # post-pin: inherited
+        if hint:                            # channels count as present
+            out["channel_hint"] = hint
         if layer_summaries:
             out["layers"] = layer_summaries
         if parent_env:

@@ -83,6 +83,10 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
 - **Layering, two flavors — never install into an existing env:**
   - `{"extends": <parent SPEC hash>, "deps": {...}}` — whole-spec
     re-solve. The base may move. New EnvID, cheap build (shared cache).
+  - extends solves survive channel rotation (the parent's packages
+    resolve from its own recorded lock — a published base whose builds
+    aged off bioconda still extends; channels inherit from the parent
+    spec; bioconductor-* deps without bioconda warn via `channel_hint`)
   - `{"extends_env": <parent EnvID>, "deps": {...}}` — **freeze the base**:
     every package in the parent's lock becomes an exact pin (conda, pypi,
     cran/julia layers including github SHAs and the parent's snapshot

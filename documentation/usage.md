@@ -111,6 +111,16 @@ quick["delta"]["layerable"]   # True → overlay fast path; else why-not text
 change). Overlay vs full prefix is a realization detail: same EnvID, same
 results — held byte-identical by a conformance test.
 
+Extends solves survive CHANNEL ROTATION: the delta solve resolves the
+parent's packages from the parent's OWN recorded lock (synthesized into
+a solve-local channel), so a base whose exact builds have aged off
+bioconda/conda-forge still extends — published packs have no shelf
+life. The child's lock still points at the packages' real homes, and
+the child inherits the parent spec's channels (child's prepend). A spec
+naming bioconductor-* packages without the bioconda channel gets a
+`channel_hint` warning on the ensure result (those packages live only
+there).
+
 `env_realize(env_id, site)` idempotently realizes an env on a site
 — ready-and-intact is a fast no-op; a missing/demoted/evicted
 realization rebuilds from the stored lock through the standard path.
