@@ -65,39 +65,62 @@ def range_cap(default: int = RANGE_CAP_DEFAULT) -> int:
 
 
 def stat_candidate(cand: dict) -> dict | None:
-    """{bytes, mtime} of one candidate, None when absent. (Known wart,
-    carried: an adapter rc!=0 reads as absent — rc-trust; tool_honesty
-    row. Fix when touched with a marker protocol like stat_batch's.)"""
+    """Kind-aware stat of one candidate: {"kind": "file", bytes, mtime}
+    or {"kind": "dir", mtime} — no bytes for a directory (its size is
+    a WALK, not a stat) — None when absent. Directories are first-class
+    (the dir-as-a-unit doctrine settle_pins ratified): the old [ -f ]
+    read a .zarr-class store as ABSENT and the (run, relpath) handle
+    refused exactly the artifact class it matters most for (3 live
+    hits). The carried rc-trust wart is PAID here: a probe that yields
+    no verdict RAISES retryable — transport trouble is never a file
+    verdict."""
     path = cand["path"]
     if cand["adapter"] is None:
         p = Path(path)
+        if p.is_dir():
+            return {"kind": "dir", "mtime": int(p.stat().st_mtime)}
         if not p.is_file():
             return None
         st = p.stat()
-        return {"bytes": st.st_size, "mtime": int(st.st_mtime)}
+        return {"kind": "file", "bytes": st.st_size,
+                "mtime": int(st.st_mtime)}
+    q = shlex.quote(path)
     r = cand["adapter"].run_cmd(
-        f'[ -f {shlex.quote(path)} ] && '
-        f'(stat -c "%s %Y" {shlex.quote(path)} 2>/dev/null || '
-        f'stat -f "%z %m" {shlex.quote(path)}) || echo ABSENT',
-        timeout=60)
-    out = (r.out or "").strip()
-    if r.rc != 0 or out == "ABSENT" or not out:
+        f'if [ -d {q} ]; then printf "DIR "; '
+        f'(stat -c "%Y" {q} 2>/dev/null || stat -f "%m" {q}); '
+        f'elif [ -f {q} ]; then '
+        f'(stat -c "%s %Y" {q} 2>/dev/null || stat -f "%z %m" {q}); '
+        f'else echo ABSENT; fi', timeout=60)
+    parts = (r.out or "").split()
+    if parts and parts[0] == "ABSENT":
         return None
-    parts = out.split()
-    return {"bytes": int(parts[0]), "mtime": int(parts[1])}
+    if len(parts) >= 2 and parts[0] == "DIR":
+        return {"kind": "dir", "mtime": int(parts[1])}
+    if r.rc == 0 and len(parts) >= 2:
+        return {"kind": "file", "bytes": int(parts[0]),
+                "mtime": int(parts[1])}
+    raise WeftError(
+        "internal.error",
+        "stat probe produced no verdict for the path — probe trouble, "
+        "never a file verdict", stage="infra", retryable=True,
+        hints={"rc": r.rc, "path": path,
+               "log_tail": (r.err or r.out)[-300:]})
 
 
 def stat_batch(adapter, paths: list[str]) -> dict[str, dict | None]:
     """ONE shell invocation stat-ing every path; per-path POSITIVE
-    markers ("<idx> <bytes> <mtime>" / "<idx> ABSENT") — a missing
-    marker is a broken probe and raises, never a file verdict."""
+    markers ("<idx> <bytes> <mtime>" / "<idx> DIR <mtime>" /
+    "<idx> ABSENT") — a missing marker is a broken probe and raises,
+    never a file verdict. Same kind vocabulary as stat_candidate."""
     if not paths:
         return {}
     lines = []
     for i, p in enumerate(paths):
         q = shlex.quote(p)
         lines.append(
-            f'if [ -f {q} ]; then printf "%s " {i}; '
+            f'if [ -d {q} ]; then printf "%s DIR " {i}; '
+            f'(stat -c "%Y" {q} 2>/dev/null || stat -f "%m" {q}); '
+            f'elif [ -f {q} ]; then printf "%s " {i}; '
             f'(stat -c "%s %Y" {q} 2>/dev/null || '
             f'stat -f "%z %m" {q}); '
             f'else echo "{i} ABSENT"; fi')
@@ -118,8 +141,13 @@ def stat_batch(adapter, paths: list[str]) -> dict[str, dict | None]:
     out: dict[str, dict | None] = {}
     for i, p in enumerate(paths):
         g = got[i]
-        out[p] = (None if g[0] == "ABSENT"
-                  else {"bytes": int(g[0]), "mtime": int(g[1])})
+        if g[0] == "ABSENT":
+            out[p] = None
+        elif g[0] == "DIR":
+            out[p] = {"kind": "dir", "mtime": int(g[1])}
+        else:
+            out[p] = {"kind": "file", "bytes": int(g[0]),
+                      "mtime": int(g[1])}
     return out
 
 

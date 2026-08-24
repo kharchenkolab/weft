@@ -952,6 +952,8 @@ class RetainManager:
             st = self._stat_one(cand)
             if st is None:
                 continue
+            if st.get("kind") == "dir":
+                raise self._dir_read_refusal(rel)
             if cand["adapter"] is None:
                 data = Path(cand["path"]).open("rb").read(max_bytes)
                 import base64 as _b64
@@ -991,13 +993,41 @@ class RetainManager:
         the engine for the range semantics (past-EOF, cap clamp, vanish
         guard); this wrapper owns only the run addressing."""
         from .fileio import range_cap, range_read
-        got = range_read(
-            self.resolve_key(target, rel), offset, length,
-            cap=range_cap(self._RANGE_READ_CAP), what=repr(rel),
-            missing_hints={"note": "run_inventory shows what the run "
-                                   "produced; the sandbox may have "
-                                   "been swept and the keep forgotten"})
+        try:
+            got = range_read(
+                self.resolve_key(target, rel), offset, length,
+                cap=range_cap(self._RANGE_READ_CAP), what=repr(rel),
+                missing_hints={"note": "run_inventory shows what the run "
+                                       "produced; the sandbox may have "
+                                       "been swept and the keep "
+                                       "forgotten"})
+        except WeftError as e:
+            # miss-path only (the hot path pays no pre-stat): a rel
+            # that IS a directory must refuse typed, not "missing"
+            if e.code == "data.missing":
+                for cand in self.resolve_key(target, rel):
+                    try:
+                        st = self._stat_one(cand)
+                    except WeftError:
+                        break
+                    if st is not None:
+                        if st.get("kind") == "dir":
+                            raise self._dir_read_refusal(rel) from None
+                        break
+            raise
         return {"target": target, "path": rel, **got}
+
+    @staticmethod
+    def _dir_read_refusal(rel: str) -> WeftError:
+        return WeftError(
+            "task.invalid",
+            f"{rel!r} is a directory — reads serve files",
+            stage="infra",
+            hints={"levers": {
+                "register": "data_register(run=..., rel=...) mints a "
+                            "tree ref; data_members lists its files",
+                "member": "read one member: pass "
+                          "rel='<dir>/<member>'"}})
 
     def file_read_range_many(self, target: str, rels: list) -> dict:
         """Batched WHOLE-member reads by run key — ONE remote

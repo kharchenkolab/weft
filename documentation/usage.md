@@ -186,6 +186,11 @@ Files are addressed by the (run, relpath) KEY everywhere:
 answered (`at`); task inputs accept `{"run": ..., "rel": ...,
 "mount_as": ...}` (resolved to the output's ref — no rehash for
 declared outputs); `data_register(run=, rel=)` re-enters explicitly.
+DIRECTORIES are first-class rels (the .zarr-class store a run leaves
+at its root): stat answers `{kind: "dir", mtime}` (no bytes — a
+tree's size is a walk), `data_register(run=, rel=)` mints the same
+tree ref the absolute-path door would, and byte reads refuse typed,
+naming the levers (register + data_members, or read a member path).
 **The observation principle**: *identity gates movement; observation
 follows the bytes; every address vocabulary gets both tiers.* Moving
 bytes (fetch, staging, task inputs) always goes through content refs

@@ -94,6 +94,12 @@ w.retained_runs(label="proj-9")        # the catalog: what's kept, WHERE
 w.run_file_stat(t, rel); w.run_file_read(t, rel)
                                        # the (run, relpath) KEY — resolves
                                        # sandbox → keep, answers at=...
+                                       # DIR rels are first-class: stat
+                                       # answers kind:"dir" (no bytes);
+                                       # data_register(run=, rel=) mints
+                                       # the tree ref (same identity as
+                                       # the absolute door); byte reads
+                                       # refuse typed with the levers.
 w.run_file_stat(t, rels=[...])         # BATCH — panels/pollers use this:
                                        # N files = ONE stat invocation,
                                        # O(1) store reads ({"files": ...})

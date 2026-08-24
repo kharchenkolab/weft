@@ -1017,8 +1017,10 @@ class Weft:
             got = self.dataman.ensure_from_keep(known, self.adapters)
             if not got:
                 # no LINK anchor (e.g. never retained): ingest directly
+                # (register dispatches tree-vs-file — a declared DIR
+                # output re-enters as the tree it is)
                 if live["adapter"] is None:
-                    info = self.cas.register_file(Path(live["path"]))
+                    info = self.cas.register(Path(live["path"]))
                     if info.ref != known:
                         raise WeftError("data.verify_failed",
                                         f"({run}, {rel}) no longer "
@@ -2536,7 +2538,10 @@ class Weft:
         """Existence + size + mtime by the (run, relpath) KEY — resolved
         against the sandbox, then the run's keep (retention2.md), with
         `at` saying which answered. Inventory says what EXISTED; this
-        says what's still on disk, wherever it now is.
+        says what's still on disk, wherever it now is. Directories are
+        first-class: a dir rel answers {exists, kind: "dir", mtime} —
+        no bytes (a tree's size is a walk, not a stat); register it
+        with data_register(run=, rel=) for the tree ref + sizes.
 
         rels=[...] batches: one target resolution, one keep lookup, ONE
         stat invocation for everything — {"files": {rel: answer}}.
