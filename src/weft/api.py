@@ -259,6 +259,11 @@ class Weft:
                 "task.invalid", f"unknown site kind: {kind}", stage="infra",
                 hints={"known": ["local", "ssh", "slurm", "cloud"]},
             )
+        # policy facts solver lanes read per-adapter (no store round-trip
+        # at realize time): ppm_binaries=false forces plain-source CRAN
+        # everywhere site_ppm_url would map a binary tree
+        adapter._weft_ppm_binaries = bool(
+            (config.get("policy") or {}).get("ppm_binaries", True))
         self.adapters[name] = adapter
         return adapter
 
@@ -1562,7 +1567,8 @@ class Weft:
                         fast: bool = True, full_clone: bool = False,
                         cran: list[str] | None = None,
                         cran_repos: list[str] | None = None,
-                        verify=None) -> dict:
+                        verify=None,
+                        build_deps: list[str] | None = None) -> dict:
         """Add packages to the session. Captured, so a snapshot carries
         them into the spec. pypi-only adds skip the full manifest
         re-solve by default (direct uv/pip into the scratch prefix —
@@ -1583,11 +1589,19 @@ class Weft:
         pypi adds go into a pylib overlay over the mount (only the
         missing closure is fetched); conda adds refuse with levers
         (session.cold_base). full_clone=True overrides: fetch the whole
-        base from the index into a writable clone (needs egress)."""
+        base from the index into a writable clone (needs egress).
+
+        build_deps=["xz", ...] names conda packages whose HEADERS/LIBS
+        the session's source compiles need (the lzma.h class on
+        read-only/cold bases where the base cannot take conda adds):
+        served live by a deps-extended build toolchain — the base is
+        never touched — and folded into the snapshot's conda deps
+        (the compiled .so links them at runtime). May be passed alone
+        (records + prepares) or alongside cran=[...]."""
         return self.sessions.install(
             session_id, self._session_adapter(session_id), conda, pypi,
             fast=fast, full_clone=full_clone, cran=cran,
-            cran_repos=cran_repos, verify=verify)
+            cran_repos=cran_repos, verify=verify, build_deps=build_deps)
 
     def session_run_installer(self, session_id: str, cmd: str,
                               note: str = "", source: str | None = None,

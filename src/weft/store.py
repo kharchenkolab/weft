@@ -73,6 +73,11 @@ _SESSION_MIGRATIONS = [
     # judged on BEAT AGE, never chain duration (chains run 45 min)
     ("ensure_nonce", "ALTER TABLE sessions ADD COLUMN ensure_nonce TEXT"),
     ("ensure_hb", "ALTER TABLE sessions ADD COLUMN ensure_hb REAL"),
+    # build_deps (eight-asks D): conda packages whose HEADERS/libs the
+    # session's source compiles need (lzma.h class on read-only bases) —
+    # realized as a deps-extended toolchain prefix live, folded into
+    # deps.conda at snapshot (the compiled .so links them at RUNTIME)
+    ("build_deps", "ALTER TABLE sessions ADD COLUMN build_deps TEXT"),
 ]
 
 
@@ -1129,6 +1134,9 @@ class Store:
             "added_cran": (json.loads(r["added_cran"])
                            if "added_cran" in keys and r["added_cran"]
                            else []),
+            "build_deps": (json.loads(r["build_deps"])
+                           if "build_deps" in keys and r["build_deps"]
+                           else []),
             "added_cran_repos": (json.loads(r["added_cran_repos"])
                                  if "added_cran_repos" in keys
                                  and r["added_cran_repos"] else []),
@@ -1170,6 +1178,11 @@ class Store:
         self._write(
             "UPDATE sessions SET installers=? WHERE session_id=?",
             (_j(s["installers"] + [entry]), session_id))
+
+    def set_session_build_deps(self, session_id: str,
+                               deps: list[str]) -> None:
+        self._write("UPDATE sessions SET build_deps=? WHERE session_id=?",
+                    (_j(sorted(set(deps))), session_id))
 
     def session_add_deps(self, session_id: str, conda: list[str],
                          pypi: list[str],

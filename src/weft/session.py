@@ -190,10 +190,12 @@ def _syslib_hints(text: str) -> dict | None:
     out = {"failure_class": "missing_system_lib",
            "remedy": "a system library is missing on this site — "
                      "retrying the session lane will fail identically; "
-                     "mint an isolated env with a full solve "
-                     "(extends_env / ensure_available env target), "
-                     "which lets conda-forge supply the system "
-                     "dependency"}
+                     "session_install(build_deps=[\"<conda pkg>\"]) "
+                     "supplies its headers/libs to source compiles "
+                     "without touching the base (e.g. build_deps="
+                     "[\"xz\"] for lzma.h), or mint an isolated env "
+                     "with a full solve (extends_env / "
+                     "ensure_available env target)"}
     if found:
         out["missing_system"] = found
     return out
@@ -564,7 +566,8 @@ class SessionManager:
             tc = ensure_toolchain(
                 adapter, adapter.pixi_bin,
                 _site_platform((self.store.get_site(adapter.name) or {})
-                               .get("capabilities") or {}))
+                               .get("capabilities") or {}),
+                extra_deps=tuple(s.get("build_deps") or ()))
             if tc:
                 prelude = build_env_prelude(adapter, tc, sdir)
         except WeftError:
@@ -597,8 +600,16 @@ class SessionManager:
                     'paste(.nm, collapse=" "), "\n", sep="")')
         rcmd = "; ".join(parts)
         from .solvers import _build_jobs_prefix
-        script = (prelude + act + " && "
-                  f"{_build_jobs_prefix(None)}"
+        # activation FIRST, prelude AFTER: pixi's shell-hook bakes an
+        # absolute PATH — sourcing it RESETS PATH and silently drops the
+        # toolchain's bin (compilers, pkg-config). Masked for months by
+        # system compilers on Ubuntu sites; a bare RHEL10 VM finally
+        # showed configure finding no pkg-config while the deps prefix
+        # sat fully provisioned (eight-asks D reality catch).
+        prelude_inline = prelude.replace("\n", "; ").rstrip("; ")
+        script = (act + " && "
+                  + (prelude_inline + " && " if prelude_inline else "")
+                  + f"{_build_jobs_prefix(None)}"
                   f"mkdir -p {shlex.quote(rlib)} && "
                   f"export R_LIBS={shlex.quote(rlib)}\"${{R_LIBS:+:$R_LIBS}}\" && "
                   # standalone: remotes uses ONLY base R — no callr/
@@ -1516,7 +1527,8 @@ class SessionManager:
                 full_clone: bool = False,
                 cran: list[str] | None = None,
                 cran_repos: list[str] | None = None,
-                verify=None) -> dict:
+                verify=None,
+                build_deps: list[str] | None = None) -> dict:
         """Public entry: the install flow, then (when verify= is on)
         the POSTCONDITION phase in the composed runtime, with record-
         gating — records exist exactly when verification passed
@@ -1529,7 +1541,8 @@ class SessionManager:
         out = self._install_inner(session_id, adapter, conda=conda,
                                   pypi=pypi, fast=fast,
                                   full_clone=full_clone, cran=cran,
-                                  cran_repos=cran_repos)
+                                  cran_repos=cran_repos,
+                                  build_deps=build_deps)
         if eff is None:
             return out
         # postconditions key on the ORIGINAL request entries — the
@@ -1543,6 +1556,7 @@ class SessionManager:
     def _install_inner(self, session_id: str, adapter: SiteAdapter,
                        conda: list[str] | None = None,
                        pypi: list[str] | None = None, fast: bool = True,
+                       build_deps: list[str] | None = None,
                        full_clone: bool = False,
                        cran: list[str] | None = None,
                        cran_repos: list[str] | None = None) -> dict:
@@ -1558,7 +1572,28 @@ class SessionManager:
         s = self._get(session_id)
         conda, pypi = list(conda or []), list(pypi or [])
         cran = list(cran or [])
+        if build_deps:
+            # headers/libs the session's SOURCE COMPILES need (the
+            # lzma.h class on read-only/cold bases): recorded on the
+            # session — served live by a deps-extended toolchain
+            # prefix (the base is never touched), folded into
+            # deps.conda at snapshot (the compiled .so links them at
+            # RUNTIME, so they are real deps of the frozen env)
+            merged = sorted(set(s.get("build_deps") or [])
+                            | set(build_deps))
+            self.store.set_session_build_deps(session_id, merged)
+            s["build_deps"] = merged
+            self.store.emit("session.build_deps", session=session_id,
+                            deps=merged)
         if not conda and not pypi and not cran:
+            if build_deps:
+                return {"session_id": session_id,
+                        "build_deps": s["build_deps"],
+                        "note": "build deps recorded — the next source "
+                                "compile gets their headers/libs via "
+                                "the deps-extended toolchain; the "
+                                "snapshot will carry them as conda "
+                                "deps (runtime linkage)"}
             raise WeftError("task.invalid", "nothing to install", stage="realize")
         # same intake contract as env specs: a name twice in ONE call is
         # a malformed request, refused before any tool sees it (each
@@ -1991,10 +2026,17 @@ class SessionManager:
         add-time validation and snapshot-time reality drift apart."""
         env_row = self.store.get_env(s["base_env_id"])
         installers = s.get("installers") or []
+        bd = [d for d in (s.get("build_deps") or [])
+              if d not in s["added_conda"]]
         spec = {
             "name": name or f"synth-of-{s['session_id']}",
             "extends": env_row["spec_hash"],
-            "deps": {"conda": list(s["added_conda"]) + list(extra_conda),
+            # build_deps become REAL conda deps of the snapshot: the
+            # compiled .so links their libs at runtime, and the target
+            # site's realize-time compiles find their headers via the
+            # parent-env include path
+            "deps": {"conda": list(s["added_conda"]) + bd
+                     + list(extra_conda),
                      "pypi": list(s["added_pypi"]) + list(extra_pypi)},
         }
         cran = list(s.get("added_cran") or []) + list(extra_cran)

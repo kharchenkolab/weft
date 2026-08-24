@@ -146,6 +146,8 @@ Read the code, use the hints:
 | `job.oom` | `observed_peak_gb` vs `requested_gb` → resubmit bigger |
 | `job.walltime_exceeded` | elapsed vs asked → raise walltime or shrink task |
 | `job.nonzero_exit` | `log_signature` + `log_tail` → fix the actual bug |
+| `env.post_link_scripts` | staged conda post-link scripts pixi won't run → `post_install` (pinned content, then rm the script) or site policy `post_link: "warn"` |
+| `env.activation_failed` | activation didn't take; your command never ran → check activate.sh output in the job log (a clobbering site_prelude/module init is the usual cause) |
 | `data.verify_failed` | locations demoted → resubmit re-transfers |
 | `env.unsatisfiable_on_site` | alternative sites → re-place |
 | `env.platform_mismatch` | `locked_platforms` vs `site_platform` → add the site's platform to the spec, re-ensure (new EnvID) |

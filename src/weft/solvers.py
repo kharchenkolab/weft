@@ -93,7 +93,15 @@ def site_ppm_url(url: str, adapter) -> str:
     """ppm_platform_url against THIS site's distro, detected once per
     adapter (a cheap os-release read, cached on the adapter object —
     always current, never a stale capability row). Detection failure =
-    plain source URL: honest and slow beats binary 404s."""
+    plain source URL: honest and slow beats binary 404s.
+
+    Site policy ppm_binaries:false forces plain source everywhere
+    (aba2's ABI posture: PPM linux binaries target the distro's system
+    R + libs, weft's R is conda's — the load-check + source-rebuild
+    arm compensates, but a pack owner may prefer never mixing; every
+    probe gets its override). Stamped on the adapter at construction."""
+    if getattr(adapter, "_weft_ppm_binaries", True) is False:
+        return url
     if "packagemanager.posit.co" not in url:
         return url
     cached = getattr(adapter, "_weft_os_release", None)
@@ -847,6 +855,19 @@ class CranSolver:
             'rownames(installed.packages(lib.loc=l))));'
             'p <- setdiff(c({pkgs}), c(have, ""));'
             'if (length(p)) install.packages(p, lib=lib);'
+            # PPM binary load-check + per-package source rebuild — the
+            # SAME arm realize_layer carries (aba2 ABI note: distro-built
+            # binaries under conda R fail at LOAD, not install; presence
+            # checks ratified broken installs on this lane)
+            'chk <- intersect(c({pkgs}), rownames(installed.packages(lib.loc=lib)));'
+            'bad <- Filter(function(x) inherits(tryCatch('
+            'loadNamespace(x, lib.loc=lib), error=function(e) e), "error"), chk);'
+            'if (length(bad)) {{'
+            ' write(paste("binary load failed, rebuilding from source:",'
+            ' paste(bad, collapse=",")), stderr());'
+            ' srcrepo <- sub("__linux__/[^/]+/", "", getOption("repos"));'
+            ' remove.packages(bad, lib=lib);'
+            ' install.packages(bad, lib=lib, repos=srcrepo, type="source") }};'
             '{ghinstall}'
             'need <- c({need});'
             'have2 <- unlist(lapply(.libPaths(), function(l) '
@@ -864,10 +885,15 @@ class CranSolver:
         _w = pack_tools.get("wrap_cmd") or (lambda s: s)
         with _rlib_progress(adapter, rlib, len(recs),
                             pack_tools.get("progress")):
+            # activation FIRST, prelude AFTER (same catch as the session
+            # lane): the shell-hook's baked PATH reset silently dropped
+            # the toolchain bin from every compile on system-compiler-
+            # less sites
+            _pl = prelude.replace("\n", "; ").rstrip("; ")
             r = adapter.run_activated(_w(
-                prelude +
                 f". {shlex.quote(parent_dir)}/activate.sh && "
-                f"{_build_jobs_prefix(pack_tools.get('build_jobs'))}"
+                + (_pl + " && " if _pl else "")
+                + f"{_build_jobs_prefix(pack_tools.get('build_jobs'))}"
                 f"Rscript -e {shlex.quote(rcode)} 2>&1"), timeout=3600)
         if r.rc != 0:
             raise WeftError(

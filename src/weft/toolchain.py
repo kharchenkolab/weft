@@ -32,31 +32,44 @@ TOOLCHAIN_SPEC = [
 ]
 
 
-def toolchain_id(platform: str) -> str:
+def toolchain_id(platform: str, extra: tuple = ()) -> str:
     """Identity of the toolchain itself — part of every compile-cache key.
     platform is REQUIRED: the old linux-64 default applied silently to
     every mac/aarch64 site (every caller omitted it), building a manifest
     the site could never install and keying the cache on a toolchain
-    that was never built (platform-sweep find A1)."""
+    that was never built (platform-sweep find A1).
+
+    extra = session build_deps (headers/libs source compiles need, the
+    lzma.h class): a DIFFERENT prefix id — the shared default toolchain
+    never grows (its id keys every compile cache globally; growing
+    TOOLCHAIN_SPEC would fork them all)."""
+    if extra:
+        return sha256_bytes(canonical_json(
+            {"packages": sorted(set(TOOLCHAIN_SPEC) | set(extra)),
+             "platform": platform}))[:16]
     return sha256_bytes(canonical_json(
         {"packages": sorted(TOOLCHAIN_SPEC), "platform": platform}))[:16]
 
 
 def ensure_toolchain(adapter: SiteAdapter, pixi_bin: str,
-                     platform: str) -> str | None:
+                     platform: str, extra_deps: tuple = ()) -> str | None:
     """Materialize the build toolchain on the site (once). Returns its
     prefix, or None if it cannot be built (the caller then falls back to a
-    full prefix realization rather than guessing)."""
+    full prefix realization rather than guessing). extra_deps extends
+    the manifest into a SEPARATE deps-carrying prefix (own id) — the
+    shared default stays untouched."""
     from .realize import _SiteLease, _build_lock
-    rel = f"{TOOLCHAIN_REL}/{toolchain_id(platform)}"
+    rel = f"{TOOLCHAIN_REL}/{toolchain_id(platform, extra_deps)}"
     if adapter.file_exists(f"{rel}/.weft-ready"):
         return adapter.path(rel)
     # one build per site — across threads (in-process lock) and across
     # users on a shared root (site-side lease): concurrent pixi installs
     # into one dir corrupt it
-    with _build_lock(f"toolchain/{toolchain_id(platform)}", adapter.name):
+    with _build_lock(f"toolchain/{toolchain_id(platform, extra_deps)}",
+                     adapter.name):
         if adapter.file_exists(f"{rel}/.weft-ready"):
             return adapter.path(rel)
+        pkgs = sorted(set(TOOLCHAIN_SPEC) | set(extra_deps))
         lease = _SiteLease(adapter, rel)
         if lease.acquire_or_adopt():
             return adapter.path(rel)      # another user built it meanwhile
@@ -65,7 +78,7 @@ def ensure_toolchain(adapter: SiteAdapter, pixi_bin: str,
                 '[workspace]\nname = "weft-toolchain"\n'
                 'channels = ["conda-forge"]\n'
                 f'platforms = ["{platform}"]\n\n[dependencies]\n'
-                + "".join(f'"{p}" = "*"\n' for p in TOOLCHAIN_SPEC)
+                + "".join(f'"{p}" = "*"\n' for p in pkgs)
             )
             adapter.write_file(f"{rel}/pixi.toml", manifest.encode())
             r = adapter.run_cmd(
@@ -100,10 +113,18 @@ def build_env_prelude(adapter: SiteAdapter, toolchain_prefix: str,
     parent_env = f"{parent_prefix}/.pixi/envs/default"
     return (
         f'export PATH="{tc}/bin:$PATH"\n'
-        f'export CPPFLAGS="-I{parent_env}/include ${{CPPFLAGS:-}}"\n'
+        # parent FIRST (its ABI wins), then the toolchain env — plain
+        # compilers make the tc entries near-noop; a deps-extended
+        # toolchain (build_deps: xz et al., the lzma.h class) serves
+        # its headers/libs here, with rpath so the compiled .so
+        # resolves them at runtime too
+        f'export CPPFLAGS="-I{parent_env}/include -I{tc}/include '
+        f'${{CPPFLAGS:-}}"\n'
         f'export LDFLAGS="-L{parent_env}/lib -Wl,-rpath,{parent_env}/lib '
+        f'-L{tc}/lib -Wl,-rpath,{tc}/lib '
         f'${{LDFLAGS:-}}"\n'
         f'export PKG_CONFIG_PATH="{parent_env}/lib/pkgconfig:'
+        f'{tc}/lib/pkgconfig:'
         f'${{PKG_CONFIG_PATH:-}}"\n'
         # the ONE place that knows a compile is coming: every source
         # build routed through this prelude gets make-level parallelism

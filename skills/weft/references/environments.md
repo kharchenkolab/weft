@@ -108,6 +108,11 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   for R envs stands: put everything you can in `deps.conda`
   (conda-forge binaries), keep `deps.cran` for github refs and
   CRAN-only packages — the closure around them costs nothing extra now.
+  PPM binary trees serve realize-time installs where the site's distro
+  is whitelisted, with a per-package load-check that rebuilds broken-
+  ABI binaries from source (BOTH cran lanes); site policy
+  `ppm_binaries: false` forces plain source everywhere (the
+  conda-R-vs-distro-binary posture).
   Realization narrates (`realize.prefix`/`realize.layer`/
   `realize.progress` events) — poll events during env_realize instead
   of assuming a silent call hung. Version-pinned interpreters
@@ -185,6 +190,12 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     conda adds and `run_installer` refuse with `session.cold_base` +
     levers (`extends_env` / warm-cache site / `full_clone=true`). The
     base is NEVER silently re-downloaded.
+  - **Source compiles needing headers the base lacks** (lzma.h/gsl
+    class on read-only/cold bases): `session_install(build_deps=
+    ["xz"])` — a deps-extended build toolchain serves the headers/libs
+    (base untouched; rpath'd so the compiled .so resolves at runtime);
+    the snapshot folds build_deps into deps.conda (runtime linkage).
+    The missing_system_lib hint names this lever.
   - Clone honesty: sessions dir and base on different devices ⇒ CoW
     can't apply, clone = full copy — `cross_device_note` on the result
     + `session.cross_device` event. `capabilities.storage.reflink`
