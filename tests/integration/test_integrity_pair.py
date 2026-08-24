@@ -288,3 +288,56 @@ def test_publish_lane_arms_post_link_check(w, tmp_path, monkeypatch):
     assert seen, "publish never reached the builder"
     assert seen["store"] is w.store              # the check is ARMED
     assert isinstance(seen["site_config"], dict)
+
+
+def test_realize_lane_arms_post_link_check(w, tmp_path, monkeypatch):
+    """The OTHER _build_squashfs caller, behaviorally (the consumer's
+    spec was 'each entry point'): ensure_realization's squashfs branch
+    cannot run in the fast lane (no mksquashfs), so forge squashfs
+    capability + prefer, drive env_realize, and assert the spy sees
+    the workspace store arrive from THIS caller too."""
+    import weft.realize as realize_mod
+    import hashlib as _h
+    import json as _json
+    import platform as _platform
+    import sys as _sys
+    chan = tmp_path / "chan-rz"
+    sub = ("osx-arm64" if _sys.platform == "darwin"
+           and _platform.machine() == "arm64" else "linux-64")
+    for d in (chan / sub, chan / "noarch"):
+        d.mkdir(parents=True)
+    fn = "rzpkg-1.0-h0_0.conda"
+    (chan / sub / "repodata.json").write_text(_json.dumps(
+        {"info": {"subdir": sub}, "packages": {}, "packages.conda": {
+            fn: {"name": "rzpkg", "version": "1.0", "build": "h0_0",
+                 "build_number": 0, "subdir": sub, "depends": [],
+                 "sha256": _h.sha256(fn.encode()).hexdigest()}}}))
+    (chan / "noarch" / "repodata.json").write_text(_json.dumps(
+        {"info": {"subdir": "noarch"}, "packages": {},
+         "packages.conda": {}}))
+    env = w.env_ensure({"name": "rz-env", "channels": [chan.as_uri()],
+                        "platforms": [sub],
+                        "deps": {"conda": ["rzpkg ==1.0"]}})
+    assert "error" not in env, env
+    row = w.store.get_site("local")
+    caps = dict(row.get("capabilities") or {})
+    caps["squashfs"] = {"mksquashfs": True, "squashfuse": True,
+                        "dev_fuse": True, "userns": True}
+    w.store.set_capabilities("local", caps)
+    cfg = dict(row.get("config") or {})
+    cfg["prefer"] = "squashfs"
+    w.store.put_site("local", row["kind"], cfg)
+
+    seen = {}
+
+    def spy(env_id, env_row, adapter, rel, modules, modules_init, caps,
+            pack_tools, emit, staging_rel=None, *, store,
+            site_config=None):
+        seen["store"] = store
+        raise WeftError("internal.error", "spy stop", stage="realize")
+
+    monkeypatch.setattr(realize_mod, "_build_squashfs", spy)
+    out = w.env_realize(env["env_id"], "local")
+    assert out.get("error"), out
+    assert seen, "realize never reached the squashfs builder"
+    assert seen["store"] is w.store              # armed from this caller
