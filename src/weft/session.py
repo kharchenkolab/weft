@@ -695,6 +695,10 @@ class SessionManager:
                 else:
                     why += ("; every ref resolves from the controller — "
                             "the SITE's github egress failed")
+            # envelope parity with the pypi lane (aba ask 7): one field
+            # name a consumer can read on every add lane
+            hints.setdefault("solver_message",
+                             missing_line or (r.err or r.out)[-400:])
             raise WeftError(code, why, stage="realize",
                             retryable=retryable, hints=hints)
         self._ensure_overlay_line(
@@ -704,11 +708,43 @@ class SessionManager:
         self.store.emit("session.installed", session=s["session_id"],
                         cran=installed, mode="rlib")
         out = {"rlib": rlib, "installed": installed}
+        shadows = self._rlib_shadows(s, adapter, rlib)
+        if shadows:
+            # R semantics of shadows_base (same field name as pypi,
+            # different mechanism): the rlib precedes the base library
+            # in .libPaths(), so a same-named package MASKS the base's
+            out["shadows_base"] = shadows
         if ref_installed:
             out["resolved"] = ref_installed   # DESCRIPTION package names
         if pin_notes:
             out["pin_notes"] = pin_notes      # honest: pins are recorded,
         return out                            # not enforced, until snapshot
+
+    def _rlib_shadows(self, s: dict, adapter: SiteAdapter,
+                      rlib: str) -> list[str]:
+        """Same-named packages present in BOTH the session rlib and the
+        base env's R library — the rlib wins via .libPaths() order, so
+        these mask the base (the R meaning of the pypi lane's
+        shadows_base). Best-effort: a probe failure is never an install
+        verdict."""
+        try:
+            real = self.store.get_realization(s["base_env_id"],
+                                              s["site"]) or {}
+            if not real.get("location"):
+                return []
+            from .realize import _bin_dir_rel
+            bin_dir = adapter.path(_bin_dir_rel(
+                real["location"], real.get("strategy") or "prefix"))
+            base_lib = f"{bin_dir.rsplit('/', 1)[0]}/lib/R/library"
+            r = adapter.run_cmd(
+                f"ls {shlex.quote(rlib)} 2>/dev/null; echo ---WEFT---; "
+                f"ls {shlex.quote(base_lib)} 2>/dev/null", timeout=60)
+            if r.rc != 0 or "---WEFT---" not in (r.out or ""):
+                return []
+            mine, base = r.out.split("---WEFT---", 1)
+            return sorted(set(mine.split()) & set(base.split()))
+        except Exception:   # noqa: BLE001 — advisory, never a verdict
+            return []
 
     def _postconditions(self, session_id: str, adapter: SiteAdapter,
                         out: dict, eff: dict, conda: list[str],
@@ -1538,8 +1574,18 @@ class SessionManager:
         # never flips the session's mode, and works the same everywhere
         rlib_out = None
         if cran:
+            validated_cran = None
+            if not fast:
+                # fast=False must mean solve-at-add on EVERY lane (the
+                # pypi regate silently no-op'd this once, round #95;
+                # the cran lane NEVER consulted fast at all — aba ask 6
+                # assumed it worked): solve the would-be snapshot spec
+                # including this delta BEFORE installing anything
+                validated_cran = self._validate_solve(s, [], cran=cran)
             rlib_out = self._materialize_rlib(s, adapter, cran,
                                               extra_repos=cran_repos)
+            if validated_cran:
+                rlib_out["validated"] = validated_cran
             self.store.session_add_deps(session_id, [], [], cran,
                                         cran_repos=cran_repos)
             # keep the in-memory row honest: runtime() below reads it
@@ -1551,6 +1597,10 @@ class SessionManager:
                         "rlib": rlib_out["rlib"],
                         **({"resolved": rlib_out["resolved"]}
                            if rlib_out.get("resolved") else {}),
+                        **({"validated": rlib_out["validated"]}
+                           if rlib_out.get("validated") else {}),
+                        **({"shadows_base": rlib_out["shadows_base"]}
+                           if rlib_out.get("shadows_base") else {}),
                         "runtime": self.runtime(s, adapter),
                         "note": "R delta composed over the base via "
                                 "R_LIBS — dependencies the base holds "
@@ -1960,27 +2010,66 @@ class SessionManager:
                 spec["post_install_inputs"] = inputs
         return spec
 
-    def _validate_solve(self, s: dict, pypi: list[str]) -> str:
+    def _validate_solve(self, s: dict, pypi: list[str],
+                        cran: list[str] | None = None) -> str:
         """The deferred conflict check, PULLED FORWARD (fast=False on
-        the overlay lane; aba incident): solve the would-be snapshot
-        spec including these candidates — a base-contradicting leaf
-        fails HERE, typed, before anything is installed or recorded.
-        One solve, no clone, no realize; the minted env IS the eventual
-        snapshot env (identity is content), so the snapshot later hits
-        the cached solve."""
-        spec = self._synth_spec(s, extra_pypi=tuple(pypi))
+        the overlay lane; aba incident — and on the cran lane, which
+        never consulted fast at all until aba ask 6): solve the
+        would-be snapshot spec including these candidates — a
+        base-contradicting leaf fails HERE, typed, before anything is
+        installed or recorded. One solve, no clone, no realize; the
+        minted env IS the eventual snapshot env (identity is content),
+        so the snapshot later hits the cached solve."""
+        spec = self._synth_spec(s, extra_pypi=tuple(pypi),
+                                extra_cran=tuple(cran or ()))
         try:
             return self.envman.ensure(spec)["env_id"]
         except WeftError as e:
             e.hints = dict(e.hints or {})
             e.hints.setdefault("at", "add-time (fast=False)")
-            e.hints.setdefault("requested", list(pypi))
+            e.hints.setdefault("requested", list(pypi) + list(cran or ()))
             e.hints.setdefault(
                 "note", "nothing was installed or recorded — the "
                         "session is unchanged; route the package to an "
                         "isolated env (ensure_available env target / "
                         "extends_env) or relax the conflicting pin")
             raise
+
+    def freezable(self, session_id: str) -> dict:
+        """Ask 4: 'can this session still be frozen?' WITHOUT minting
+        or realizing anything — the would-be snapshot spec, dry-run
+        solved. Callers used to discover unfreezable sessions inside a
+        job submit's error handler; this answers at ask-time.
+
+        Honesty: this is a REAL solve (seconds, not milliseconds), and
+        a statement about NOW — channels move between probe and
+        snapshot, so a true answer reduces surprise but cannot
+        guarantee the mint. Installer-tainted sessions (arbitrary
+        run_installer commands weft cannot replay) answer freezable
+        WITH their grade — the snapshot works; reproducibility is
+        capped at escape-hatch."""
+        import time as _time
+        s = self._get(session_id)
+        spec = self._synth_spec(s)
+        t0 = _time.monotonic()
+        try:
+            got = self.envman.ensure(spec, dry_run=True)
+        except WeftError as e:
+            return {"session_id": session_id, "freezable": False,
+                    "reason": e.to_dict(),
+                    "solve_s": round(_time.monotonic() - t0, 2)}
+        out = {"session_id": session_id, "freezable": True,
+               "would_be_env": got.get("env_id"),
+               "solve_s": round(_time.monotonic() - t0, 2),
+               "note": "a statement about NOW — channels move; the "
+                       "snapshot's own solve remains the mint"}
+        installers = s.get("installers") or []
+        if installers:
+            out["grade_note"] = (
+                f"{len(installers)} captured installer step(s) ride "
+                f"along as post_install — snapshot works, "
+                f"reproducibility grade is escape-hatch")
+        return out
 
     def snapshot(self, session_id: str, name: str | None = None,
                  notes: list[str] | None = None, verify: bool = True) -> dict:

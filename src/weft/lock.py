@@ -335,7 +335,12 @@ def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi",
     from .cachedir import local_cache_dir
     import os as _os
     workdir.mkdir(parents=True, exist_ok=True)
-    manifest = render_pixi_manifest(spec, extra_channels_first=extra_channels)
+    # kwarg only when set: test doubles monkeypatch the renderer/solver
+    # with exact-arity fakes, and the common path should stay
+    # signature-identical (the round-B lane caught three such doubles)
+    manifest = (render_pixi_manifest(spec,
+                                     extra_channels_first=extra_channels)
+                if extra_channels else render_pixi_manifest(spec))
     (workdir / "pixi.toml").write_text(manifest)
     lockfile = workdir / "pixi.lock"
     if lockfile.exists():

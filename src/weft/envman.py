@@ -265,9 +265,9 @@ class EnvManager:
         not do. The result is still fully pinned: adaptiveness lives in the
         path to a solve, not in what you got."""
         from .spec import is_soft, relax_dep
+        kw = {"extra_channels": extra_channels} if extra_channels else {}
         try:
-            return solve(merged, workdir, self.pixi_bin,
-                         extra_channels=extra_channels), []
+            return solve(merged, workdir, self.pixi_bin, **kw), []
         except WeftError as first:
             if relax != "soft" or first.code != "env.solve_conflict":
                 raise
@@ -291,8 +291,7 @@ class EnvManager:
                                 "ecosystem": eco,
                                 "relaxed_to": deps[i]})
                 try:
-                    result = solve(merged, workdir, self.pixi_bin,
-                                   extra_channels=extra_channels)
+                    result = solve(merged, workdir, self.pixi_bin, **kw)
                 except WeftError as e:
                     if e.code != "env.solve_conflict":
                         raise    # network/index trouble is NOT "still
