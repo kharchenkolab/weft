@@ -196,28 +196,95 @@ def test_clobbered_activation_fails_typed_before_user_code(w):
 
 
 def test_every_build_lane_runs_post_link_check():
-    """The gap-1 pin (consumer audit 2026-08-24): a DOCSTRING claimed
-    the squashfs lane's check happened 'at the staging prefix inside
-    its own build' — and no such call existed; published squashfs
-    packs (the motivating incident's own lane) realized clean around
-    the detection. This conformance test holds the claim: every build
-    lane must ROUTE THROUGH _post_link_check — the main build tail
-    covers prefix/packed/overlay, and _build_squashfs must call it on
-    the staging content BEFORE mksquashfs (and AFTER post_install,
-    whose script-removal is the acknowledgment). A lane losing the
-    call drifts here, not in a consumer's published pack."""
+    """The gap-1 pin, SECOND iteration (consumer audits #1 and #2,
+    both 2026-08-24): first a docstring claimed a check that did not
+    exist; then the fix wired it through an OPTIONAL store=None
+    parameter and the publish lane — which builds the published packs,
+    the motivating incident's own artifacts — silently disarmed it by
+    not passing store. Their critique of v1 of THIS TEST also stands:
+    a source-grep of the callee's body pins the callee; the claim
+    'every build lane routes through the check' is about CALLERS.
+    Held three ways now: (1) `store` is KEYWORD-REQUIRED — Python
+    itself refuses any caller that forgets (fail-open defaults on a
+    safety check are the disarm-by-default class); (2) the callee
+    calls the check unconditionally, ordered after post_install and
+    before the image write; (3) the publish caller is driven
+    BEHAVIORALLY in test_publish_lane_arms_post_link_check."""
     import inspect
 
     from weft import realize
+    sig = inspect.signature(realize._build_squashfs)
+    store_p = sig.parameters["store"]
+    assert store_p.default is inspect.Parameter.empty, \
+        "store grew a default — callers can silently disarm the check"
+    assert store_p.kind == inspect.Parameter.KEYWORD_ONLY
     tail = inspect.getsource(realize.ensure_realization)
     assert "_post_link_check" in tail                # main build tail
     sq = inspect.getsource(realize._build_squashfs)
     assert "_post_link_check" in sq, \
         "squashfs staging lost the post-link check"
+    assert "if store is not None" not in sq          # unconditional
     assert sq.index("_run_post_install") < sq.index("_post_link_check")
-    # before the IMAGE WRITE (the invocation flags — "mksquashfs" the
-    # word first appears in the capability lookup near the top)
-    assert sq.index("_post_link_check") < sq.index("-noappend")
     # the staging layout follows the build branch — both strategies
     # must be discriminated, or the packed branch globs the wrong dir
     assert '"prefix" if internet else "packed"' in sq
+    # before the IMAGE WRITE (the invocation flags — "mksquashfs" the
+    # word first appears in the capability lookup near the top)
+    assert sq.index("_post_link_check") < sq.index("-noappend")
+
+
+def test_publish_lane_arms_post_link_check(w, tmp_path, monkeypatch):
+    """BEHAVIORAL caller coverage (their exact ask): drive the real
+    env_publish entry point and assert the store the check needs
+    actually arrives at _build_squashfs. A spy replaces the builder,
+    records its kwargs, and stops the flow with a sentinel — no
+    mksquashfs required. Red on the audited commit: store arrived as
+    None there."""
+    import weft.realize as realize_mod
+    # an offline env row (local repodata-only channel; no artifacts
+    # are fetched by pixi lock)
+    import hashlib as _h
+    import json as _json
+    chan = tmp_path / "chan"
+    import platform as _platform
+    import sys as _sys
+    sub = ("osx-arm64" if _sys.platform == "darwin"
+           and _platform.machine() == "arm64" else "linux-64")
+    for d in (chan / sub, chan / "noarch"):
+        d.mkdir(parents=True)
+    fn = "pubpkg-1.0-h0_0.conda"
+    (chan / sub / "repodata.json").write_text(_json.dumps(
+        {"info": {"subdir": sub}, "packages": {}, "packages.conda": {
+            fn: {"name": "pubpkg", "version": "1.0", "build": "h0_0",
+                 "build_number": 0, "subdir": sub, "depends": [],
+                 "sha256": _h.sha256(fn.encode()).hexdigest()}}}))
+    (chan / "noarch" / "repodata.json").write_text(_json.dumps(
+        {"info": {"subdir": "noarch"}, "packages": {},
+         "packages.conda": {}}))
+    env = w.env_ensure({"name": "pub-env", "channels": [chan.as_uri()],
+                        "platforms": [sub],
+                        "deps": {"conda": ["pubpkg ==1.0"]}})
+    assert "error" not in env, env
+    # forge squashfs capability so publish reaches the builder
+    row = w.store.get_site("local")
+    caps = dict(row.get("capabilities") or {})
+    caps["squashfs"] = {"mksquashfs": True, "squashfuse": True,
+                        "dev_fuse": True, "userns": True}
+    w.store.set_capabilities("local", caps)
+
+    seen = {}
+
+    def spy(env_id, env_row, adapter, rel, modules, modules_init, caps,
+            pack_tools, emit, staging_rel=None, *, store,
+            site_config=None):
+        seen["store"] = store
+        seen["site_config"] = site_config
+        raise WeftError("internal.error", "spy stop", stage="realize")
+
+    monkeypatch.setattr(realize_mod, "_build_squashfs", spy)
+    out = w.env_publish(env["env_id"], "local",
+                        str(tmp_path / "pub-tree"), "pack", "1.0")
+    assert out.get("error"), out                 # the sentinel surfaced
+    assert seen, "publish never reached the builder"
+    assert seen["store"] is w.store              # the check is ARMED
+    assert isinstance(seen["site_config"], dict)

@@ -217,7 +217,9 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
         try:
             meta = _build_squashfs(env_id, env_row, adapter, rel, modules,
                                    modules_init, caps, pack_tools,
-                                   weft.store.emit, staging_rel=staging_rel)
+                                   weft.store.emit, staging_rel=staging_rel,
+                                   store=weft.store,
+                                   site_config=site_row.get("config") or {})
         except WeftError as e:
             # publishes have no realization row — leave a durable trace
             weft.store.emit("env.publish.failed", env_id=env_id, site=site,

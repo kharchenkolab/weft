@@ -1585,7 +1585,7 @@ def _build_squashfs(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str, caps: dict | None,
     pack_tools: dict, emit, staging_rel: str | None = None,
-    store=None, site_config: dict | None = None,
+    *, store, site_config: dict | None = None,
 ) -> dict:
     """One mounted image instead of ~100k files on the shared FS.
 
@@ -1703,13 +1703,16 @@ def _build_squashfs(
     # post-link detection on the STAGING content, before it is squashed
     # immutable — AFTER post_install (removing the staged script is the
     # acknowledgment). This call was CLAIMED by a docstring and absent
-    # (consumer audit, 2026-08-24): published squashfs packs — the
-    # motivating incident's own lane — realized clean around the check.
-    # The staging layout follows the branch above: prefix or packed.
-    if store is not None:
-        _post_link_check(env_id, build, inner,
-                         "prefix" if internet else "packed",
-                         store, site_config)
+    # (consumer audit #1); the FIRST fix then wired it through an
+    # optional store=None parameter, and the publish lane — the
+    # motivating incident's own artifacts — silently disarmed it by not
+    # passing store (consumer audit #2, same week). `store` is now
+    # KEYWORD-REQUIRED: a caller that forgets crashes at the call, it
+    # cannot skip the check. Fail-open parameter defaults on a safety
+    # check are that defect class.
+    _post_link_check(env_id, build, inner,
+                     "prefix" if internet else "packed",
+                     store, site_config)
 
     img = adapter.path(f"{rel}/image.sqfs")
     t0 = __import__("time").time()

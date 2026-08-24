@@ -175,11 +175,20 @@ def _meta_answer():
     return FakeShim(out="deadbeef 4096")
 
 
+class _MiniStore:
+    """store double for _build_squashfs's now-REQUIRED store param
+    (fail-closed after the publish-lane disarm): the post-link check
+    only consults .emit, and these fixtures stage no scripts."""
+
+    def __init__(self, emit):
+        self.emit = emit
+
+
 def test_staged_build_command_stream():
     a = FakeAdapter(answers={"printf '%s %s'": _meta_answer()})
     ev, emit = _events()
     meta = _build_squashfs("env:v1:" + HASH, ENV_ROW, a, REL, [], "",
-                           CAPS_USERNS, {}, emit,
+                           CAPS_USERNS, {}, emit, store=_MiniStore(emit),
                            staging_rel=f"stage/publish/{_sub()}")
     staging_abs = f"/site/root/stage/publish/{_sub()}"
     mount_abs = f"{REL}/mnt"
@@ -221,7 +230,7 @@ def test_staged_build_probe_failure_falls_back_honestly():
         "printf '%s %s'": _meta_answer()})
     ev, emit = _events()
     meta = _build_squashfs("env:v1:" + HASH, ENV_ROW, a, REL, [], "",
-                           CAPS_USERNS, {}, emit,
+                           CAPS_USERNS, {}, emit, store=_MiniStore(emit),
                            staging_rel=f"stage/publish/{_sub()}")
     # after the failed probe nothing else attempted a namespace, and the
     # build happened at the destination — today's classic path
@@ -244,7 +253,7 @@ def test_staged_resume_probes_staging_not_the_tree():
     a.answers["sha256sum"] = FakeShim(out=f"{digest}  x")
     ev, emit = _events()
     _build_squashfs("env:v1:" + HASH, ENV_ROW, a, REL, [], "",
-                    CAPS_USERNS, {}, emit,
+                    CAPS_USERNS, {}, emit, store=_MiniStore(emit),
                     staging_rel=f"stage/publish/{sub}")
     names = [e[0] for e in ev]
     assert "realize.resumed" in names
@@ -271,7 +280,8 @@ def test_publish_passes_site_config_staging_and_reports_honestly(
     seen = {}
 
     def fake_build(env_id, env_row, adapter, rel, modules, modules_init,
-                   caps, pack_tools, emit, staging_rel=None):
+                   caps, pack_tools, emit, staging_rel=None, *,
+                   store=None, site_config=None):
         seen["staging_rel"] = staging_rel
         return {"image_sha256": "d" * 64, "image_bytes": 7,
                 **({"staging": {"used": True,

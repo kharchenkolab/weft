@@ -143,4 +143,20 @@ remotes, removable in one command.
   as a test where one exists. The incident IS the acceptance test;
   a green round that never ran the reporter's input proved something
   adjacent to the report, not the report.
+- Safety checks wired through parameters are FAIL-CLOSED: required,
+  never optional-with-a-disarming-default. store=None on the squashfs
+  post-link check let the publish lane — the motivating incident's
+  own artifacts — silently skip it (consumer audit #3, same week as
+  #1 and #2 on the same feature). A forgotten required argument
+  crashes at the call; a defaulted one ships dark.
+- A conformance test pins the CLAIM's subject. "Every lane routes
+  through the check" is a claim about CALLERS: enforce it with a
+  required parameter (Python covers every caller) plus a behavioral
+  spy driving each entry point — a source-grep of the callee's body
+  passed while production disarmed the call through a default.
+  Callee-greps only ever pin callees.
+- When a fix adds a call or parameter to a shared function, grep ALL
+  callers before closing — the misfired-edit blast-radius rule
+  applies to FIXES: the pattern is the function's call sites, not the
+  one in view.
 - No biological examples in specs, tests, or docs.
