@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,84 @@ import uuid
 from .errors import WeftError
 from .ids import (DREF_SCHEME, _is_exec, canonical_json, data_ref, hash_file,
                   hash_tree, sha256_bytes)
+
+
+def _clone(src: Path, dst: Path) -> bool:
+    """CoW clone src->dst (own inode, zero physical bytes) — linux
+    FICLONE ioctl, darwin libc clonefile — False when the platform or
+    filesystem can't (caller falls back to a byte copy). Native calls
+    on purpose: a subprocess `cp -c` per file is the per-file fork tax
+    the tree-batch round measured."""
+    try:
+        if sys.platform == "darwin":
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            rc = libc.clonefile(os.fsencode(str(src)),
+                                os.fsencode(str(dst)), 0)
+            return rc == 0
+        if sys.platform.startswith("linux"):
+            import fcntl
+            FICLONE = 0x40049409
+            with open(src, "rb") as s, open(dst, "wb") as d:
+                try:
+                    fcntl.ioctl(d.fileno(), FICLONE, s.fileno())
+                    return True
+                except OSError:
+                    pass
+            dst.unlink(missing_ok=True)   # the empty open("wb") shell
+            return False
+    except Exception:   # noqa: BLE001 — clone is an optimization, never a verdict
+        dst.unlink(missing_ok=True)
+        return False
+    return False
+
+
+def place_view(src: Path, dst: Path, *, exec_bit: bool = False,
+               writable: bool = False) -> str:
+    """THE owner of blob->sandbox materialization semantics (Ask 26 +
+    ruling): pipelines get read-only views, bytes move only when the
+    filesystem forces it. Returns the method actually used —
+    placement is discovered, never promised.
+
+    Read-only views: a blob already read-only HARDLINKS out (zero
+    bytes); a writable blob weft owns alone (nlink==1) is converged —
+    chmod 0444, then hardlink (lazy legacy migration); a writable blob
+    sharing its inode (the user's hardlink-ingested ORIGINAL, or a
+    legacy writable sandbox link) is never touched — REFLINK + chmod
+    the clone, byte-copy fallback. Exec is a MATERIALIZE-time property
+    (one content, different exec bits across trees), so blobs stay
+    canonically 0444 and exec views never hardlink: reflink/copy at
+    0555. writable=True (scratch copies on request): reflink/copy,
+    never hardlink, dest left writable.
+
+    Honest limits (per ruling): the owner can chmod+write through a
+    hardlink — permissions guard accidents, not determination; the
+    verify fence at next use detects falsification."""
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    st = src.stat()
+    if not writable and not exec_bit:
+        if not (st.st_mode & 0o222):        # already read-only: share
+            try:
+                os.link(src, dst)
+                return "hardlink"
+            except OSError:
+                pass                         # cross-device: clone/copy
+        elif st.st_nlink == 1:               # weft owns the only link
+            os.chmod(src, 0o444)
+            try:
+                os.link(src, dst)
+                return "hardlink"
+            except OSError:
+                pass
+    if _clone(src, dst):
+        method = "reflink"
+    else:
+        shutil.copyfile(src, dst)            # copyfile, not copy2: the
+        method = "copy"                      # dest mode is OURS to set
+    os.chmod(dst, (0o755 if exec_bit else 0o644) if writable
+             else (0o555 if exec_bit else 0o444))
+    return method
 
 
 def place_blob(src: Path, dst: Path) -> None:
@@ -181,15 +260,22 @@ class LocalCAS:
             raise WeftError("data.missing", f"tree not in local CAS: {ref}", stage="staging")
         return json.loads(p.read_text())
 
-    def materialize(self, ref: str, dest: Path, mode: str = "hardlink") -> None:
-        """Place ref's content at dest (hardlink when possible, else copy)."""
+    def materialize(self, ref: str, dest: Path,
+                    writable: bool = False) -> dict:
+        """Place ref's content at dest as a READ-ONLY view by default
+        (place_view semantics: hardlink/reflink/copy, discovered per
+        file). writable=True yields an independent writable copy
+        (reflink/copy, never a hardlink). Returns method counts —
+        {"hardlink": n, "reflink": n, "copy": n, "symlink": n}."""
         kind = self.kind_of(ref)
         if kind is None:
             raise WeftError("data.missing", f"unknown ref: {ref}", stage="staging")
+        methods: dict = {}
         if kind == "file":
             dest.parent.mkdir(parents=True, exist_ok=True)
-            self._place(self.open_blob(ref), dest, mode)
-            return
+            m = place_view(self.open_blob(ref), dest, writable=writable)
+            methods[m] = methods.get(m, 0) + 1
+            return methods
         for entry in self.tree_manifest(ref):
             target = dest / entry["path"]
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -197,26 +283,13 @@ class LocalCAS:
                 if target.is_symlink() or target.exists():
                     target.unlink()
                 os.symlink(entry["target"], target)
+                methods["symlink"] = methods.get("symlink", 0) + 1
                 continue
-            # exec files are copied: chmod on a hardlink would mutate the CAS inode
-            self._place(
-                self._blob_path(entry["sha256"]), target,
-                "copy" if entry.get("exec") else mode,
-            )
-            if entry.get("exec"):
-                os.chmod(target, os.stat(target).st_mode | 0o755)
-
-    @staticmethod
-    def _place(src: Path, dst: Path, mode: str) -> None:
-        if dst.exists():
-            dst.unlink()
-        if mode == "hardlink":
-            try:
-                os.link(src, dst)
-                return
-            except OSError:
-                pass
-        shutil.copy2(src, dst)
+            m = place_view(self._blob_path(entry["sha256"]), target,
+                           exec_bit=bool(entry.get("exec")),
+                           writable=writable)
+            methods[m] = methods.get(m, 0) + 1
+        return methods
 
     def verify(self, ref: str) -> bool:
         """Re-hash stored content against its address (corruption check)."""

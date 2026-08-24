@@ -68,7 +68,7 @@ w.data_fetch(m["outputs"][0]["ref"], "results/scan.h5")
 |---|---|
 | `command` | shell command run inside the activated environment |
 | `env` | EnvID, inline spec dict, or `null` for the bare site environment |
-| `inputs` | `[{ref, mount_as}]` — sandbox-relative mounts, read-only by convention; two inputs may not share a mount path (run+rel inputs default to the source filename — set mount_as when they collide, refused at submit). On one filesystem staging is zero-copy hardlinks (the mount, the CAS blob, and possibly the registered original share an inode) — mutating an input in place falsifies the content-addressed record, not just one file; tools that must mutate should copy inside the sandbox first |
+| `inputs` | `[{ref, mount_as}]` — sandbox-relative mounts, READ-ONLY and ENFORCED (0444; 0555 exec): pipelines do not modify their inputs. Staging is zero-copy where the filesystem allows — a read-only blob hardlinks, a blob sharing its inode with your registered original is CoW-cloned (its own inode, your file untouched), byte copy only as the last resort. A tool that must mutate its input should copy inside the sandbox first (`cp in.dat work.dat`). The chmod loophole is deliberate: permissions guard accidents, and the verify fence detects falsification at next use |
 | `code` | same shape; code is just data (hash-addressed like everything) |
 | `outputs` | declared result paths — LITERAL, no glob patterns: plain files (`plot.svg`) or directories (`results/`, trailing slash); a declared output that was not produced fails the job; the same path may not be declared twice or coincide with an input's mount |
 | `resources` | `cpus, mem_gb, gpus, walltime, partition` — validated against site capabilities AND user policy |

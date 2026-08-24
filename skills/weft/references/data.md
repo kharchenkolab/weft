@@ -21,7 +21,12 @@ table knows which sites hold what; staging is the set difference.
   from ".bin"; absence stays honest. Re-declaration wins (annotation,
   like notes). `origin` is PROVENANCE, never a typing signal.
 - **Fetch selectively:** manifests carry previews (JSON inlined, table
-  heads, image thumbs, log tails). `data_fetch(ref, "local/path")` only
+  heads, image thumbs, log tails). Fetches land as READ-ONLY views —
+  already-local bytes hardlink or CoW-clone, never a byte copy the
+  filesystem doesn't force (result's `methods` says which); pass
+  writable=True for an independent scratch copy (never a hardlink —
+  writes can't reach the record or your original).
+  `data_fetch(ref, "local/path")` only
   when the full artifact is needed; it verifies content on arrival.
 - **Purged scratch:** a site deleting cached data costs a re-transfer,
   never a wrong result — a task hitting it fails `data.verify_failed`

@@ -5,7 +5,14 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=11  # v11: list-tree/hash-tree batched stat+hash
+WEFT_SHIM_VERSION=12  # v12: materialize stages READ-ONLY views (Ask
+                      #      26 ruling): ro blob -> hardlink; writable
+                      #      sole-link blob -> converge 0444 + hardlink;
+                      #      shared-inode blob -> reflink/copy + chmod
+                      #      (never touch the user's inode); exec ->
+                      #      clone/copy at 0555 (materialize-time
+                      #      property, never a hardlink chmod)
+                      # v11: list-tree/hash-tree batched stat+hash
                       #      (per-file fork loops were 31-88x the cost;
                       #      WEFT_TREE_BATCH=0 forces the old loops)
                       # v10: runner re-anchors cwd after sourced
@@ -678,14 +685,38 @@ cmd_materialize() {
         fi
         blob="$cas/$(echo "$sha" | cut -c1-2)/$sha"
         [ -f "$blob" ] || { echo "materialize: missing blob $sha for $path" >&2; exit 3; }
+        # READ-ONLY views (Ask 26 ruling): pipelines do not modify
+        # their inputs. ro blob -> hardlink (0 bytes; steady state,
+        # [ -w ] is a builtin — no fork); writable sole-link blob ->
+        # converge 0444 then hardlink (lazy legacy migration);
+        # writable shared-inode blob (the user's hardlink-ingested
+        # ORIGINAL, or a legacy sandbox link) is never touched ->
+        # reflink/copy + chmod the view. Exec is a MATERIALIZE-time
+        # property (one content, many exec bits): never a hardlink.
         if [ "$x" = "1" ]; then
-            # copy, not link: chmod on a hardlink would flip the CAS inode
-            cp "$blob" "$dest" && chmod +x "$dest"
+            view_clone "$blob" "$dest" 555
+        elif [ ! -w "$blob" ]; then
+            ln "$blob" "$dest" 2>/dev/null || view_clone "$blob" "$dest" 444
         else
-            ln "$blob" "$dest" 2>/dev/null || cp "$blob" "$dest"
+            nl=$(stat -c %h "$blob" 2>/dev/null || stat -f %l "$blob" 2>/dev/null)
+            if [ "${nl:-2}" = "1" ]; then
+                chmod 444 "$blob"
+                ln "$blob" "$dest" 2>/dev/null || view_clone "$blob" "$dest" 444
+            else
+                view_clone "$blob" "$dest" 444
+            fi
         fi
     done < "$plan"
     echo '{"materialized": true}'
+}
+
+# clone-or-copy a blob into a view at MODE: reflink first (zero bytes
+# on CoW filesystems), byte copy last; the view's mode is OURS, never
+# inherited from the blob
+view_clone() {
+    cp -c "$1" "$2" 2>/dev/null || \
+        cp --reflink=always "$1" "$2" 2>/dev/null || cp "$1" "$2"
+    chmod "$3" "$2"
 }
 
 # ingest --cas C --root R --plan P ; plan TSV: path<TAB>sha256

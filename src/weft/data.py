@@ -1484,7 +1484,8 @@ class DataManager:
             "preview": preview_for(rel_path, head, size),
         }
 
-    def fetch(self, ref: str, to_path: str | Path, adapters: dict, transfers: dict) -> dict:
+    def fetch(self, ref: str, to_path: str | Path, adapters: dict,
+              transfers: dict, writable: bool = False) -> dict:
         """Bring a ref's content back to the workspace (doc 05 data.fetch)."""
         dest = Path(to_path)
         if not dest.is_absolute():
@@ -1557,9 +1558,13 @@ class DataManager:
                 method.fetch(
                     [(ref.split(":")[-1], row["bytes"] if row else 0)],
                     self.cas, endpoint)
-        # verify + materialize into workspace
+        # verify + materialize into workspace — a READ-ONLY view by
+        # default (Ask 26 ruling): local bytes are never copied when a
+        # hardlink/reflink can serve them; writable=True is the lever
+        # for a genuinely scratch-modifiable copy
         if not self.cas.verify(ref):
             raise WeftError("data.verify_failed", f"content of {ref} failed verification",
                             stage="staging")
-        self.cas.materialize(ref, dest, mode="copy")
-        return {"ref": ref, "path": str(dest)}
+        methods = self.cas.materialize(ref, dest, writable=writable)
+        return {"ref": ref, "path": str(dest), "methods": methods,
+                "read_only": not writable}

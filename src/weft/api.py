@@ -1369,14 +1369,25 @@ class Weft:
                                   _pinned_refs(self.store),
                                   dry_run=dry_run, force=force)
 
-    def data_fetch(self, ref: str, to_path: str) -> dict:
+    def data_fetch(self, ref: str, to_path: str,
+                   writable: bool = False) -> dict:
         """Materialize a ref's content at a LOCAL path (trees rebuild
         as directories, pulling only blobs the workspace lacks).
         Content-verified on arrival; sources: workspace CAS, site
         copies, keep anchors — re-obtained hash-checked. Fetch
         selectively: manifests carry previews; this moves the full
-        artifact."""
-        return self.dataman.fetch(ref, to_path, self.adapters, self.transfers)
+        artifact.
+
+        The result is a READ-ONLY view (0444; 0555 for exec entries):
+        already-local bytes land as hardlinks or CoW clones — never a
+        byte copy the filesystem doesn't force — and the result's
+        `methods` says what each placement actually was. Pipelines do
+        not modify their inputs; a workflow that genuinely needs a
+        scratch copy passes writable=True (independent clone/copy,
+        never a hardlink — writes cannot reach the content-addressed
+        record or the registered original)."""
+        return self.dataman.fetch(ref, to_path, self.adapters,
+                                  self.transfers, writable=writable)
 
     # -- tasks ------------------------------------------------------------------
 
