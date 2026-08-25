@@ -1240,4 +1240,17 @@ class JobRunner:
             if job and job["state"] in TERMINAL:
                 return job
             time.sleep(0.05)
-        raise TimeoutError(f"job {job_id} not terminal after {timeout}s")
+        # the timeout carries EVIDENCE (R1 triage: two in-lane-only
+        # timeouts were undiagnosable because this line said only "not
+        # terminal" — every wait-timeout must name the stuck state and
+        # the last narration so the next occurrence self-diagnoses)
+        state = (job or {}).get("state")
+        try:
+            tail = [f"{e['kind']}#{e['seq']}" for e in
+                    self.store.events_since(0, limit=2000)
+                    if job_id in str(e)][-6:]
+        except Exception:   # noqa: BLE001 — evidence must not mask
+            tail = []       # the timeout itself
+        raise TimeoutError(
+            f"job {job_id} not terminal after {timeout}s "
+            f"(stuck in state={state!r}; last events: {tail})")
