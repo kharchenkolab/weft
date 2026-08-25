@@ -65,6 +65,17 @@ SCHEMA_HINTS: dict[str, dict] = {
     # as the key had no signal it was wrong until the refusal (aba2
     # th594060f7 item 2b) — the dict-shape belongs in the schema, not
     # only the docstring
+    "env_find_near": {"spec": {
+        "description": ('Same spec shape as env_ensure: {"name", '
+                        '"deps": {"conda": [...], "pypi": [...], '
+                        '"cran": [...]}, ...} — the query asks which '
+                        'solved envs come close'),
+    }},
+    "service_start": {"task": {
+        "description": ('Same dict shape as task_submit\'s task= '
+                        '(command required; the service stays up and '
+                        'is health-checked)'),
+    }},
     "ensure_available": {
         "target": {
             "type": "object",

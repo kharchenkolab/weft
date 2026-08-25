@@ -23,8 +23,10 @@ def test_kernel_start_accepts_an_inline_spec(w, tmp_path, monkeypatch):
     The spec now auto-ensures (enable, don't refuse)."""
     seen = {}
 
-    def spy(site, lang="python", env_id=None, **kw):
-        seen["env_id"] = env_id
+    def spy(*args, **kw):
+        seen["env_id"] = kw.get("env_id") or next(
+            (a for a in args if isinstance(a, str)
+             and a.startswith("env:")), None)
         return {"kernel_id": "kr_test"}
     monkeypatch.setattr(w.kernels, "start", spy)
     monkeypatch.setattr(
@@ -70,7 +72,7 @@ def test_data_evict_conflicting_alias_refuses(w):
 def test_data_list_accepts_site_alias(w):
     got = w.data_list(site="nowhere-site")
     assert got.get("error") != "tool.bad_arguments"
-    assert got["rows"] == []
+    assert got["refs"] == []
 
 
 def test_why_and_reason_cross_aliases(w):
@@ -101,7 +103,7 @@ def test_dict_params_carry_schema_hints():
         ("site_load", "resources"), ("kernel_start", "resources"),
         ("data_register", "meta"), ("site_note", "note"),
         ("gc_plan", "policy"), ("gc_sweep", "policy"),
-        ("service_start", "spec"), ("reconcile", "opts"),
+        ("reconcile", "opts"),
     }
     missing = []
     for v in PUBLIC_TOOLS:

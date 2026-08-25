@@ -132,6 +132,20 @@ def tool(fn):
     return wrapper
 
 
+def _alias(primary, alias, pname: str, aname: str):
+    """Accept a sibling verb's spelling for the same concept (verb
+    census: at= vs site=, why= vs reason= cost live round-trips).
+    Both-set-and-different refuses — silently preferring one would
+    make the call mean something the caller didn't say."""
+    if primary is not None and alias is not None and primary != alias:
+        raise WeftError(
+            "task.invalid",
+            f"{pname}= and its alias {aname}= were both given and "
+            f"differ", stage="infra",
+            hints={pname: primary, aname: alias})
+    return primary if primary is not None else alias
+
+
 def _bounded(value, lo: int, hi: int, param: str) -> int:
     """Validate an agent-facing numeric lever. Out-of-range REFUSES with
     the bounds named — a silent clamp would report a run made with
@@ -986,12 +1000,14 @@ class Weft:
         env_why explains one package."""
         return self.envman.status(env_id)
 
-    def env_revise(self, env_id: str, reason: str = "") -> dict:
+    def env_revise(self, env_id: str, reason: str = "",
+                   why: str | None = None) -> dict:
         """Reproduce-else-revise: when an EnvID can no longer be realized as
         recorded (package pulled, snapshot moved), re-solve its original spec
         and report the package-level diff. Mints a NEW EnvID — the old one
         stays valid as a record and nothing is silently redefined. Sites can
         do this automatically with policy `on_drift: "revise"`."""
+        reason = _alias(reason or None, why, "reason", "why") or ""
         return self.envman.revise(env_id, reason)
 
     def env_find_near(self, spec: dict, site: str | None = None,
@@ -1430,7 +1446,8 @@ class Weft:
         return self.dataman.describe(ref)
 
     def data_list(self, kind: str | None = None, at: str | None = None,
-                  limit: int = 100, cursor: str | None = None) -> dict:
+                  limit: int = 100, cursor: str | None = None,
+                  site: str | None = None) -> dict:
         """Enumerate DataRefs this workspace knows (consumers rendering a
         data view need enumeration, not N point reads): rows carry
         {ref, kind, bytes, meta, locations} with the typed `external`
@@ -1438,6 +1455,7 @@ class Weft:
         at= (site with a present copy). Keyset pagination: pass
         `next_cursor` back as cursor= — refs are content addresses, so
         a page can never shift or duplicate under writes."""
+        at = _alias(at, site, "at", "site")
         kind = _vocab(kind, ("file", "tree", "chunked"), "data kind")
         limit = max(1, min(int(limit), 1000))
         rows = self.store.datarefs_page(kind=kind, at_site=at, limit=limit,
@@ -1596,9 +1614,11 @@ class Weft:
                                        offset=offset, length=length,
                                        site=site)
 
-    def data_evict(self, ref: str, at: str, dry_run: bool = False,
-                   force: bool = False) -> dict:
-        """Drop ONE copy of a dataset at a named place — at=<site>
+    def data_evict(self, ref: str, at: str | None = None,
+                   dry_run: bool = False,
+                   force: bool = False, site: str | None = None) -> dict:
+        """Drop ONE copy of a dataset at a named place (site= is an
+        accepted alias for at=) — at=<site>
         removes a staged/site-CAS copy; at="@workspace" removes the
         controller CAS blob (never fetched files: those are YOUR saved
         copies). The targeted reclaim verb (runs have run_forget/
@@ -1618,6 +1638,12 @@ class Weft:
         refusal embedded instead of raised. ADVISORY: the world can
         move between preview and click; the real call re-checks and
         may still refuse."""
+        at = _alias(at, site, "at", "site")
+        if at is None:
+            raise WeftError("task.invalid",
+                            "data_evict needs at= (site name or "
+                            "\"@workspace\"); site= is an accepted "
+                            "alias", stage="infra")
         from .gc import _pinned_refs
         return self.dataman.evict(ref, at, self.adapters,
                                   _pinned_refs(self.store),
@@ -1756,10 +1782,13 @@ class Weft:
             return {"state": "FAILED", **(job["error"] or {})}
         return {"state": job["state"], "note": "not terminal yet — poll events"}
 
-    def task_cancel(self, job_id: str, why: str = "") -> dict:
-        """Cancel a job. Pass `why` — cancellations are part of the record
+    def task_cancel(self, job_id: str, why: str = "",
+                    reason: str | None = None) -> dict:
+        """Cancel a job. Pass `why` (reason= is an accepted alias) —
+        cancellations are part of the record
         ("hung: no output for 20 min, node memory exhausted"), and the
         cause is what makes the audit trail useful later."""
+        why = _alias(why or None, reason, "why", "reason") or ""
         self.store.audit_log(None, "task.cancel", command=job_id,
                              why=why)
         out = self.runner.cancel(job_id)
@@ -2159,7 +2188,9 @@ class Weft:
                      label: str = "",
                      session_id: str | None = None,
                      capture: str = "transcript") -> dict:
-        """lang: "python" | "r" | "julia" (case-insensitive). A solved
+        """lang: "python" | "r" | "julia" (case-insensitive). env_id
+        takes an EnvID OR an inline spec (auto-ensured — same
+        contract as session_start). A solved
         env auto-realizes on the site (realize.* events narrate; same
         door session_start uses) — no env_realize round-trip. resources=
         {"gpus": 1, "partition": "gpu"} on a scheduler site holds a node
@@ -2174,6 +2205,15 @@ class Weft:
         kernel, visible to the next block. Promotion auto-snapshots the
         session into a real EnvID so the record never cites a moving
         target."""
+        if isinstance(env_id, dict):
+            # same-name-same-contract as session_start (verb census:
+            # the SAME parameter name accepted a spec there and refused
+            # one here — an agent that learned the session shape was
+            # wrong on the sibling): an inline spec auto-ensures
+            got = self.env_ensure(env_id)
+            if "error" in got:
+                return got
+            env_id = got["env_id"]
         try:
             r = self.kernels.start(site, lang, env_id, walltime, resources,
                                    label=label, session_id=session_id,
