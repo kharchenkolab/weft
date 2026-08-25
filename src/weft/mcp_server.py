@@ -183,11 +183,11 @@ def serve(weft, stdin=None, stdout=None) -> None:
                 reply(msg_id, error={"code": -32602,
                                      "message": f"unknown tool {name!r}"})
                 continue
-            try:
-                result = getattr(weft, name)(**args)
-            except TypeError as e:  # bad arguments — schema violation
-                reply(msg_id, error={"code": -32602, "message": str(e)})
-                continue
+            # bad arguments are the WRAPPER's job now (tool.bad_arguments
+            # with the live signature) — a second TypeError parser here
+            # was the two-implementations bug: agents got a bare -32602
+            # while every other weft error crossed as a flagged payload
+            result = getattr(weft, name)(**args)
             payload = json.dumps(result, default=str)
             reply(msg_id, {
                 "content": [{"type": "text", "text": payload}],

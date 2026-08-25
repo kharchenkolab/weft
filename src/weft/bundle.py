@@ -68,8 +68,11 @@ def _closure(weft, job_id: str, depth: int = 10):
 def export_bundle(weft, job_id: str, out_path: str,
                   metadata=None) -> dict:
     """`metadata` is a caller-owned sealed envelope: bytes or any JSON
-    value, stored as a separate archive member and returned verbatim by
-    import. weft never parses it, and it does not enter the bundle's
+    value, stored as a separate archive member. Import returns JSON
+    verbatim; BYTES come back base64-encoded with
+    metadata_encoding="base64" (every envelope is JSON-shaped — the
+    boundary contract; one b64decode restores the exact bytes). weft
+    never parses it, and it does not enter the bundle's
     identity or the re-derivation proof. It belongs to THIS export call —
     re-exporting an imported bundle does not carry an old envelope
     forward (no inheritance, so no merge semantics to invent)."""
@@ -240,15 +243,23 @@ def import_bundle(weft, path: str) -> dict:
         if man.get("schema") != SCHEMA:
             raise WeftError("task.invalid",
                             f"not a {SCHEMA} bundle", stage="staging")
-        # the host's sealed envelope, verbatim: json in, json out;
-        # bytes in, bytes out. None = no envelope was supplied.
-        host_meta = None
+        # the host's sealed envelope: json in, json out verbatim; BYTES
+        # cross as base64 with metadata_encoding="base64" — every
+        # envelope is JSON-shaped (boundary contract; raw bytes here
+        # were the one payload in the tree json.dumps could not carry,
+        # and MCP consumers received repr-garbled text via default=str
+        # — found the day the strict envelope seal landed). None = no
+        # envelope was supplied.
+        host_meta, meta_encoding = None, None
         names = set(tar.getnames())
         if "bundle/host-metadata.json" in names:
             host_meta = json.loads(
                 tar.extractfile("bundle/host-metadata.json").read())
         elif "bundle/host-metadata.bin" in names:
-            host_meta = tar.extractfile("bundle/host-metadata.bin").read()
+            import base64
+            host_meta = base64.b64encode(
+                tar.extractfile("bundle/host-metadata.bin").read()).decode()
+            meta_encoding = "base64"
         with tempfile.TemporaryDirectory() as td:
             tar.extractall(td, filter="data")
             import hashlib
@@ -305,6 +316,7 @@ def import_bundle(weft, path: str) -> dict:
     return {
         "target_job": man["target_job"],
         "metadata": host_meta,
+        **({"metadata_encoding": meta_encoding} if meta_encoding else {}),
         "task": {k: v for k, v in target["task"].items()
                  if k not in ("site",)},
         "recorded_outputs": [

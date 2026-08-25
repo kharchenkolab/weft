@@ -44,9 +44,17 @@ def test_bytes_envelope_and_none_default(w, tmp_path):
     job = _done_job(w)
     blob = b"\x00\x01opaque\xff not utf-8 \xfe"
     b = w.bundle_export(job, str(tmp_path / "b1.tgz"), metadata=blob)
-    assert w.bundle_import(b["path"])["metadata"] == blob
+    imp = w.bundle_import(b["path"])
+    # bytes cross the JSON boundary base64-encoded, self-described —
+    # exact bytes back after ONE decode (raw bytes were the tree's only
+    # non-JSON payload; MCP consumers got repr garbage via default=str)
+    assert imp["metadata_encoding"] == "base64"
+    import base64
+    assert base64.b64decode(imp["metadata"]) == blob
     b2 = w.bundle_export(job, str(tmp_path / "b2.tgz"))
-    assert w.bundle_import(b2["path"])["metadata"] is None
+    imp2 = w.bundle_import(b2["path"])
+    assert imp2["metadata"] is None
+    assert "metadata_encoding" not in imp2
 
 
 def test_envelope_never_perturbs_the_record(w, tmp_path):

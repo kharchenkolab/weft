@@ -89,10 +89,12 @@ def test_full_job_over_mcp(client, tmp_path):
 def test_errors_are_flagged_payloads(client):
     payload, is_err = client.call("task_result", job_id="jb_nonexistent")
     assert is_err and payload["error"] == "task.invalid"
-    # bad arguments → JSON-RPC error, not a crash
-    r = client.rpc("tools/call", {"name": "task_result", "arguments":
-                                  {"nope": 1}})
-    assert r["error"]["code"] == -32602
+    # bad arguments → the SAME flagged-payload path as every weft
+    # error, now with the live signature (the old bare -32602 was a
+    # second, poorer parser of the binding boundary)
+    payload2, is_err2 = client.call("task_result", nope=1)
+    assert is_err2 and payload2["error"] == "tool.bad_arguments"
+    assert "task_result(" in payload2["hints"]["signature"]
     # unknown tool
     r2 = client.rpc("tools/call", {"name": "frobnicate", "arguments": {}})
     assert r2["error"]["code"] == -32602
