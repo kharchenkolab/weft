@@ -170,15 +170,8 @@ class EnvManager:
         # adopt-only workspace "re-ensure the parent's SPEC" raises
         # parent-spec-not-found (the very failure the adopt round
         # fixed by moving away from)
-        move_base = (
-            "`extends_env` freezes the base on purpose. To move it, "
-            + ("re-ensure with `extends` (the parent's SPEC hash) for "
-               "a free re-solve and a full prefix."
-               if parent_spec is not None else
-               "adopt a newer published version of the pack, or "
-               "bundle_import the env from a workspace that holds its "
-               "spec (this adopt-only workspace has no spec body to "
-               "re-solve from)."))
+        from .remedies import move_base as _move_base
+        move_base = _move_base(parent_spec is not None)
 
         def pin_maps(pins_fn):
             return {p: {split_constraint(x)[0]: split_constraint(x)[1]
@@ -521,23 +514,13 @@ class EnvManager:
                               "conflicts with the frozen base; note a conda "
                               "delta realizes as a full prefix, not an "
                               "overlay)")
-            elif self._lookup_spec(parent_env["spec_hash"]) is not None:
-                suggestion = ("re-ensure with `extends` (the parent's SPEC "
-                              "hash) instead of `extends_env`: that frees "
-                              "the base to move, costs a full solve and a "
-                              "full prefix, and is the right call when the "
-                              "delta genuinely needs a newer base")
             else:
-                # same shut door as the layer_conflict remedy (consumer
-                # audit 2026-08-25): on an adopt-only workspace there is
-                # no parent spec body — "re-ensure with extends" raises
-                # parent-spec-not-found
-                suggestion = ("the base is frozen and this workspace holds "
-                              "no spec body for the parent (adopt-only) — "
-                              "adopt a newer published version of the pack, "
-                              "or bundle_import the env from a workspace "
-                              "that has its spec, then re-ensure with "
-                              "`extends`")
+                # ONE owner for the extends_env door (the four-copies
+                # incident): the registry discriminates adopt-only
+                from .remedies import move_base as _move_base
+                suggestion = _move_base(
+                    self._lookup_spec(parent_env["spec_hash"])
+                    is not None)
             hints = {
                 "parent": merged.extends_env,
                 "delta": merged.conda + merged.pypi
@@ -735,11 +718,14 @@ class EnvManager:
                             stage="solve")
         spec_body = self.store.get_spec(old["spec_hash"])
         if not spec_body:
+            # a row without a spec body is the ADOPTED/legacy shape —
+            # "re-ensure from the original spec" is a shut door there
+            from .remedies import revise_no_spec
             raise WeftError(
                 "task.invalid",
                 f"no spec recorded for {env_id} — cannot revise",
                 stage="solve",
-                hints={"suggestion": "re-ensure from the original spec"})
+                hints={"suggestion": revise_no_spec(adopted=True)})
         # solve fresh from the spec — and keep the solver's OWN output: the
         # stored row is exactly what we suspect is stale, so reading it back
         # would defeat the point (put_env is insert-or-ignore by design)
@@ -762,19 +748,11 @@ class EnvManager:
         except WeftError as e:
             if parent_env is None or e.code != "env.solve_conflict":
                 raise
-            # the free-the-base door only OPENS when the parent's spec
-            # body is stored — on an adopt-only workspace "re-ensure
-            # with `extends`" raises parent-spec-not-found (fourth
-            # hardcoded copy of the shut door, found by the remedy
-            # sweep; same gate as ensure()'s catch above)
-            if self._lookup_spec(parent_env["spec_hash"]) is not None:
-                free = ("— or re-ensure with `extends` (the parent's "
-                        "SPEC hash) to free the base")
-            else:
-                free = ("(this adopt-only workspace holds no spec body "
-                        "for the parent: to move the base, adopt a newer "
-                        "published version or bundle_import the env from "
-                        "a workspace that has its spec)")
+            # ONE owner for the extends_env door (fourth copy of the
+            # shut-door incident lived here)
+            from .remedies import move_base as _move_base
+            free = _move_base(
+                self._lookup_spec(parent_env["spec_hash"]) is not None)
             raise WeftError(
                 "env.layer_conflict",
                 "revise cannot keep the base frozen: the parent's pinned "
@@ -783,7 +761,7 @@ class EnvManager:
                        "solver_message": e.hints.get("solver_message", ""),
                        "suggestion": "revise the parent first, then "
                                      "re-ensure this child on the revised "
-                                     f"parent {free}"})
+                                     f"parent. {free}"})
         canonical = result.canonical
         conda_pkgs = _conda_provided(canonical)
         for eco, deps in sorted(merged.deps_extra.items()):

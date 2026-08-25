@@ -101,3 +101,8 @@ def test_cran_realize_failure_persists_log_and_regions(tmp_path):
         "logs/crantest-cran-realize.log")
     assert Path(e.hints["log_path"]).exists()
     assert "log_tail" in e.hints and "error_regions" in e.hints
+    # the note is GATED on the evidence (remedy census): a shell error
+    # with no network markers must NOT get the air-gapped steer that
+    # misdirected the r-signac agent
+    assert "air-gapped" not in e.hints["note"]
+    assert "error_regions" in e.hints["note"]

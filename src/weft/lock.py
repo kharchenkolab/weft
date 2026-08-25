@@ -302,7 +302,10 @@ _CONFLICT_MARKERS = (
     "unsatisfiable",
     "failed to resolve",
 )
-_NETWORK_MARKERS = ("connection", "timed out", "dns", "network", "fetch repodata")
+# one owner for the network-marker vocabulary (remedies gates notes on
+# it too — a second copy here drifted once already)
+from .remedies import NETWORK_MARKERS as _NETWORK_MARKERS  # noqa: E402
+from .remedies import solve_conflict as _remedy_solve_conflict  # noqa: E402,E501
 
 # pixi failed READING the manifest — nothing was solved. Probed verbatim
 # against real pixi: dup-key says "duplicate key"; every parse error
@@ -426,6 +429,10 @@ def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi",
             hints={
                 "solver_message": tail,
                 "user_pins": spec.conda + spec.pypi,
+                # gated: "no candidates" = the name/version does not
+                # EXIST — softening pins cannot conjure it (remedy
+                # census; the r-signac agent got relax-advice for a
+                # package conda-forge does not carry)
                 # labeled separately: on the extends_env path these are
                 # MACHINE-written parent pins (one map per platform) —
                 # folding them into user_pins would bury the authored
@@ -436,12 +443,7 @@ def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi",
                    if spec.variants else {}),
                 # weft's own one-call answer to this exact error — agents read
                 # hints under pressure, not the reference docs (eval finding)
-                "suggestion": "mark the negotiable pins SOFT with a trailing "
-                              "'?' (e.g. \"scipy ==1.14.1?\") and call "
-                              "env_ensure(..., relax=\"soft\"): weft relaxes "
-                              "only those, reports what it gave up, and the "
-                              "result is still fully pinned. Or relax/remove "
-                              "the conflicting pin named in solver_message.",
+                "suggestion": _remedy_solve_conflict(tail),
             },
         )
     native = lockfile.read_text()

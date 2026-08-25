@@ -2161,14 +2161,16 @@ class SessionManager:
                 out["detail"] = (
                     "the snapshot env was minted but does NOT rebuild: " +
                     e.detail)
-                out["hints"] = {
-                    **e.hints,
-                    "suggestion": "an installer step depends on something "
-                                  "that is not in the env: register its "
-                                  "sources (data_register) and re-run it via "
-                                  "session_run_installer(..., inputs=[...]), "
-                                  "or make the step self-contained",
-                }
+                # the underlying hints may carry a correctly-GATED
+                # diagnosis (syslib/network from the realize lane) —
+                # the installer-inputs advice only overrides it when
+                # unportable paths actually exist (remedy census #5:
+                # this unconditional overwrite buried real evidence)
+                from .remedies import snapshot_verify_failed
+                out["hints"] = {**e.hints}
+                _sug = snapshot_verify_failed(unportable)
+                if _sug:
+                    out["hints"]["suggestion"] = _sug
                 self.store.emit("session.snapshot_unverified",
                                 session=session_id, env_id=result["env_id"])
                 return out

@@ -1341,13 +1341,17 @@ class Weft:
             args += ["--hash-under", str(hash_under)]
         r = adapter.shim(args, timeout=900)
         if r.rc != 0:
+            # gated: this note fired on ANY rc!=0 — bad paths,
+            # permissions, outages — none fixed by re-registering
+            # (remedy census #7); only the old-shim shape earns it
+            from .remedies import fingerprint_list_tree
+            _note = fingerprint_list_tree(r.err or r.out)
             raise WeftError(
                 "data.missing",
                 f"cannot fingerprint {path} on {site}: "
                 f"{(r.err or r.out)[:200]}",
                 stage="infra",
-                hints={"note": "old site shims lack file-root list-tree "
-                               "— re-register the site to refresh"})
+                hints={"note": _note} if _note else {})
         entries = []
         for line in r.out.splitlines():
             p = line.split("\t")

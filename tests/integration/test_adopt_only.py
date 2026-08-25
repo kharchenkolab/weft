@@ -451,3 +451,23 @@ def test_revise_remedy_discriminates_adopt_only(published_tree, wb,
     assert got["error"] == "env.layer_conflict", got
     assert "re-ensure with `extends`" not in got["hints"]["suggestion"]
     assert "adopt a newer published version" in got["hints"]["suggestion"]
+
+
+def test_no_candidates_suggestion_never_says_soften(tmp_path, pixi_bin):
+    """th594060f7 item 5, replayed: a package that does not EXIST on
+    the channel got 'mark pins SOFT / relax' advice — which cannot
+    apply. The suggestion is now gated on the solver's own words."""
+    w = Weft(tmp_path / "ws-nc", pixi_bin=pixi_bin, resume="off")
+    chan = tmp_path / "chan-nc"
+    for sub in (_subdir(), "noarch"):
+        (chan / sub).mkdir(parents=True)
+        (chan / sub / "repodata.json").write_text(json.dumps(
+            {"info": {"subdir": sub}, "packages": {},
+             "packages.conda": {}}))
+    got = w.env_ensure({"name": "nc", "channels": [chan.as_uri()],
+                        "platforms": [_subdir()],
+                        "deps": {"conda": ["weft-absent-pkg"]}})
+    assert got["error"] == "env.solve_conflict", got
+    sug = got["hints"]["suggestion"]
+    assert "does not exist" in sug
+    assert 'relax="soft"' not in sug

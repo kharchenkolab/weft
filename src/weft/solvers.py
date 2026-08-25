@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Protocol
 
 from .errors import WeftError
+from . import remedies as _remedies
+from .evidence import extract_error_regions as _extract_regions
 
 
 class Solver(Protocol):
@@ -770,12 +772,14 @@ class CranSolver:
             "cran layer install failed on site",
             stage="realize",
             hints={"ecosystem": "cran",
-                   **failure_evidence(adapter, log_rel, r.err or r.out),
+                   **(ev := failure_evidence(adapter, log_rel,
+                                             r.err or r.out)),
                    **(_syslib_hints((r.err or "") + (r.out or "")) or {}),
-                   "note": "cran realization needs network from the "
-                           "install point in v1; on air-gapped sites "
-                           "prefer conda-forge r-<name> packages or "
-                           "build R packages as tasks"},
+                   # gated on the evidence: the unconditional
+                   # air-gapped text steered the r-signac agent toward
+                   # networking on a dependency-NAME failure
+                   "note": _remedies.cran_realize_note(
+                       ev.get("error_regions"), r.out or "")},
         )
 
     def realize_overlay(self, layer: dict, parent_layer: dict | None,
@@ -913,13 +917,12 @@ class CranSolver:
                 "cran overlay layer install failed",
                 stage="realize",
                 hints={"ecosystem": "cran",
-                       **failure_evidence(adapter, log_rel,
-                                          r.err or r.out),
+                       **(ev := failure_evidence(adapter, log_rel,
+                                                 r.err or r.out)),
                        **(_syslib_hints((r.err or "") + (r.out or ""))
                           or {}),
-                       "note": "if the package needs a native library the "
-                               "parent lacks, it cannot be layered: add that "
-                               "conda package to the parent env"})
+                       "note": _remedies.cran_overlay_note(
+                           ev.get("error_regions"))})
         # populate the compile cache for everyone who comes next
         if store is not None and cas is not None:
             import tempfile
@@ -1041,9 +1044,11 @@ class CranSolver:
                 stage="realize",
                 hints={"ecosystem": "cran",
                        "log_tail": (r.err or r.out)[-1500:],
-                       "note": "packages build from source on the site; the "
-                               "conda layer must provide the toolchain "
-                               "(c-compiler, fortran-compiler, make)"})
+                       # evidence wiring for this offline lane is task
+                       # #124; the note GATE lands now (in-memory text)
+                       "note": _remedies.packed_cran_note(
+                           _extract_regions((r.err or "")
+                                            + (r.out or "")))})
         return f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"'
 
     def why(self, env_row: dict, package: str, workdir: Path) -> str:
@@ -1371,8 +1376,8 @@ class JuliaSolver:
                 hints={"ecosystem": "julia",
                        **failure_evidence(adapter, log_rel,
                                           r.err or r.out),
-                       "note": "julia realization needs network from the "
-                               "install point in v1"})
+                       "note": _remedies.julia_realize_note(
+                           (r.err or "") + (r.out or ""))})
         return (f'export JULIA_PROJECT="{env_dir}/julia"\n'
                 f'export JULIA_DEPOT_PATH="{depot}"')
 
