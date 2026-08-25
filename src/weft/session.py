@@ -2030,7 +2030,21 @@ class SessionManager:
               if d not in s["added_conda"]]
         spec = {
             "name": name or f"synth-of-{s['session_id']}",
-            "extends": env_row["spec_hash"],
+            # extends_env, NOT spec-hash extends (consumer report,
+            # 2026-08-25): adoption imports the env row (canonical +
+            # lock) but no specs row, so a spec-hash extends raised
+            # "parent spec not found" on EVERY adopt-only deployment —
+            # the only configuration publish/adopt ships. extends_env
+            # resolves off the env row adoption does create, AND it is
+            # the semantically correct snapshot: the base that RAN is
+            # the base that freezes (the zero-delta short-circuit
+            # protected only zero-delta sessions from date drift —
+            # this extends that intent to every snapshot). Rotation-
+            # proof via the synthesized parent channel; platforms
+            # declared from the parent (identity: a mac controller
+            # freezing a linux session must mint the linux env).
+            "extends_env": s["base_env_id"],
+            "platforms": list(env_row["platforms"] or []),
             # build_deps become REAL conda deps of the snapshot: the
             # compiled .so links their libs at runtime, and the target
             # site's realize-time compiles find their headers via the

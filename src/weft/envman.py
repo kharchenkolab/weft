@@ -465,13 +465,28 @@ class EnvManager:
                 # legacy env row (pre-native_lock): the failing exact
                 # pin is likely BUILD ROTATION (channels prune old
                 # builds), which the synthesized parent channel would
-                # have absorbed — but there is no lock to synthesize from
-                hints["rotation"] = (
-                    "the parent env row predates stored locks, so its "
-                    "exact builds must still exist on live channels — "
-                    "a rotated-away build fails exactly like this. "
-                    "Re-ensure the parent's spec to mint a lock-carrying "
-                    "row, then extend that.")
+                # have absorbed — but there is no lock to synthesize
+                # from. The remedy DISCRIMINATES by deployment shape:
+                # "re-ensure the parent's spec" costs a full solve on
+                # the user's clock — the exact cost adoption exists to
+                # avoid — and needs a spec body an adopt-only workspace
+                # may not have (consumer report 2026-08-25)
+                if self._lookup_spec(parent_env["spec_hash"]) is not None:
+                    hints["rotation"] = (
+                        "the parent env row predates stored locks, so "
+                        "its exact builds must still exist on live "
+                        "channels — a rotated-away build fails exactly "
+                        "like this. Re-ensure the parent's spec to mint "
+                        "a lock-carrying row, then extend that.")
+                else:
+                    hints["rotation"] = (
+                        "the parent env row predates stored locks AND "
+                        "carries no spec body (adopted from an older "
+                        "tree) — its exact builds must still exist on "
+                        "live channels. Re-adopt from a republished "
+                        "tree (which carries the lock), or "
+                        "bundle_import the env from a workspace that "
+                        "holds it.")
             hint = self._channel_hint(merged)
             if hint:                # the failure IS the hint's scenario
                 hints["channel_hint"] = hint

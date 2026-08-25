@@ -243,7 +243,14 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
             # honest numbers: say WHERE the churn landed and why
             meta["staging"] = {"used": False, "why": staging_why}
 
-    # lock sidecar: everything a consumer needs to adopt WITHOUT solving
+    # lock sidecar: everything a consumer needs to adopt WITHOUT solving.
+    # spec_body included (the bundle format's precedent): without it, an
+    # adopt-only workspace has a dangling spec_hash and SIX consumers
+    # silently degrade — verify: blocks never run at adopt/rebuild/
+    # postcondition, env summaries lose their name, provenance loses the
+    # spec, revise refuses (consumer report 2026-08-25: their pack's
+    # verify block — added to catch the post-link class — was invisible
+    # on their own deployment)
     lock_rel = f"{tree}/locks/{env_id.rsplit(':', 1)[-1]}.json"
     adapter.write_file(lock_rel, json.dumps({
         "env_id": env_id, "spec_hash": env_row["spec_hash"],
@@ -251,6 +258,7 @@ def publish(weft, env_id: str, site: str, tree: str, name: str,
         "native_lock": env_row["native_lock"],
         "manifest": env_row["manifest"],
         "platforms": env_row["platforms"],
+        "spec_body": weft.store.get_spec(env_row["spec_hash"]),
     }).encode())
 
     catalog = _read_catalog(adapter, tree)
@@ -319,16 +327,33 @@ def adopt(weft, site: str, tree: str, name: str,
             hints={"versions": sorted(entry["versions"]),
                    "latest": entry.get("latest")})
     env_id = rec["env_id"]
+    spec_note = None
     if not weft.store.get_env(env_id):
         lock_rel = f"{tree}/locks/{env_id.rsplit(':', 1)[-1]}.json"
         side = json.loads(adapter.read_file(lock_rel).decode())
         weft.store.put_env(env_id, side["spec_hash"], side["canonical"],
                            side["native_lock"], side["manifest"],
                            side["platforms"])
+        body = side.get("spec_body")
+        if body:
+            # the spec row rides along: verify: blocks run at adoption,
+            # summaries/provenance keep their names, spec-hash extends
+            # resolves. Absent on pre-spec_body trees — tolerated, and
+            # said so (session snapshots use extends_env and work
+            # regardless)
+            weft.store.put_spec(side["spec_hash"],
+                                body.get("name") or name, body)
+        else:
+            spec_note = ("this tree predates spec_body sidecars: the "
+                         "pack's verify: block (if any) cannot run at "
+                         "adoption and spec-hash extends won't resolve "
+                         "— snapshots and extends_env work regardless; "
+                         "a republish upgrades the tree")
     out = {"env_id": env_id, "name": name, "version": v, "tree": tree,
            "note": "imported from the published lock — no solve; use this "
                    "env_id in task_submit/kernel_start; extends_env works "
-                   "on top"}
+                   "on top",
+           **({"spec_note": spec_note} if spec_note else {})}
     floor = rec.get("glibc_floor")
     site_glibc = ((weft.store.get_site(site) or {})
                   .get("capabilities") or {}).get("glibc") or ""

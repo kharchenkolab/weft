@@ -42,7 +42,7 @@ def test_every_public_method_is_registered_or_excluded():
 # full green lanes certified it, because its only test was docker-marked
 # — a green lane proves exactly what it measures, nothing more.
 FAST_LANE_UNCOVERED = {
-    "doctor", "env_adopt", "env_find_near", "env_gpu_hint",
+    "doctor", "env_find_near", "env_gpu_hint",
     "env_repair", "env_revise", "env_unpublish", "gc_packages",
     "job_node_exec", "module_list", "site_associations", "site_footprint",
     "site_load", "site_probe", "site_probe_deep", "site_route_probe",

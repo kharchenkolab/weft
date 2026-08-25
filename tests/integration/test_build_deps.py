@@ -98,7 +98,7 @@ def test_build_deps_recorded_and_folded_into_snapshot_spec(w, monkeypatch):
     # the snapshot spec carries them as REAL conda deps (runtime .so
     # linkage), deduped against added_conda
     monkeypatch.setattr(w.sessions.store, "get_env",
-                        lambda eid: {"spec_hash": "spec:v1:p"})
+                        lambda eid: {"spec_hash": "spec:v1:p", "platforms": ["linux-64"]})
     spec = w.sessions._synth_spec(s)
     assert set(spec["deps"]["conda"]) == {"xz", "zlib"}
 

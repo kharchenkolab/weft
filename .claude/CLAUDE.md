@@ -159,4 +159,14 @@ remotes, removable in one command.
   callers before closing — the misfired-edit blast-radius rule
   applies to FIXES: the pattern is the function's call sites, not the
   one in view.
+- DEPLOYMENT SHAPES are a fixture dimension: the configuration
+  consumers actually ship must exist as a test fixture, not just the
+  configuration development produces. Adopted packs could never be
+  snapshotted, on every production install, because every session test
+  — weft's AND the consumer's — ran on SOLVED workspaces, where
+  env_ensure writes the specs row as a side effect; the adopt-only
+  workspace (the entire point of publish/adopt) was never a fixture
+  (2026-08-25). test_adopt_only.py's publish-in-A/adopt-in-fresh-B
+  fixture is the pattern: hand-off artifacts cross REAL workspace
+  boundaries, only site tooling the lane lacks gets stubbed.
 - No biological examples in specs, tests, or docs.

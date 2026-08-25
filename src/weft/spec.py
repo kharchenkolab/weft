@@ -550,7 +550,16 @@ def resolve_extends(
             "task.invalid",
             f"parent spec not found: {spec.extends}",
             stage="solve",
-            hints={"missing": spec.extends},
+            hints={"missing": spec.extends,
+                   "note": "spec-hash extends needs the parent's SPEC "
+                           "BODY in this workspace; an env row alone "
+                           "(adopted from a pre-spec_body tree) is not "
+                           "enough",
+                   "suggestion": "extend the ENV instead — "
+                                 "{\"extends_env\": \"<EnvID>\"} "
+                                 "resolves off the env row and needs "
+                                 "no spec body — or re-adopt from a "
+                                 "republished tree"},
         )
     parent = resolve_extends(parent, lookup, _depth + 1)
     return spec.merged_onto(parent)

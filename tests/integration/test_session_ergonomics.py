@@ -39,7 +39,7 @@ def test_validate_solve_carries_cran(w, monkeypatch):
          "added_conda": [], "added_pypi": [], "added_cran": ["r-glue"]}
     monkeypatch.setattr(
         w.sessions.store, "get_env",
-        lambda eid: {"spec_hash": "spec:v1:parent"})
+        lambda eid: {"spec_hash": "spec:v1:parent", "platforms": ["linux-64"]})
     got = w.sessions._validate_solve(s, [], cran=["r-vctrs"])
     assert got == "env:v1:x"
     assert asked["spec"]["deps"]["cran"] == ["r-glue", "r-vctrs"]
@@ -50,7 +50,7 @@ def test_validate_solve_failure_names_cran_request(w, monkeypatch):
         raise WeftError("env.solve_conflict", "no", stage="solve")
     monkeypatch.setattr(w.sessions.envman, "ensure", boom)
     monkeypatch.setattr(w.sessions.store, "get_env",
-                        lambda eid: {"spec_hash": "spec:v1:p"})
+                        lambda eid: {"spec_hash": "spec:v1:p", "platforms": ["linux-64"]})
     s = {"session_id": "s", "base_env_id": "e", "added_conda": [],
          "added_pypi": [], "added_cran": []}
     with pytest.raises(WeftError) as ei:
@@ -68,7 +68,7 @@ def test_freezable_true_and_false_paths(w, monkeypatch):
                 "installers": [{"cmd": "make install", "note": "tool"}]}
     monkeypatch.setattr(w.sessions, "_get", fake_get)
     monkeypatch.setattr(w.sessions.store, "get_env",
-                        lambda eid: {"spec_hash": "spec:v1:p"})
+                        lambda eid: {"spec_hash": "spec:v1:p", "platforms": ["linux-64"]})
     monkeypatch.setattr(
         w.sessions.envman, "ensure",
         lambda spec, dry_run=False, **kw: calls.update(dry=dry_run)
@@ -117,12 +117,18 @@ def test_synth_spec_one_owner_for_probe_and_snapshot(w, monkeypatch):
     """The freezable probe and the snapshot must ask the same question
     (drift between them re-creates the surprise the verb removes)."""
     monkeypatch.setattr(w.sessions.store, "get_env",
-                        lambda eid: {"spec_hash": "spec:v1:p"})
+                        lambda eid: {"spec_hash": "spec:v1:p", "platforms": ["linux-64"]})
     s = {"session_id": "s1", "base_env_id": "e", "added_conda": ["zlib"],
          "added_pypi": ["idna"], "added_cran": ["r-glue"],
          "added_cran_repos": ["https://r.example"],
          "installers": [{"cmd": "./setup.sh"}]}
     spec = w.sessions._synth_spec(s)
+    # adopt-only fix (2026-08-25): the snapshot extends the ENV, not
+    # the spec hash — adoption creates no specs row, and the base that
+    # RAN is the base that freezes
+    assert spec["extends_env"] == "e"
+    assert "extends" not in spec
+    assert spec["platforms"] == ["linux-64"]
     assert spec["deps"]["conda"] == ["zlib"]
     assert spec["deps"]["pypi"] == ["idna"]
     assert spec["deps"]["cran"] == ["r-glue"]
