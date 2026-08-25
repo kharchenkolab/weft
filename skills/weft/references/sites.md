@@ -18,6 +18,13 @@ w.register_site("beamlab", "ssh", {
 # runs on the site and otherwise fetches the pinned release for the
 # site's own platform (a mac laptop driving a linux cluster just works)
 #
+# "~" in site paths (root, pixi_cache, durable, policy.storage.*) is
+# resolved against the SITE's home at registration and stored
+# absolute — the result's resolved_paths echoes every rewrite.
+# pixi_source is a CONTROLLER path ("~" = the controller's home) and
+# must exist. A pre-existing registration that still carries a
+# literal "~" refuses with "re-register the site".
+#
 # site config `prefer: "squashfs"` forces image-based realization
 # (read-only institutional envs, NFS trees); parallel-FS roots
 # (BeeGFS/Lustre/GPFS) get it automatically when the site can

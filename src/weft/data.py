@@ -105,6 +105,15 @@ class DataManager:
         copy); a stat-fence at every staging fails data.verify_failed
         if the home drifted. Bytes are ingested lazily only when they
         must MOVE (cross-site staging / fetch)."""
+        if not str(abs_path).startswith("/"):
+            # the parameter's name was the only enforcement (tilde
+            # audit): quoted site-side, '~' or a relative path tests a
+            # literal name against the remote cwd and reports not-found
+            raise WeftError(
+                "task.invalid",
+                f"site paths must be absolute, got {abs_path!r} "
+                f"('~' is not expanded site-side — spell out the home)",
+                stage="staging", hints={"param": "path", "site": site})
         import shlex as _sh
         q = _sh.quote(abs_path)
         probe = adapter.run_cmd(
@@ -1487,7 +1496,9 @@ class DataManager:
     def fetch(self, ref: str, to_path: str | Path, adapters: dict,
               transfers: dict, writable: bool = False) -> dict:
         """Bring a ref's content back to the workspace (doc 05 data.fetch)."""
-        dest = Path(to_path)
+        # controller-realm: '~' is the user's home, never a literal
+        # workspace subdir (tilde audit)
+        dest = Path(to_path).expanduser()
         if not dest.is_absolute():
             dest = self.workspace / dest
         kind_here = self.cas.kind_of(ref)

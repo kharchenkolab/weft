@@ -149,6 +149,100 @@ def _bounded(value, lo: int, hi: int, param: str) -> int:
     return v
 
 
+_SITE_REALM_KEYS = ("root", "pixi_cache", "durable", "publish_staging")
+_SITE_REALM_STORAGE = ("large", "scratch", "node_tmp")
+_CONTROLLER_REALM_KEYS = ("pixi_source", "pixi_unpack_source")
+
+
+def _site_realm_values(config: dict):
+    """Every site-realm path in a config, as (label, value, setter).
+    ONE enumeration — adding a path-shaped config key means adding it
+    to the realm tables above (the WEFT_STAMPED-frozenset pattern)."""
+    for k in _SITE_REALM_KEYS:
+        v = config.get(k)
+        if isinstance(v, str):
+            yield k, v, (lambda nv, c=config, k=k: c.__setitem__(k, nv))
+    st = (config.get("policy") or {}).get("storage") or {}
+    for k in _SITE_REALM_STORAGE:
+        v = st.get(k)
+        if isinstance(v, str):
+            yield (f"policy.storage.{k}", v,
+                   (lambda nv, c=st, k=k: c.__setitem__(k, nv)))
+        elif isinstance(v, list):
+            for i, item in enumerate(v):
+                if isinstance(item, str):
+                    yield (f"policy.storage.{k}[{i}]", item,
+                           (lambda nv, c=v, i=i: c.__setitem__(i, nv)))
+
+
+def _normalize_site_config(config: dict, resolve_home) -> tuple[dict, dict]:
+    """Path realms, one owner (tilde audit 2026-08-25: '~' in a site
+    root rode registration+probe+shim as a literal directory and
+    detonated 185s later as a rattler NotAbsolute panic — 4th live
+    hit; pixi_source '~' crashed ssh registration raw and silently
+    SKIPPED the local tool push).
+
+    Controller-realm keys (pixi_source, pixi_unpack_source) name files
+    on THIS machine: expanduser here is correct, and a missing
+    pixi_source refuses NOW instead of surfacing tool-less at first
+    realize. Site-realm keys resolve '~' against the SITE's home via
+    resolve_home() — expand-and-store, echoed to the caller (enable
+    and inform; a refusal would cost the agent a round-trip the
+    resolution answers exactly). Returns (config, resolved)."""
+    import copy
+    import os
+    cfg = copy.deepcopy(config)
+    resolved: dict[str, str] = {}
+    for k in _CONTROLLER_REALM_KEYS:
+        v = cfg.get(k)
+        if isinstance(v, str) and v.startswith("~"):
+            cfg[k] = os.path.expanduser(v)
+            resolved[k] = cfg[k]
+        if k == "pixi_source" and isinstance(cfg.get(k), str) \
+                and not os.path.exists(cfg[k]):
+            raise WeftError(
+                "task.invalid",
+                f"pixi_source does not exist on the controller: "
+                f"{cfg[k]}",
+                stage="infra",
+                hints={"key": k,
+                       "note": "controller-realm path — it names the "
+                               "binary weft pushes to the site; the "
+                               "old behavior silently skipped the "
+                               "push and the site surfaced tool-less "
+                               "at first realize"})
+    tilde = [(lbl, v, put) for lbl, v, put in _site_realm_values(cfg)
+             if v.startswith("~")]
+    if tilde:
+        home = resolve_home()
+        if not home:
+            raise WeftError(
+                "task.invalid",
+                "the config uses '~' paths but the site's home could "
+                "not be resolved — use absolute paths",
+                stage="infra",
+                hints={"keys": [lbl for lbl, _, _ in tilde]})
+        for lbl, v, put in tilde:
+            if v == "~" or v.startswith("~/"):
+                nv = home + v[1:]
+            else:
+                raise WeftError(
+                    "task.invalid",
+                    f"{lbl}: '~user' paths are not supported — use an "
+                    f"absolute path", stage="infra", hints={"got": v})
+            put(nv)
+            resolved[lbl] = nv
+    root = cfg.get("root")
+    if isinstance(root, str) and not root.startswith("/"):
+        raise WeftError(
+            "task.invalid",
+            f"root must be absolute, got {root!r} — a relative root "
+            f"resolves against whatever directory the controller "
+            f"happens to run in",
+            stage="infra", hints={"key": "root"})
+    return cfg, resolved
+
+
 def _vocab(value: str | None, vocab: tuple, param: str,
            fold=str.lower) -> str | None:
     """Fold-and-validate a fixed-vocabulary filter/mode parameter. A
@@ -297,7 +391,28 @@ class Weft:
             except WeftError:
                 self.store.set_health(row["name"], "unreachable")
 
-    def _make_adapter(self, name: str, kind: str, config: dict) -> SiteAdapter:
+    def _make_adapter(self, name: str, kind: str, config: dict,
+                      allow_unresolved: bool = False) -> SiteAdapter:
+        # defensive realm gate for STORED rows (config persists
+        # verbatim; the registration-time normalization never re-runs
+        # on restore): a pre-fix '~' row must refuse TYPED here, never
+        # ride to the rattler panic. allow_unresolved=True is the
+        # registration-time probe adapter only.
+        if not allow_unresolved:
+            stale = [lbl for lbl, v, _ in _site_realm_values(config)
+                     if v.startswith("~")]
+            if stale:
+                raise WeftError(
+                    "task.invalid",
+                    f"site '{name}' carries unresolved '~' paths "
+                    f"({', '.join(stale)}) — re-register the site: "
+                    f"registration now resolves them against the "
+                    f"site's home",
+                    stage="infra",
+                    hints={"keys": stale,
+                           "suggestion": "register_site(name, kind, "
+                                         "config) again with the same "
+                                         "config"})
         if kind == "local":
             adapter = LocalAdapter(
                 name, Path(config["root"]), pixi_source=config.get("pixi_source"),
@@ -395,6 +510,14 @@ class Weft:
         tools = _vocab(tools, ("background", "sync", "skip"),
                        "tools mode") or "background"
         from .retain import storage_facts
+        # path realms FIRST: '~' resolves against the SITE's home (the
+        # probe adapter runs on the raw config — run_cmd never cds to
+        # root), the STORED config is absolute, and resolved_paths in
+        # the result names every rewrite
+        probe_adapter = self._make_adapter(name, kind, config,
+                                           allow_unresolved=True)
+        config, _resolved = _normalize_site_config(
+            config, probe_adapter.resolve_home)
         storage = storage_facts(config)   # validates `durable` up front
         adapter = self._make_adapter(name, kind, config)
         if not probe_only:
@@ -413,6 +536,7 @@ class Weft:
         if probe_only:
             self.adapters.pop(name, None)
             return {"site": name, "probe_only": True, "capabilities": caps,
+                    **({"resolved_paths": _resolved} if _resolved else {}),
                     "note": "nothing registered — the shim was written "
                             "under the root to run a real probe; "
                             "register_site without probe_only to commit"}
@@ -475,6 +599,7 @@ class Weft:
                 except Exception:
                     pass
         return {"site": name, "capabilities": caps, "storage": storage,
+                **({"resolved_paths": _resolved} if _resolved else {}),
                 **({"tools": (self.store.get_site(name) or {}).get("tools")}
                    if hasattr(adapter, "_push_binary") else {})}
 
@@ -823,6 +948,14 @@ class Weft:
 
     def _adapter(self, name: str) -> SiteAdapter:
         if name not in self.adapters:
+            # a STORED row whose adapter failed to restore (e.g. the
+            # realm gate refused an unresolved '~' config) must surface
+            # ITS refusal — "unknown site" for a site the store plainly
+            # knows pointed away from the fix (tilde audit)
+            row = self.store.get_site(name)
+            if row:
+                return self._make_adapter(name, row["kind"],
+                                          row["config"])
             hints = {"registered": sorted(self.adapters)}
             if name.strip().lower() == "auto":
                 # the reserved value, not a site name — the old hint
@@ -1266,7 +1399,10 @@ class Weft:
                 adapter, site, path,
                 origin=self._lineage_origin(path, site),
                 expected_sha256=expected_sha256, ingest=ingest)
-        p = Path(path)
+        # controller-realm path: '~/f' is the user's home, not a literal
+        # workspace subdir named '~' (tilde audit: silent
+        # misregistration of the wrong file)
+        p = Path(path).expanduser()
         if not p.is_absolute():
             p = self.workspace / p
         return self.dataman.register(p, origin=self._lineage_origin(str(p)))

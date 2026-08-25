@@ -97,6 +97,22 @@ class SiteAdapter(ABC):
 
     # -- shared helpers ----------------------------------------------------
 
+    def resolve_home(self) -> str | None:
+        """The SITE user's home, for resolving '~' in site-realm config
+        paths at registration. Controller-side expanduser would be the
+        WRONG machine's home for remote sites — and shlex.quote
+        SUPPRESSES shell tilde-expansion in every command this adapter
+        runs, so an unresolved '~' is a literal directory name until
+        something (rattler) crashes on it (tilde audit 2026-08-25).
+        run_cmd never cds into the root, so this is safe on a raw,
+        pre-normalization config."""
+        try:
+            r = self.run_cmd("printf '%s' \"$HOME\"", timeout=30)
+            h = (r.out or "").strip()
+            return h if h.startswith("/") else None
+        except Exception:   # noqa: BLE001 — resolution is best-effort;
+            return None     # the caller refuses with teaching
+
     def path(self, rel: str) -> str:
         # absolute passes through: read-only realization roots live outside
         # the site root, and every read helper funnels through here
