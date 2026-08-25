@@ -205,18 +205,28 @@ def test_layer_check_accepts_equals_pin():
 
     class Spec:
         conda = ["python", "r-base=4.4"]
+        variants = {}          # the check reads [target.*] deps too
 
     check_layer_requirements(Spec(), {"cran": ["Matrix"]},
                              {"cran": _CranStub()})
     for form in (["r-base ==4.4"], ["r-base >=4.3"], ["R-Base"]):
         class S2:
             conda = form
+            variants = {}
         check_layer_requirements(S2(), {"cran": ["x"]},
                                  {"cran": _CranStub()})
+    # the interpreter can also arrive via a per-platform variant — the
+    # multi-platform adopt round moved parent pins into [target.<plat>]
+    class S4:
+        conda = []
+        variants = {"linux-64": {"conda": ["r-base ==4.4"]}}
+    check_layer_requirements(S4(), {"cran": ["x"]},
+                             {"cran": _CranStub()})
     with pytest.raises(WeftError) as ei:
 
         class S3:
             conda = ["python"]
+            variants = {}
 
         check_layer_requirements(S3(), {"cran": ["x"]},
                                  {"cran": _CranStub()})
