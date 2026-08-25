@@ -186,4 +186,50 @@ remotes, removable in one command.
   each use. The #117 platforms-from-parent declaration was correct in
   isolation; it activated a latent platforms[0] two functions
   downstream, and the round's tests all exercised the OLD range.
+- Remedy text is CODE: every reusable suggestion/note lives in
+  remedies.py as a function taking the facts it discriminates on,
+  gated on a MARKER of the actual cause — never pasted prose at the
+  raise site. The extends_env shut door was pasted at FOUR sites; the
+  #118 sweep fixed two and certified "both" (prose drifts past greps;
+  a registry makes a new landing site a call and a copy impossible).
+  A remedy with N applicability paths gets N tests, each replaying
+  the misdirection it prevents.
+- Evidence outlives the process: any operation with timeout >= 300s
+  persists FULL output (evidence.run_logged site-side; the lock.py
+  solve.err pattern controller-side); payload tails are WINDOWS onto
+  a persisted log (log_path), never the only copy; error_regions are
+  marker-anchored because the causal line is positionally anywhere
+  (R prints dep-availability before the first download). Discarding
+  output on rc!=0 is a defect class (ensure_toolchain shipped it).
+  Failure payloads on build lanes carry log_path + error_regions +
+  tail, and the durable record keeps them too.
+- Path inputs declare a REALM (controller|site) in ONE normalize
+  owner; _site_realm_values is the single enumeration of path-shaped
+  config keys (adding one means adding it there). Site-realm '~'
+  resolves against the SITE's home at registration and is STORED
+  absolute (shlex.quote suppresses shell tilde-expansion — an
+  unresolved '~' is a literal dirname until rattler panics);
+  controller-side expanduser is the wrong machine for remote sites.
+  Stored pre-fix rows refuse typed at adapter construction.
+- The tool boundary is ONE owner: the `tool` wrapper converts
+  everything typed (WeftError; binding TypeError -> tool.
+  bad_arguments with the live signature, bind-discriminated from
+  body TypeErrors; crashes -> internal.error + event), _seal
+  enforces envelope JSON-serializability (strict suite-wide via
+  conftest — the ensure_available cycle rode the RETURN path of
+  green-tested code), and a second parser of the same boundary in a
+  consumer-facing layer (mcp's TypeError arm) is the
+  two-implementations bug. Dict-shaped params carry SCHEMA_HINTS
+  (ratchet-pinned) — the shape belongs in the schema an agent SEES,
+  not only the docstring.
+- Hardcoded operational constants an agent can hit are missing
+  LEVERS: timeouts and output caps take bounded parameters
+  (_bounded refuses out-of-range with the bounds named — a silent
+  clamp falsifies the run's numbers). The sanctioned diagnostic
+  path must be at least as capable as the raw-ssh workaround, or
+  agents will (rightly) leave the audited surface.
+- Probe endpoints are load-bearing: capability checks hit CDN-cached
+  STATIC objects, never dynamic roots (shim v13 — anaconda.org root
+  measured 3.6-8s+ under load and intermittently mislabeled
+  networked sites air-gapped, a rotating-member test flake).
 - No biological examples in specs, tests, or docs.
