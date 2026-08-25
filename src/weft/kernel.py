@@ -178,7 +178,7 @@ class KernelManager:
                 # the same activation session_exec uses: the LIVE prefix —
                 # a session_install is visible to the kernel's next block
                 activate = (f"eval \"$({shlex.quote(adapter.pixi_bin)} "
-                            f"shell-hook --manifest-path "
+                            f"shell-hook --frozen --manifest-path "
                             f"{shlex.quote(manifest)})\"")
             else:
                 # base lanes (lazy pre-clone, or pylib overlay): the base

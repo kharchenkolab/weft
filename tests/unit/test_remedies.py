@@ -15,10 +15,31 @@ def _regions(*markers):
 
 # ---- the two live misdirections (th594060f7 items 1-note and 5) ------
 
-def test_solve_conflict_no_candidates_never_suggests_soft_pins():
-    got = solve_conflict('No candidates were found for "weft-no-pkg".')
+def test_solve_conflict_bare_name_never_suggests_soft_pins():
+    """The r-signac case: the NAME does not exist on the channel."""
+    got = solve_conflict("No candidates were found for weft-no-pkg")
     assert "does not exist" in got
-    assert "relax" not in got.lower() or "cannot help" in got
+    assert 'relax="soft"' not in got
+
+
+def test_solve_conflict_versioned_pin_keeps_the_soft_lever():
+    """The eval-adapt case (xz ==4.999.9) that caught the first gate
+    being too coarse: the VERSION does not exist — dropping the pin
+    solves, so relax="soft" is exactly right and must stay."""
+    got = solve_conflict("No candidates were found for xz ==4.999.9")
+    assert 'relax="soft"' in got
+    assert "pinned version was not found" in got
+
+
+def test_solve_conflict_bare_message_versioned_pin_via_spec():
+    """Solvers sometimes echo only the name — the SPEC still knows the
+    caller pinned a version; the pins discriminate."""
+    got = solve_conflict("No candidates were found for xz",
+                         user_pins=["xz ==4.999.9"])
+    assert 'relax="soft"' in got
+    got2 = solve_conflict("No candidates were found for xz",
+                          user_pins=["xz"])
+    assert 'relax="soft"' not in got2
 
 
 def test_solve_conflict_real_conflict_keeps_soft_pin_door():

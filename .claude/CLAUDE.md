@@ -232,4 +232,18 @@ remotes, removable in one command.
   STATIC objects, never dynamic roots (shim v13 — anaconda.org root
   measured 3.6-8s+ under load and intermittently mislabeled
   networked sites air-gapped, a rotating-member test flake).
+- Lane debt is round debt: a round that touches realize/session/
+  publish/kernel paths runs the docker AND solver lanes at round end
+  — SERIALLY, never concurrently (three parallel lanes on one mac
+  produced four timing false-failures) — and triages them before the
+  round's task closes. Twelve rounds of deferral piled 13
+  simultaneous failures with tangled attribution: two real bugs, two
+  world-drift breaks, stale contracts, and flakes all looked alike
+  until each captured output was read.
+- Activation is offline by contract: every `pixi shell-hook` runs
+  --frozen (an unfrozen hook re-checks the lock against live
+  repodata — a hidden NETWORK dependency at activation time that
+  broke file://-channel envs and air-gapped sites; five call sites,
+  none frozen, found in one R1 sweep). A new hook call site copies
+  the flag or breaks the chaos lane.
 - No biological examples in specs, tests, or docs.

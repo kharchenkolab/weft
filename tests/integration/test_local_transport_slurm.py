@@ -52,6 +52,8 @@ def _exec(container, *argv, input=None):
 
 def test_submit_node_controller_no_ssh(slurm_site):
     c = slurm_site["container"]
+    subprocess.run(["docker", "exec", c, "mkdir", "-p",
+                    "/opt/weft-src"], capture_output=True)
     r = subprocess.run(["docker", "cp", "src/weft",
                         f"{c}:/opt/weft-src/weft"],
                        capture_output=True, text=True, timeout=120)

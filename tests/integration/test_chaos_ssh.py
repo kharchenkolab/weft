@@ -104,8 +104,14 @@ def test_controller_crash_and_reconcile(tmp_path, pixi_bin, sshd_site):
     w = Weft(ws, pixi_bin=pixi_bin)
     stale = w.doctor()
     assert any(j["job_id"] == job_id for j in stale["nonterminal_jobs"])
+    # since #100 (auto-resume) the CONSTRUCTOR re-attaches supervision
+    # (resume="poll" default): by the time reconcile() runs the crashed
+    # job is already watched, so it reports NO action for it — recovery
+    # is proven by the wait below reaching DONE, and reconcile stays
+    # idempotent (stale pre-#100 assert caught by the R1 lane
+    # restoration; the docker lane never ran during #100)
     actions = w.reconcile()
-    assert any(a["job"] == job_id for a in actions), actions
+    assert not any(a.get("job") == job_id for a in actions), actions
     job = w.runner.wait(job_id, 120)
     assert job["state"] == "DONE", job["error"]
     out = next(o for o in job["manifest"]["outputs"]
@@ -196,7 +202,9 @@ def test_session_env_lifecycle(tmp_path, pixi_bin, sshd_site,
     assert "env_id" in snap, snap
     assert snap["env_id"] != env_id
     assert snap["spec"]["deps"]["conda"] == ["requests"]
-    assert snap["spec"]["extends"]  # pinned to the base spec hash
+    # frozen to the base ENV since #117 (adopt-only round): snapshots
+    # extend the env that RAN, not its spec hash
+    assert snap["spec"]["extends_env"]
 
     # the snapshot env is a first-class citable env; run the "real" task in it
     r2 = w.task_submit({

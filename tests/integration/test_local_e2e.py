@@ -197,7 +197,7 @@ def test_full_pixi_env_path(weft, tmp_path):
     ensured = weft.env_ensure({
         "name": "py-mini",
         "deps": {"conda": ["python =3.12"]},
-        "env_vars": {"WEFT_TEST_VAR": "{{cpus}}"},
+        "env_vars": {"LAB_TEST_VAR": "{{cpus}}"},
     })
     assert "env_id" in ensured, ensured
     env_id = ensured["env_id"]
@@ -205,7 +205,7 @@ def test_full_pixi_env_path(weft, tmp_path):
     r = weft.task_submit({
         "command": "python -c \"import sys, os, json; "
                    "json.dump({'py': sys.version.split()[0], "
-                   "'threads': os.environ['WEFT_TEST_VAR']}, "
+                   "'threads': os.environ['LAB_TEST_VAR']}, "
                    "open('results/info.json','w'))\"",
         "env": env_id,
         "outputs": ["results/"],
@@ -225,7 +225,7 @@ def test_full_pixi_env_path(weft, tmp_path):
     ensured2 = weft.env_ensure({
         "name": "py-mini",
         "deps": {"conda": ["python =3.12"]},
-        "env_vars": {"WEFT_TEST_VAR": "{{cpus}}"},
+        "env_vars": {"LAB_TEST_VAR": "{{cpus}}"},
     })
     assert ensured2["status"] == "cached" and ensured2["env_id"] == env_id
     r2 = weft.task_submit({

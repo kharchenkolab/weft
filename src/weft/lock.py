@@ -443,7 +443,8 @@ def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi",
                    if spec.variants else {}),
                 # weft's own one-call answer to this exact error — agents read
                 # hints under pressure, not the reference docs (eval finding)
-                "suggestion": _remedy_solve_conflict(tail),
+                "suggestion": _remedy_solve_conflict(
+                    tail, spec.conda + spec.pypi),
             },
         )
     native = lockfile.read_text()

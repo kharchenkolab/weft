@@ -795,7 +795,7 @@ def _build_prefix(
         )
     hook = adapter.run_cmd(
         overrides +
-        f"{shlex.quote(adapter.pixi_bin)} shell-hook "
+        f"{shlex.quote(adapter.pixi_bin)} shell-hook --frozen "
         f"--manifest-path {shlex.quote(manifest_path)}",
         timeout=120,
     )
@@ -1667,6 +1667,16 @@ def _build_squashfs(
 ) -> dict:
     """One mounted image instead of ~100k files on the shared FS.
 
+    Joins the site-tools push FIRST, in the CALLEE (docker-lane
+    restoration, 2026-08-25): the publish lane calls this directly —
+    not through ensure_realization, whose heal at its own call site
+    never ran here — so a publish racing registration's background
+    tool push built with the CONTROLLER-platform pixi ("Cannot run
+    macOS (Mach-O) executable in Docker"). #108's "every build
+    ensures/joins/heals" was a claim about callers; owning it here
+    covers every caller by construction (the ensure is join/once —
+    the realize path's earlier heal makes this a no-op).
+
     Layout (the realization dir stays a plain directory, so every marker/
     adoption/footprint path works unchanged):
 
@@ -1700,6 +1710,7 @@ def _build_squashfs(
             "squashfs strategy needs mksquashfs and squashfuse on site (v1 "
             "builds images site-side)", stage="realize",
             hints={"squashfs": sq})
+    _ensure_tools_at_use(adapter, store, _site_platform(caps or {}))
     inner = f"{rel}/mnt"
     internet = bool(compute_view(caps or {}).get("internet"))
     build = adapter          # what the content stages talk to

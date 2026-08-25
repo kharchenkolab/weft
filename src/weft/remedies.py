@@ -66,27 +66,62 @@ def revise_no_spec(adopted: bool) -> str:
 
 # ------------------------------------------------------------ solve lane
 
-def solve_conflict(solver_message: str) -> str:
-    """env.solve_conflict's suggestion, gated on the solver's own
-    words: 'no candidates' means the name/version does not EXIST on the
-    channels — softening a version window cannot conjure it (the
-    r-signac agent was told to relax pins on a package conda-forge
-    simply does not carry)."""
+_SOFT_LEVER = (
+    "mark the negotiable pins SOFT with a trailing "
+    "'?' (e.g. \"scipy ==1.14.1?\") and call "
+    "env_ensure(..., relax=\"soft\"): weft relaxes "
+    "only those, reports what it gave up, and the "
+    "result is still fully pinned.")
+
+
+def solve_conflict(solver_message: str,
+                   user_pins: list[str] | None = None) -> str:
+    """env.solve_conflict's suggestion, gated on the solver's words AND
+    the caller's pins — the first gate was too coarse and the eval-adapt
+    motivating-incident test caught it the first solver-lane run (R1):
+
+    - no candidates for a BARE NAME (r-signac on conda-forge): the
+      package does not exist there — softening cannot conjure it;
+      remedy is spelling/channel/lane.
+    - no candidates for a VERSIONED spec (xz ==4.999.9): the package
+      exists, the PINNED VERSION does not — relax="soft" is exactly
+      the right lever (dropping the pin solves), so the door STAYS.
+    """
+    import re
     low = (solver_message or "").lower()
     if "no candidates" in low:
+        m = re.search(r"no candidates were found for\s+([^\n]+)", low)
+        subject = (m.group(1).strip().rstrip(".") if m else "")
+        parts = subject.split(None, 1)
+        name = parts[0] if parts else ""
+        constraint = parts[1] if len(parts) > 1 else ""
+        versioned = bool(re.search(r"[0-9<>=!~]", constraint)) \
+            and constraint.strip() != "*"
+        if not versioned and user_pins and name:
+            # the message sometimes echoes only the name — the SPEC
+            # knows whether the caller pinned a version
+            from .spec import split_constraint
+            for pin in user_pins:
+                n, c = split_constraint(pin)
+                if n.lower() == name and c not in ("", "*"):
+                    versioned = True
+                    break
+        if versioned:
+            return (
+                f"the pinned version was not found on the spec's "
+                f"channels ({subject or 'see solver_message'}) — the "
+                f"package may exist under other versions: correct the "
+                f"pin, or " + _SOFT_LEVER + " If the NAME is also "
+                "wrong, softening will not help — check spelling and "
+                "channels.")
         return (
-            "the package (or the pinned version) does not exist on the "
-            "spec's channels — check the spelling, add the channel that "
-            "carries it (bioconductor-* lives on bioconda), or use the "
-            "ecosystem lane that does (deps.cran / deps.pypi). "
-            "Softening version pins cannot help here.")
-    return (
-        "mark the negotiable pins SOFT with a trailing "
-        "'?' (e.g. \"scipy ==1.14.1?\") and call "
-        "env_ensure(..., relax=\"soft\"): weft relaxes "
-        "only those, reports what it gave up, and the "
-        "result is still fully pinned. Or relax/remove "
-        "the conflicting pin named in solver_message.")
+            "the package does not exist on the spec's channels — "
+            "check the spelling, add the channel that carries it "
+            "(bioconductor-* lives on bioconda), or use the ecosystem "
+            "lane that does (deps.cran / deps.pypi). Softening version "
+            "pins cannot help here.")
+    return (_SOFT_LEVER + " Or relax/remove "
+            "the conflicting pin named in solver_message.")
 
 
 # --------------------------------------------------------- realize lanes

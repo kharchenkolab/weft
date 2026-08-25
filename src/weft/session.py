@@ -372,7 +372,8 @@ class SessionManager:
                     f"{s['location']}/.pixi/envs/default"),
                 "activation": (
                     f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
-                    f"--manifest-path {shlex.quote(manifest)})\""),
+                    f"--frozen --manifest-path "
+                    f"{shlex.quote(manifest)})\""),
                 "ns_wrap": False,
                 "direct_exec": True,
             }
@@ -444,8 +445,13 @@ class SessionManager:
                      "clone" if s.get("materialized", True) else "none")
         if mode == "clone":
             manifest = adapter.path(f"{s['location']}/pixi.toml")
+            # --frozen everywhere shell-hook runs (R1 class sweep): an
+            # unfrozen hook re-checks the lock against live repodata —
+            # a hidden network dependency at ACTIVATION time that broke
+            # file://-channel envs and air-gapped sites
             return (f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
-                    f"--manifest-path {shlex.quote(manifest)})\""), False
+                    f"--frozen --manifest-path "
+                    f"{shlex.quote(manifest)})\""), False
         return self._base_activation(s, adapter)
 
     def _ensure_overlay_line(self, s: dict, adapter: SiteAdapter,
@@ -1890,7 +1896,8 @@ class SessionManager:
                 adapter,
                 f"cd {shlex.quote(adapter.path(s['location']))} && "
                 f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
-                f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )",
+                f"--frozen --manifest-path "
+                f"{shlex.quote(manifest)})\" && ( {cmd} )",
                 log_rel, timeout=3600, runner=adapter.run_activated)
         if r.rc != 0:
             raise WeftError(

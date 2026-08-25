@@ -341,3 +341,59 @@ def test_realize_lane_arms_post_link_check(w, tmp_path, monkeypatch):
     assert out.get("error"), out
     assert seen, "realize never reached the squashfs builder"
     assert seen["store"] is w.store              # armed from this caller
+
+
+def test_publish_lane_joins_site_tools(w, tmp_path, monkeypatch):
+    """Docker-lane restoration (2026-08-25): the publish lane calls
+    _build_squashfs DIRECTLY — ensure_realization's tools-heal never
+    ran there, and a publish racing registration's background tool
+    push built with the CONTROLLER-platform pixi ("Cannot run macOS
+    (Mach-O) executable in Docker", live in test_publish over sshd).
+    The heal is CALLEE-owned now; this drives the real env_publish
+    entry point and asserts the join runs BEFORE any build."""
+    import hashlib as _h
+    import json as _json
+    import platform as _platform
+    import sys as _sys
+
+    import weft.realize as realize_mod
+    chan = tmp_path / "chan-tools"
+    sub = ("osx-arm64" if _sys.platform == "darwin"
+           and _platform.machine() == "arm64" else "linux-64")
+    for d in (chan / sub, chan / "noarch"):
+        d.mkdir(parents=True)
+    fn = "toolspkg-1.0-h0_0.conda"
+    (chan / sub / "repodata.json").write_text(_json.dumps(
+        {"info": {"subdir": sub}, "packages": {}, "packages.conda": {
+            fn: {"name": "toolspkg", "version": "1.0", "build": "h0_0",
+                 "build_number": 0, "subdir": sub, "depends": [],
+                 "sha256": _h.sha256(fn.encode()).hexdigest()}}}))
+    (chan / "noarch" / "repodata.json").write_text(_json.dumps(
+        {"info": {"subdir": "noarch"}, "packages": {},
+         "packages.conda": {}}))
+    env = w.env_ensure({"name": "tools-env", "channels": [chan.as_uri()],
+                        "platforms": [sub],
+                        "deps": {"conda": ["toolspkg ==1.0"]}})
+    assert "error" not in env, env
+    row = w.store.get_site("local")
+    caps = dict(row.get("capabilities") or {})
+    caps["squashfs"] = {"mksquashfs": True, "squashfuse": True,
+                        "dev_fuse": True, "userns": True}
+    w.store.set_capabilities("local", caps)
+
+    seen = {}
+
+    def heal_spy(adapter, store, site_plat):
+        seen["site"] = adapter.name
+        seen["store"] = store
+        seen["plat"] = site_plat
+        raise WeftError("internal.error", "heal spy stop",
+                        stage="realize")
+
+    monkeypatch.setattr(realize_mod, "_ensure_tools_at_use", heal_spy)
+    out = w.env_publish(env["env_id"], "local",
+                        str(tmp_path / "tools-tree"), "pack", "1.0")
+    assert out.get("error"), out              # sentinel surfaced =>
+    assert seen, "publish never joined the site tools"
+    assert seen["store"] is w.store           # the join ran FIRST,
+    assert seen["plat"]                       # with the real store
