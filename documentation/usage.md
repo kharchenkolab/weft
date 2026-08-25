@@ -152,6 +152,7 @@ Read the code, use the hints:
 | `env.unsatisfiable_on_site` | alternative sites → re-place |
 | `env.platform_mismatch` | `locked_platforms` vs `site_platform` → add the site's platform to the spec, re-ensure (new EnvID) |
 | `internal.error` | a weft bug, not a known failure mode — `hints.traceback_tail`; retry may not help, report it |
+| `tool.bad_arguments` | the call doesn't match the verb's signature — `hints.signature` is the live one; fix the call, retrying unchanged cannot succeed |
 
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 

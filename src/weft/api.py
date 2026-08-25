@@ -25,21 +25,128 @@ from .store import Store
 from .task import Task
 from .transfer.local_link import LocalLink
 
+def _seal(verb: str, payload):
+    """Envelopes are JSON by contract — enforce it AT the boundary.
+
+    The motivating incident (aba2 th594060f7 item 2): ensure_available
+    returned an error envelope whose hints contained a cycle; every
+    consumer's json.dumps crashed. The cycle rode the RETURN path, not
+    the raise path, so a check on raised errors alone would have missed
+    it — sealing covers both. Error envelopes are always checked (small,
+    bounded; a broken one is salvaged into a typed internal.error that
+    still names the verb and carries a repr of the original). Success
+    payloads are checked when WEFT_STRICT_ENVELOPES is set — the test
+    suite sets it in conftest, so every green test also certifies its
+    envelopes; production skips the cost. Pinned by
+    tests/unit/test_tool_boundary.py."""
+    import json
+    import os
+    strict = bool(os.environ.get("WEFT_STRICT_ENVELOPES"))
+    is_error = isinstance(payload, dict) and "error" in payload
+    if strict or is_error:
+        try:
+            json.dumps(payload)
+        except (TypeError, ValueError) as e:
+            if strict:
+                raise AssertionError(
+                    f"{verb} produced a non-JSON-serializable envelope: "
+                    f"{e}") from e
+            return WeftError(
+                "internal.error",
+                f"{verb} produced a non-serializable error envelope "
+                f"({e}) — a weft bug; the original payload's repr is in "
+                f"hints",
+                stage="infra",
+                hints={"verb": verb,
+                       "payload_repr": repr(payload)[:2000]},
+            ).to_dict()
+    return payload
+
+
 def tool(fn):
     """The API contract (uniform, by rule): every public Weft method
-    returns JSON-shaped data; failures come back as error payloads
-    (WeftError.to_dict()); nothing raises across this boundary. Internals
-    raise WeftError freely — this decorator is the boundary."""
+    returns JSON-shaped data; failures come back as error payloads.
+    NOTHING raises across this boundary — three conversion arms, each
+    pinned by tests/unit/test_tool_boundary.py:
+      - WeftError            -> its to_dict() envelope (typed, as ever)
+      - call-binding failure -> tool.bad_arguments with the LIVE
+        signature (an agent passing timeout= to a verb without one got
+        a raw python TypeError before this — aba2 th594060f7 item 3)
+      - anything else        -> internal.error with a traceback tail,
+        plus an internal.error event so the bug is loud, not buried in
+        a consumer's log
+    A body-raised TypeError is NOT a binding failure: the signature is
+    bound BEFORE the call, so the two are discriminated, never guessed.
+    Internals raise WeftError freely — this decorator is the boundary,
+    applied to every PUBLIC_TOOLS verb by the loop at the bottom of
+    this file (the _weft_tool marker is what the conformance test
+    reads)."""
     import functools
+    import inspect
+
+    sig = inspect.signature(fn)
+    # agent-facing spelling: drop `self`
+    public_params = list(sig.parameters.values())[1:]
+    public_sig = f"{fn.__name__}({', '.join(str(p) for p in public_params)})"
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
-            return fn(*args, **kwargs)
-        except WeftError as e:
-            return e.to_dict()
+            sig.bind(*args, **kwargs)
+        except TypeError as te:
+            result = WeftError(
+                "tool.bad_arguments",
+                f"{fn.__name__}: {te}",
+                stage="infra",
+                hints={"verb": fn.__name__,
+                       "signature": public_sig,
+                       "contract": (inspect.getdoc(fn) or "")
+                       .split("\n\n")[0]},
+            ).to_dict()
+        else:
+            try:
+                result = fn(*args, **kwargs)
+            except WeftError as e:
+                result = e.to_dict()
+            except Exception:
+                import traceback
+                tb = traceback.format_exc()
+                try:    # loud: the bug lands in the event stream too
+                    args[0].store.emit("internal.error", verb=fn.__name__,
+                                       tail=tb[-800:])
+                except Exception:   # noqa: BLE001 — the crash may BE the
+                    pass            # store itself
+                result = WeftError(
+                    "internal.error",
+                    f"{fn.__name__} crashed — a weft bug, not a known "
+                    f"failure mode",
+                    stage="infra",
+                    hints={"verb": fn.__name__,
+                           "traceback_tail": tb[-1500:]},
+                ).to_dict()
+        # ONE seal point, outside every catch: a strict-mode assertion
+        # must fail the test, never be re-swallowed into internal.error
+        return _seal(fn.__name__, result)
     wrapper._weft_tool = True
+    wrapper._weft_unwrapped = fn
     return wrapper
+
+
+def _bounded(value, lo: int, hi: int, param: str) -> int:
+    """Validate an agent-facing numeric lever. Out-of-range REFUSES with
+    the bounds named — a silent clamp would report a run made with
+    numbers the caller never chose (honest numbers)."""
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        raise WeftError("task.invalid",
+                        f"{param} must be an integer, got {value!r}",
+                        stage="infra", hints={"min": lo, "max": hi})
+    if not lo <= v <= hi:
+        raise WeftError("task.invalid",
+                        f"{param}={v} is outside [{lo}, {hi}]",
+                        stage="infra", hints={"min": lo, "max": hi})
+    return v
 
 
 def _vocab(value: str | None, vocab: tuple, param: str,
@@ -1555,12 +1662,19 @@ class Weft:
         except WeftError as e:
             return e.to_dict()
 
-    def session_exec(self, session_id: str, cmd: str) -> dict:
+    def session_exec(self, session_id: str, cmd: str,
+                     timeout: int = 600) -> dict:
         """Run a shell command inside the session's activated env
         (conversational-speed probe; NOT the citable record — assemble
         proven steps into a task under a snapshot EnvID for that).
-        Returns {rc, out, err}."""
-        return self.sessions.exec(session_id, self._session_adapter(session_id), cmd)
+        Returns {rc, out, err}. timeout= (seconds, capped at 3600) is a
+        lever: the old fixed 600s died mid-build with no way to ask for
+        longer (census with aba2 th594060f7 item 3 — this one had no
+        visible constant at all, it was buried a layer down)."""
+        timeout = _bounded(timeout, 1, 3600, "timeout")
+        return self.sessions.exec(session_id,
+                                  self._session_adapter(session_id), cmd,
+                                  timeout=timeout)
 
     def session_install(self, session_id: str, conda: list[str] | None = None,
                         pypi: list[str] | None = None,
@@ -1656,12 +1770,20 @@ class Weft:
         that site (verified populated + verified_site; otherwise the
         note says enforcement stays at realize — never a forced
         realize)."""
+        if isinstance(target, dict):
+            # alias tier: sibling verbs spell these env_id=/session_id=,
+            # and the first live call used exactly that inside the dict
+            # (aba2 th594060f7 item 2b) — accept both, one spelling
+            # internally
+            target = {{"env_id": "env", "session_id": "session"}
+                      .get(k, k): v for k, v in target.items()}
         if not isinstance(target, dict) or not target or \
                 set(target) - {"session", "env"}:
             raise WeftError(
                 "task.invalid",
                 'target must be {"session": <session_id>} or '
-                '{"env": <env_id>}', stage="realize")
+                '{"env": <env_id>} (env_id/session_id are accepted '
+                'aliases)', stage="realize")
         if probe:
             # observation, never choice, never mutation — no claim, no
             # session state touched; the SAME dialect function the
@@ -1713,9 +1835,15 @@ class Weft:
                        "seconds": round(_t.monotonic() - t0, 2)}
             if "error" in got:
                 attempt["outcome"] = "failed"
+                # NO "hints" here: capturing got["hints"] by reference
+                # and then inserting `attempt` INTO got["hints"] below
+                # made the envelope cyclic — every consumer's
+                # json.dumps crashed (aba2 th594060f7 item 2; sealed
+                # against recurrence by _seal + WEFT_STRICT_ENVELOPES).
+                # The envelope already carries the hints at top level.
                 attempt["error"] = {k: got[k] for k in
                                     ("error", "stage", "detail",
-                                     "retryable", "hints") if k in got}
+                                     "retryable") if k in got}
                 got.setdefault("hints", {})["attempts"] = [attempt]
                 return got
             attempt["outcome"] = "solved"
@@ -1813,6 +1941,19 @@ class Weft:
         verify=True (default) weft REALIZES the minted env before handing it
         back — a citable EnvID that cannot be rebuilt is worse than an
         error. `notes` records the rationale."""
+        if not isinstance(verify, bool):
+            # a {"loads": [...]} dict — the vocabulary of session_install
+            # and ensure_available — is TRUTHY, so it silently acted as
+            # plain True here (verb-surface census): refuse and teach
+            # instead of quietly dropping the postconditions
+            raise WeftError(
+                "task.invalid",
+                "session_snapshot(verify=) is a bool: whether to realize "
+                "and check the minted env now. Postcondition SPECS "
+                "(import/loads/versions) belong on session_install(..., "
+                "verify=...) / session_run_installer — they are captured "
+                "into the snapshot from there",
+                stage="realize", hints={"got": repr(verify)[:200]})
         return self.sessions.snapshot(session_id, name, notes, verify)
 
     def session_freezable(self, session_id: str) -> dict:
@@ -2209,12 +2350,16 @@ class Weft:
                 )
 
     def job_node_exec(self, job_id: str, cmd: str, why: str,
-                      timeout: float = 60.0) -> dict:
+                      timeout: float = 60.0, max_out: int = 8000,
+                      max_err: int = 4000) -> dict:
         """Run a diagnostic INSIDE a running job's allocation — live
         nvidia-smi/ps/df on the node MY job occupies (the login→node hop
         as a verb). Audited and deny-listed like site_exec. On non-
         scheduler sites the job runs on the host itself: the command runs
         in the job's directory instead."""
+        timeout = _bounded(timeout, 1, 3600, "timeout")
+        max_out = _bounded(max_out, 1, 1 << 20, "max_out")
+        max_err = _bounded(max_err, 1, 1 << 20, "max_err")
         job = self.store.get_job(job_id)
         if not job:
             raise WeftError("task.invalid", f"unknown job: {job_id}",
@@ -2241,18 +2386,28 @@ class Weft:
         self.store.audit_log(None, "job.node_exec", site=site,
                              command=cmd, why=why, result=f"rc={r.rc}")
         return {"job_id": job_id, "rc": r.rc,
-                "stdout": r.out[-8000:], "stderr": r.err[-4000:]}
+                "stdout": r.out[-max_out:], "stderr": r.err[-max_err:]}
 
-    def site_exec(self, name: str, cmd: str, why: str) -> dict:
-        """Guarded diagnostic shell (doc 05 §5): audited, deny-listed, scoped."""
+    def site_exec(self, name: str, cmd: str, why: str,
+                  timeout: int = 120, max_out: int = 8000,
+                  max_err: int = 4000) -> dict:
+        """Guarded diagnostic shell (doc 05 §5): audited, deny-listed,
+        scoped. timeout= (seconds, capped at 3600) and max_out=/max_err=
+        (tail bytes) are levers, not walls: the r-signac agent left the
+        audited surface for raw ssh because the old fixed 120s could not
+        hold a multi-minute rebuild — the escape hatch belongs INSIDE
+        the audit trail (aba2 th594060f7 item 3)."""
+        timeout = _bounded(timeout, 1, 3600, "timeout")
+        max_out = _bounded(max_out, 1, 1 << 20, "max_out")
+        max_err = _bounded(max_err, 1, 1 << 20, "max_err")
         self._check_denied("site.exec", name, cmd, why)
         adapter = self._adapter(name)
         scoped = f"cd {shlex.quote(adapter.root)} && ( {cmd} )"
-        r = adapter.run_cmd(scoped, timeout=120)
+        r = adapter.run_cmd(scoped, timeout=timeout)
         self.store.audit_log(None, "site.exec", site=name, command=cmd,
                              why=why, result=f"rc={r.rc}")
-        return {"rc": r.rc, "stdout": r.out[-8000:], "stderr": r.err[-4000:],
-                "cwd": adapter.root}
+        return {"rc": r.rc, "stdout": r.out[-max_out:],
+                "stderr": r.err[-max_err:], "cwd": adapter.root}
 
     def doctor(self) -> dict:
         """Self-diagnostics: the agent's first leverage point when confused."""

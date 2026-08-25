@@ -96,7 +96,12 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
 6. **When confused, look.** `doctor()` (multi-hop sites: which hop died),
    `site_load()`, `task_logs()`, `site_exec(site, cmd, why=...)` and
    `job_node_exec(job_id, cmd, why=...)` — INSIDE a running job's
-   allocation (both audited, deny-listed) — restart recovery is
+   allocation (both audited, deny-listed). Both take `timeout=`
+   (seconds, up to 3600) and output caps (`max_out=`/`max_err=`);
+   `session_exec` takes `timeout=` too — a long rebuild belongs on
+   these levers, not on raw ssh. A miscalled verb (unknown/missing
+   parameter) answers `tool.bad_arguments` with the live signature
+   `tool.bad_arguments` with the live signature — restart recovery is
    automatic (`Weft(resume=)`); `reconcile()` additionally re-drives
    rows whose driver died before submit. Cancel with a cause:
    `task_cancel(id, why=...)`.

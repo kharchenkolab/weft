@@ -320,12 +320,14 @@ class EnvManager:
                     "env.layer_conflict",
                     f"the delta asks for {eco} {dep}, but the parent has "
                     f"{pin} frozen", stage="solve",
+                    # move_base, NOT an inline copy: this was the THIRD
+                    # hardcoded "re-ensure with `extends`" — a shut door
+                    # on adopt-only workspaces — found by the remedy
+                    # sweep AFTER the #118 fix claimed both sites (there
+                    # were four; prose copies drift past greps)
                     hints={"parent": spec.extends_env, "package": name,
                            "parent_pin": pin, "requested": dep,
-                           "suggestion": "`extends_env` freezes the base on "
-                                         "purpose. To move it, re-ensure "
-                                         "with `extends` for a free re-solve "
-                                         "and a full prefix."})
+                           "suggestion": move_base})
             out.deps_extra[eco] = merged
         return out
 
@@ -760,6 +762,19 @@ class EnvManager:
         except WeftError as e:
             if parent_env is None or e.code != "env.solve_conflict":
                 raise
+            # the free-the-base door only OPENS when the parent's spec
+            # body is stored — on an adopt-only workspace "re-ensure
+            # with `extends`" raises parent-spec-not-found (fourth
+            # hardcoded copy of the shut door, found by the remedy
+            # sweep; same gate as ensure()'s catch above)
+            if self._lookup_spec(parent_env["spec_hash"]) is not None:
+                free = ("— or re-ensure with `extends` (the parent's "
+                        "SPEC hash) to free the base")
+            else:
+                free = ("(this adopt-only workspace holds no spec body "
+                        "for the parent: to move the base, adopt a newer "
+                        "published version or bundle_import the env from "
+                        "a workspace that has its spec)")
             raise WeftError(
                 "env.layer_conflict",
                 "revise cannot keep the base frozen: the parent's pinned "
@@ -768,8 +783,7 @@ class EnvManager:
                        "solver_message": e.hints.get("solver_message", ""),
                        "suggestion": "revise the parent first, then "
                                      "re-ensure this child on the revised "
-                                     "parent — or re-ensure with `extends` "
-                                     "to free the base"})
+                                     f"parent {free}"})
         canonical = result.canonical
         conda_pkgs = _conda_provided(canonical)
         for eco, deps in sorted(merged.deps_extra.items()):

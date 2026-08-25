@@ -1507,7 +1507,8 @@ class SessionManager:
 
         return run
 
-    def exec(self, session_id: str, adapter: SiteAdapter, cmd: str) -> dict:
+    def exec(self, session_id: str, adapter: SiteAdapter, cmd: str,
+             timeout: int = 600) -> dict:
         s = self._get(session_id)
         sdir = shlex.quote(adapter.path(s["location"]))
         pre, ns = self._composed(s, adapter)
@@ -1515,7 +1516,7 @@ class SessionManager:
         if ns:
             from .realize import _ns_wrap_cmd
             script = _ns_wrap_cmd(script)
-        r = adapter.run_cmd(script, timeout=600)
+        r = adapter.run_cmd(script, timeout=timeout)
         self.store.audit_log(None, "session.exec", site=adapter.name,
                              command=cmd, why=f"session {session_id}",
                              result=f"rc={r.rc}")

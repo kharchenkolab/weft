@@ -9,6 +9,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Every envelope any test produces must be JSON-serializable — the
+# whole suite doubles as the boundary's conformance battery (the
+# ensure_available cycle rode the RETURN path of a green-tested verb;
+# strict sealing makes that class unshippable). See api._seal.
+os.environ.setdefault("WEFT_STRICT_ENVELOPES", "1")
+
 
 def _sh(*args, **kw):
     return subprocess.run(args, capture_output=True, text=True, **kw)

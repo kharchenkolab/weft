@@ -60,6 +60,7 @@ CODES = {
     "task.dep_failed": "an upstream dependency failed or vanished; this job never started",
     "state.conflict": "concurrent operation already in progress for this resource",
     "internal.error": "unexpected internal failure (a weft bug, not a known failure mode); a retry may or may not help — worth reporting",
+    "tool.bad_arguments": "the call does not match the verb's signature (unknown, missing, or duplicate parameter); the hints carry the live signature — fix the call, retrying unchanged cannot succeed",
 }
 
 

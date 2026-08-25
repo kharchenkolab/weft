@@ -61,6 +61,24 @@ SCHEMA_HINTS: dict[str, dict] = {
                         'ssh: +{"host","port","user","ssh_opts"}, slurm: '
                         '+{"scheduler","modules_init"}, "policy": {...}}'),
     }},
+    # the target dict had NO schema entry, so an agent guessing env_id
+    # as the key had no signal it was wrong until the refusal (aba2
+    # th594060f7 item 2b) — the dict-shape belongs in the schema, not
+    # only the docstring
+    "ensure_available": {
+        "target": {
+            "type": "object",
+            "description": ('{"session": <session_id>} or '
+                            '{"env": <EnvID>} (env_id/session_id '
+                            'accepted as aliases)'),
+        },
+        "request": {
+            "description": ('Tagged mode: eco-tagged delta {"conda": '
+                            '[...], "pypi": [...], "cran": [...]}. '
+                            'Ranked mode: a LIST of package names with '
+                            'lanes=[...]'),
+        },
+    },
 }
 
 # fallback descriptions for thin wrappers (docstrings win when present)

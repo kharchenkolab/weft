@@ -357,3 +357,97 @@ def test_find_near_sees_variant_deps(tmp_path, pixi_bin):
         "deps": {"conda": []},
         "variants": {"linux-64": {"conda": ["nearpkg ==1.0"]}}})
     assert any(r["env_id"] == env_id for r in got), got
+
+
+def test_ensure_available_failure_envelope_is_serializable(published_tree,
+                                                           wb):
+    """THE consumer crash (aba2 th594060f7 item 2), replayed: the
+    env-target failure path captured got["hints"] by reference into the
+    attempt, then inserted the attempt INTO got["hints"] — a cycle;
+    every consumer's json.dumps crashed. The envelope must serialize
+    and still carry the attempt record."""
+    got = wb.env_adopt("local", str(published_tree["tree"]), "pack")
+    assert "error" not in got, got
+    r = wb.ensure_available({"env": got["env_id"]},
+                            {"conda": ["pack-basepkg >=2"]})
+    assert r["error"] == "env.layer_conflict", r
+    json.dumps(r)                       # the exact consumer crash
+    a = r["hints"]["attempts"][0]
+    assert a["outcome"] == "failed"
+    assert a["error"]["error"] == "env.layer_conflict"
+
+
+def test_ensure_available_target_accepts_env_id_alias(wb):
+    """Item 2b: sibling verbs spell it env_id= — the first live call
+    used that key inside target and was refused on SHAPE. The alias
+    must reach the env lane (and then fail on the unknown env, not on
+    the target grammar)."""
+    r = wb.ensure_available({"env_id": "env:v1:0000000000000000"},
+                            {"conda": ["anypkg"]})
+    assert "error" in r
+    assert "target must be" not in r.get("detail", "")
+
+
+def test_layer_delta_conflict_remedy_discriminates_adopt_only(wb,
+                                                              monkeypatch):
+    """THIRD hardcoded copy of the shut door (remedy sweep 2026-08-25):
+    the deps_extra pin check carried its own 're-ensure with `extends`'
+    prose while move_base — the gated string — was in scope twenty
+    lines up."""
+    from weft.spec import EnvSpec
+    parent = _fake_parent()
+    parent["canonical"]["layers"] = {
+        "cran": {"top_level": ["cranpkg ==1.0"], "records": []}}
+    monkeypatch.setattr(wb.envman, "solvers", {}, raising=False)
+    spec = EnvSpec.from_dict({
+        "name": "snap", "extends_env": "env:v1:parent",
+        "platforms": PACK_PLATFORMS,
+        "deps": {"conda": [], "cran": ["cranpkg ==2.0"]}})
+    with pytest.raises(WeftError) as ei:
+        wb.envman._pin_to_parent(spec, parent)
+    e = ei.value
+    assert e.code == "env.layer_conflict"
+    assert "re-ensure with `extends`" not in e.hints["suggestion"]
+    assert "adopt a newer published version" in e.hints["suggestion"]
+
+
+def test_revise_remedy_discriminates_adopt_only(published_tree, wb,
+                                                monkeypatch):
+    """FOURTH copy (revise()): on an adopt-only parent the free-the-base
+    door must not be named — the child snap is real (its own spec is
+    stored), the parent's is not."""
+    tree = published_tree["tree"]
+    lock_file = next((tree / "locks").glob("*.json"))
+    side = json.loads(lock_file.read_text())
+    del side["spec_body"]
+    lock_file.write_text(json.dumps(side))
+    r = wb.env_adopt("local", str(tree), "pack")
+    assert "error" not in r, r
+    # NOTE a zero-add ensure cannot forge the child here: identical
+    # canonical => identical EnvID => the ADOPTED row (identity is
+    # content), whose spec is absent by construction and revise refuses
+    # earlier. Forge the real shape instead: a distinct child row whose
+    # OWN spec is stored, extending the spec-less parent.
+    from weft.spec import EnvSpec
+    child_spec = EnvSpec.from_dict({
+        "name": "snap", "extends_env": r["env_id"],
+        "platforms": PACK_PLATFORMS, "deps": {"conda": []}})
+    wb.store.put_spec(child_spec.spec_hash(), "snap",
+                      child_spec.to_dict())
+    prow = wb.store.get_env(r["env_id"])
+    child_id = "env:v1:" + "ab" * 32
+    wb.store.put_env(child_id, child_spec.spec_hash(),
+                     prow["canonical"], prow["native_lock"],
+                     prow.get("manifest") or "", prow["platforms"])
+    child = {"env_id": child_id}
+    import weft.envman as envman_mod
+
+    def solve_conflicts(spec, workdir, pixi_bin, **kw):
+        raise WeftError("env.solve_conflict", "forged for the remedy",
+                        stage="solve",
+                        hints={"solver_message": "conflict"})
+    monkeypatch.setattr(envman_mod, "solve", solve_conflicts)
+    got = wb.env_revise(child["env_id"], reason="remedy test")
+    assert got["error"] == "env.layer_conflict", got
+    assert "re-ensure with `extends`" not in got["hints"]["suggestion"]
+    assert "adopt a newer published version" in got["hints"]["suggestion"]

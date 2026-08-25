@@ -139,7 +139,8 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   build selector. Apple Silicon needs nothing (MPS is in default builds).
 - **ensure_available** — the one-verb install path:
   `ensure_available({"session": sid}, {"pypi": [...], "cran": [...]})`
-  (tagged) or `ensure_available({"session": sid}, ["Name"],
+  (tagged; `{"session_id"}`/`{"env_id"}` are accepted target-key
+  aliases) or `ensure_available({"session": sid}, ["Name"],
   lanes=["conda", "cran"])` (ranked — YOUR lane order; the substrate
   speaks each lane's dialect and records the spelling; a lane succeeds
   only if its postcondition passes; outages HALT; exhaustion is
