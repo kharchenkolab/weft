@@ -5,7 +5,8 @@
 # status, log access, tree hashing, materialization, verified unpack.
 set -eu
 
-WEFT_SHIM_VERSION=12  # v12: materialize stages READ-ONLY views (Ask
+WEFT_SHIM_VERSION=13  # v13: net probe HEADs a CDN-cached object (Ask
+                      # history in git); v12: materialize stages READ-ONLY views (Ask
                       #      26 ruling): ro blob -> hardlink; writable
                       #      sole-link blob -> converge 0444 + hardlink;
                       #      shared-inode blob -> reflink/copy + chmod
@@ -50,10 +51,16 @@ cmd_probe() {
     free_gb=$(( ${1:-0} / 1048576 ))
     total_gb=$(( ${2:-0} / 1048576 ))
     net_check() {
+        # HEAD a CDN-cached STATIC object, never the dynamic root: the
+        # root is throttle-prone and measured 3.6-8s+ under load (flake
+        # ledger 2026-08-25 — intermittent >5s+>8s mislabeled a
+        # networked site air-gapped and stretched a test lane 3x); the
+        # cached object answers in ~0.1s from the edge
+        _u=https://conda.anaconda.org/conda-forge/noarch/repodata.json
         if command -v curl >/dev/null 2>&1; then
-            curl -fsm "$1" -o /dev/null https://conda.anaconda.org 2>/dev/null
+            curl -fsIm "$1" -o /dev/null "$_u" 2>/dev/null
         elif command -v wget >/dev/null 2>&1; then
-            wget -q -T "$1" -O /dev/null https://conda.anaconda.org 2>/dev/null
+            wget -q --spider -T "$1" "$_u" 2>/dev/null
         else
             return 1
         fi
