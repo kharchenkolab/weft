@@ -146,59 +146,11 @@ def _pixi_add_failure(text: str) -> tuple[str, bool, str, str]:
             "incremental install failed in session", "realize")
 
 
-# The missing-SYSTEM-library subclass of a broken build pulls a
-# categorically different agent lever (aba check-in item 3): retrying
-# the session lane fails identically — the remedy is an isolated env
-# with a full solve, where conda-forge supplies the system dependency.
-# Markers are LC_ALL=C-stable compiler/linker/configure/pkg-config
-# shapes (the umbrella pins the locale on every install path). Seed set
-# is conservative and grows via the ledger, never speculation.
-_SYSLIB_PATTERNS: tuple[tuple[str | None, re.Pattern], ...] = (
-    # gcc:   fatal error: png.h: No such file or directory
-    # clang: fatal error: 'png.h' file not found
-    ("header", re.compile(r"fatal error: '?([\w./+-]+\.h)'?"
-                          r"(?:: No such file or directory|"
-                          r" file not found)")),
-    ("header", re.compile(r"([\w./+-]+\.h): No such file or directory")),
-    ("library", re.compile(r"cannot find -l([\w.+-]+)")),        # GNU ld
-    ("library", re.compile(r"library not found for -l([\w.+-]+)")),
-    ("library", re.compile(r"ld: library '([\w.+-]+)' not found")),
-    ("library", re.compile(r"error while loading shared libraries: "
-                           r"lib([\w.+-]+)\.so")),
-    ("pkg_config", re.compile(r"No package '([\w.+-]+)' found")),
-    (None, re.compile(r"configure: error")),   # class only, no name
-)
-
-
-def _syslib_hints(text: str) -> dict | None:
-    """Scan a BUILD-failure log for the missing-system-library shape.
-    Returns hint keys to merge (failure_class + captured names +
-    remedy), or None — callers apply this ONLY to env.realize_failed
-    verdicts, never to solve/network codes, so stray compiler text in
-    an outage log cannot re-class the failure."""
-    found: dict[str, str] = {}
-    hit = False
-    for kind, rx in _SYSLIB_PATTERNS:
-        m = rx.search(text)
-        if not m:
-            continue
-        hit = True
-        if kind and kind not in found:
-            found[kind] = m.group(1)
-    if not hit:
-        return None
-    out = {"failure_class": "missing_system_lib",
-           "remedy": "a system library is missing on this site — "
-                     "retrying the session lane will fail identically; "
-                     "session_install(build_deps=[\"<conda pkg>\"]) "
-                     "supplies its headers/libs to source compiles "
-                     "without touching the base (e.g. build_deps="
-                     "[\"xz\"] for lzma.h), or mint an isolated env "
-                     "with a full solve (extends_env / "
-                     "ensure_available env target)"}
-    if found:
-        out["missing_system"] = found
-    return out
+# _syslib_hints lives in evidence.py now (one owner): the realize
+# lanes had ZERO of its seven call sites while this module had all
+# of them — the r-signac agent re-derived cxx-compiler/zlib
+# empirically one lane away from the classifier (th594060f7).
+from .evidence import _syslib_hints  # noqa: F401  (re-export)
 
 
 def _pip_failure(text: str, default: str = "env.realize_failed",
@@ -567,7 +519,8 @@ class SessionManager:
                 adapter, adapter.pixi_bin,
                 _site_platform((self.store.get_site(adapter.name) or {})
                                .get("capabilities") or {}),
-                extra_deps=tuple(s.get("build_deps") or ()))
+                extra_deps=tuple(s.get("build_deps") or ()),
+                emit=self.store.emit)
             if tc:
                 prelude = build_env_prelude(adapter, tc, sdir)
         except WeftError:
@@ -1898,6 +1851,11 @@ class SessionManager:
             # stage it into the session too, so the same command line works
             # here and at realization (relative paths resolve identically)
             self._stage(adapter, s["location"], captured)
+        # FULL installer output persists in the session dir (evidence
+        # census: this 1h lane kept only a 1500-char tail in memory —
+        # the r-signac agent's own verb)
+        from .evidence import failure_evidence, run_logged
+        log_rel = f"{s['location']}/installer.log"
         if layer_run:
             act, ns = self._stack_activation(s, adapter)
             sdir = adapter.path(s["location"])
@@ -1924,21 +1882,24 @@ class SessionManager:
             if ns:
                 from .realize import _ns_wrap_cmd
                 script = _ns_wrap_cmd(script)
-            r = adapter.run_activated(script, timeout=3600)
+            r = run_logged(adapter, script, log_rel, timeout=3600,
+                           runner=adapter.run_activated)
         else:
             manifest = adapter.path(f"{s['location']}/pixi.toml")
-            r = adapter.run_activated(
+            r = run_logged(
+                adapter,
                 f"cd {shlex.quote(adapter.path(s['location']))} && "
                 f"eval \"$({shlex.quote(adapter.pixi_bin)} shell-hook "
                 f"--manifest-path {shlex.quote(manifest)})\" && ( {cmd} )",
-                timeout=3600)
+                log_rel, timeout=3600, runner=adapter.run_activated)
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed",
                 "session installer failed",
                 stage="realize",
                 hints={"command": cmd,
-                       "log_tail": (r.err or r.out)[-1500:],
+                       **failure_evidence(adapter, log_rel,
+                                          r.err or r.out),
                        **(_syslib_hints(r.err + r.out) or {})})
         self.store.session_add_installer(session_id, cmd, note,
                                          input=captured)

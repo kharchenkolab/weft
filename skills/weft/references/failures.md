@@ -8,7 +8,7 @@ an unchanged failing task more than once.
 |---|---|---|
 | `env.solve_conflict` | pins unsatisfiable | `hints.solver_message` names them; relax the offending pin in `hints.user_pins`, re-ensure |
 | `env.solve_failed` | index/network trouble | retryable — retry once, then tell the user |
-| `env.realize_failed` | build/unpack broke on site | read `hints.log_tail`; if corrupt → `env_repair(env_id, site)` + resubmit |
+| `env.realize_failed` | build/unpack broke on site | `hints.error_regions` carry the CAUSAL lines (marker-anchored — a dep-availability error prints at the head, out of any tail's reach); the FULL log is at `hints.log_path` on the site (`site_exec "cat <path>"`); `hints.failure_class == missing_system_lib` names the build_deps lever; if corrupt → `env_repair(env_id, site)` + resubmit |
 | `env.layer_conflict` | one dep layer contradicts another (e.g. `cran` deps without `r-base` in `deps.conda`) | hints name the missing piece — add it to the spec |
 | `env.not_realized` | env exists but was never built on this site (kernels need this) | run any task with the env there first (even `true`) |
 | `env.unsatisfiable_on_site` | musl libc, missing module, no runtime | `hints.suggestion` / alternatives; re-place to another site |

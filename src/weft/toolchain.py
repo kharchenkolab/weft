@@ -52,7 +52,8 @@ def toolchain_id(platform: str, extra: tuple = ()) -> str:
 
 
 def ensure_toolchain(adapter: SiteAdapter, pixi_bin: str,
-                     platform: str, extra_deps: tuple = ()) -> str | None:
+                     platform: str, extra_deps: tuple = (),
+                     *, emit=None) -> str | None:
     """Materialize the build toolchain on the site (once). Returns its
     prefix, or None if it cannot be built (the caller then falls back to a
     full prefix realization rather than guessing). extra_deps extends
@@ -81,11 +82,28 @@ def ensure_toolchain(adapter: SiteAdapter, pixi_bin: str,
                 + "".join(f'"{p}" = "*"\n' for p in pkgs)
             )
             adapter.write_file(f"{rel}/pixi.toml", manifest.encode())
-            r = adapter.run_cmd(
+            from .evidence import failure_evidence, run_logged
+            log_rel = f"{rel}/build.log"
+            r = run_logged(
+                adapter,
                 f"{shlex.quote(adapter.pixi_bin)} install --manifest-path "
                 f"{shlex.quote(adapter.path(rel))}/pixi.toml 2>&1",
-                timeout=3600)
+                log_rel, timeout=3600)
             if r.rc != 0:
+                # the None return stands (callers degrade to a full
+                # prefix on purpose) but the failure is no longer
+                # INVISIBLE: pre-census this discarded rc AND output —
+                # the worst of the 21 dark lanes (an hour of build
+                # output ceased to exist; the degraded fallback was
+                # unattributable)
+                if emit is not None:
+                    try:
+                        emit("toolchain.failed", site=adapter.name,
+                             platform=platform,
+                             **failure_evidence(adapter, log_rel,
+                                                r.err or r.out))
+                    except Exception:   # noqa: BLE001 — narration only
+                        pass
                 return None
             adapter.write_file(f"{rel}/.weft-ready", b'{"kind": "toolchain"}\n')
             return adapter.path(rel)

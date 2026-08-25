@@ -738,16 +738,24 @@ class CranSolver:
         # a real failure repeats with the library frozen and raises.
         total = len(cran_names) + sum(1 for r in layer["records"]
                                       if r.get("remote_sha"))
+        # FULL output persists site-side (th594060f7 item 1: three blind
+        # realizes because the 3-hour install's log lived and died in
+        # controller memory; the causal lines sat outside every window)
+        from .evidence import _syslib_hints, failure_evidence, run_logged
+        log_rel = f"logs/{env_rel.rsplit('/', 1)[-1]}-cran-realize.log"
         last_state = None
         for _ in range(8):
             with _rlib_progress(adapter, rlib, total, progress):
-                r = adapter.run_activated(
+                r = run_logged(
+                    adapter,
                     f". {shlex.quote(env_dir)}/activate.sh && "
                     f"{_build_jobs_prefix(build_jobs)}"
                     f"Rscript -e {shlex.quote(rcode)}",
+                    log_rel,
                     # on old-glibc hosts every PPM binary fails to load and
                     # the WHOLE layer rebuilds from source (rstan ~20 min)
                     timeout=10800,
+                    runner=adapter.run_activated,
                 )
             if r.rc == 0:
                 return f'export R_LIBS="{rlib}' + '${R_LIBS:+:$R_LIBS}"'
@@ -762,9 +770,8 @@ class CranSolver:
             "cran layer install failed on site",
             stage="realize",
             hints={"ecosystem": "cran",
-                   # generous: a mass source rebuild buries the root
-                   # error pages above the warnings summary
-                   "log_tail": (r.err or r.out)[-6000:],
+                   **failure_evidence(adapter, log_rel, r.err or r.out),
+                   **(_syslib_hints((r.err or "") + (r.out or "")) or {}),
                    "note": "cran realization needs network from the "
                            "install point in v1; on air-gapped sites "
                            "prefer conda-forge r-<name> packages or "
@@ -890,18 +897,26 @@ class CranSolver:
             # the toolchain bin from every compile on system-compiler-
             # less sites
             _pl = prelude.replace("\n", "; ").rstrip("; ")
-            r = adapter.run_activated(_w(
+            from .evidence import (_syslib_hints, failure_evidence,
+                                   run_logged)
+            log_rel = (f"logs/{env_rel.rsplit('/', 1)[-1]}"
+                       f"-cran-overlay.log")
+            r = run_logged(adapter, _w(
                 f". {shlex.quote(parent_dir)}/activate.sh && "
                 + (_pl + " && " if _pl else "")
                 + f"{_build_jobs_prefix(pack_tools.get('build_jobs'))}"
-                f"Rscript -e {shlex.quote(rcode)} 2>&1"), timeout=3600)
+                f"Rscript -e {shlex.quote(rcode)} 2>&1"),
+                log_rel, timeout=3600, runner=adapter.run_activated)
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed",
                 "cran overlay layer install failed",
                 stage="realize",
                 hints={"ecosystem": "cran",
-                       "log_tail": (r.err or r.out)[-1500:],
+                       **failure_evidence(adapter, log_rel,
+                                          r.err or r.out),
+                       **(_syslib_hints((r.err or "") + (r.out or ""))
+                          or {}),
                        "note": "if the package needs a native library the "
                                "parent lacks, it cannot be layered: add that "
                                "conda package to the parent env"})
@@ -1340,18 +1355,22 @@ class JuliaSolver:
         adapter.write_file(f"{env_rel}/julia/Project.toml", proj.encode())
         adapter.write_file(f"{env_rel}/julia/Manifest.toml", man.encode())
         depot = adapter.path("cache/julia-depot")
-        r = adapter.run_activated(
+        from .evidence import failure_evidence, run_logged
+        log_rel = f"logs/{env_rel.rsplit('/', 1)[-1]}-julia-realize.log"
+        r = run_logged(
+            adapter,
             f". {shlex.quote(env_dir)}/activate.sh && "
             f"JULIA_DEPOT_PATH={shlex.quote(depot)} "
             f"julia --project={shlex.quote(env_dir + '/julia')} "
             f"-e 'using Pkg; Pkg.instantiate()'",
-            timeout=3600)
+            log_rel, timeout=3600, runner=adapter.run_activated)
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed", "julia layer instantiate failed on site",
                 stage="realize",
                 hints={"ecosystem": "julia",
-                       "log_tail": (r.err or r.out)[-1500:],
+                       **failure_evidence(adapter, log_rel,
+                                          r.err or r.out),
                        "note": "julia realization needs network from the "
                                "install point in v1"})
         return (f'export JULIA_PROJECT="{env_dir}/julia"\n'
@@ -1382,18 +1401,21 @@ class JuliaSolver:
             if parent_depot != depot and adapter.file_exists(parent_depot):
                 depot = f"{depot}:{parent_depot}"
         _w = pack_tools.get("wrap_cmd") or (lambda s: s)
-        r = adapter.run_activated(_w(
+        from .evidence import failure_evidence, run_logged
+        log_rel = f"logs/{env_rel.rsplit('/', 1)[-1]}-julia-overlay.log"
+        r = run_logged(adapter, _w(
             f". {shlex.quote(parent_dir)}/activate.sh && "
             f"JULIA_DEPOT_PATH={shlex.quote(depot)} "
             f"julia --project={shlex.quote(env_dir + '/julia')} "
             f"-e 'using Pkg; Pkg.instantiate()'"),
-            timeout=3600)
+            log_rel, timeout=3600, runner=adapter.run_activated)
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed",
                 "julia overlay instantiate failed on site", stage="realize",
                 hints={"ecosystem": "julia",
-                       "log_tail": (r.err or r.out)[-1500:]})
+                       **failure_evidence(adapter, log_rel,
+                                          r.err or r.out)})
         return (f'export JULIA_PROJECT="{env_dir}/julia"\n'
                 f'export JULIA_DEPOT_PATH="{depot}"')
 

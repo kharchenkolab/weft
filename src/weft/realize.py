@@ -416,8 +416,20 @@ def ensure_realization(
                                      env_row["spec_hash"]) or {}
                                      ).get("verify"))
         except WeftError as e:
+            # the record keeps the EVIDENCE, not just the one-line
+            # detail: env_status renders this log — dropping the hints
+            # here meant the durable record knew less than the raise
+            # (evidence census 2026-08-25)
+            _log = e.detail
+            if e.hints.get("log_path"):
+                _log += f"\nfull log: {e.hints['log_path']}"
+            for reg in (e.hints.get("error_regions") or [])[:4]:
+                _log += f"\n[{reg.get('marker')}] {reg.get('lines')}"
+            if e.hints.get("log_tail") and "error_regions" not in e.hints:
+                _log += "\n" + str(e.hints["log_tail"])[-1500:]
             store.set_realization(
-                env_id, adapter.name, strategy, rel, "failed", log=e.detail
+                env_id, adapter.name, strategy, rel, "failed",
+                log=_log[:20000]
             )
             raise
         finally:
@@ -675,6 +687,55 @@ def _wipe_aside(adapter: SiteAdapter, rel: str, *,
     return trash if "moved" in r.out else None
 
 
+class _prefix_progress:
+    """Heartbeat for the realize's LONGEST silent window (up to the
+    90-min pixi install timeout with zero events between start and
+    done — the census measured it as the worst of the 21 dark lanes):
+    a read-only du poll every 30s on its own thread, emitted as
+    realize.prefix.progress. Observation only — a poll failure never
+    touches the install. Mirrors solvers._rlib_progress (the cran
+    install's answer to the same silence)."""
+
+    def __init__(self, adapter, rel: str, emit, env_id: str, t0: float):
+        self.adapter, self.rel = adapter, rel
+        self.emit, self.env_id, self.t0 = emit, env_id, t0
+        self._stop = None
+
+    def __enter__(self):
+        if self.emit is None:
+            return self
+        import threading
+        import time as _t
+        self._stop = threading.Event()
+
+        def _poll():
+            last = -1
+            while not self._stop.wait(30.0):
+                try:
+                    r = self.adapter.run_cmd(
+                        f"du -sk {shlex.quote(self.adapter.path(self.rel))}"
+                        f" 2>/dev/null | cut -f1", timeout=60)
+                    kb = int((r.out or "0").strip() or 0)
+                except (WeftError, ValueError):
+                    continue
+                if kb != last:
+                    last = kb
+                    try:
+                        self.emit("realize.prefix.progress",
+                                  env_id=self.env_id,
+                                  site=self.adapter.name, mb=kb // 1024,
+                                  elapsed_s=round(_t.time() - self.t0, 1))
+                    except Exception:   # noqa: BLE001
+                        pass
+        threading.Thread(target=_poll, daemon=True).start()
+        return self
+
+    def __exit__(self, *exc):
+        if self._stop is not None:
+            self._stop.set()
+        return False
+
+
 def _build_prefix(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str = "", fresh: bool = True,
@@ -699,13 +760,19 @@ def _build_prefix(
              packages=sum(len(v) for v in
                           (env_row["canonical"].get("platforms")
                            or {}).values()))
-    build = adapter.run_cmd(
-        overrides +
-        f"{shlex.quote(adapter.pixi_bin)} install --frozen "
-        f"--manifest-path {shlex.quote(manifest_path)} 2>&1",
-        timeout=5400,   # published/institutional envs are 10-15 GB with
-                        # CUDA stacks; login nodes are often small VMs
-    )
+    from .evidence import failure_evidence, run_logged
+    log_rel = f"logs/{rel.rsplit('/', 1)[-1]}-prefix.log"
+    with _prefix_progress(adapter, rel, emit, env_id, t0):
+        build = run_logged(
+            adapter,
+            overrides +
+            f"{shlex.quote(adapter.pixi_bin)} install --frozen "
+            f"--manifest-path {shlex.quote(manifest_path)} 2>&1",
+            log_rel,
+            timeout=5400,   # published/institutional envs are 10-15 GB
+                            # with CUDA stacks; login nodes are often
+                            # small VMs
+        )
     if emit is not None and build.rc == 0:
         emit("realize.prefix.done", env_id=env_id, site=adapter.name,
              elapsed_s=round(_t.time() - t0, 1))
@@ -715,8 +782,9 @@ def _build_prefix(
             f"pixi install failed on {adapter.name}",
             stage="realize",
             hints={
-                "log_tail": build.out[-2000:],
-                "retryable": "maybe — check for network or disk errors in log_tail",
+                **failure_evidence(adapter, log_rel, build.out),
+                "retryable": "maybe — check for network or disk errors "
+                             "in the error_regions / log_path",
                 # the adaptive lever, where an agent will actually read it
                 "if_the_world_moved": "if the recorded packages are simply "
                                       "gone from the index, env_revise(env_id) "
@@ -871,17 +939,25 @@ def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
     the activated env, in the env dir, on the target site — so it can be
     hashed (it is, into the EnvID) but not content-pinned; specs using it
     are flagged weakly-reproducible."""
-    for cmd in env_row["canonical"]["extras"].get("post_install") or []:
-        r = adapter.run_activated(
+    from .evidence import _syslib_hints, failure_evidence, run_logged
+    for i, cmd in enumerate(
+            env_row["canonical"]["extras"].get("post_install") or []):
+        log_rel = f"logs/{rel.rsplit('/', 1)[-1]}-post-install-{i}.log"
+        r = run_logged(
+            adapter,
             f"cd {shlex.quote(adapter.path(rel))} && . ./activate.sh && ( {cmd} )",
-            timeout=3600,
+            log_rel, timeout=3600, runner=adapter.run_activated,
         )
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed",
                 f"post_install command failed: {cmd[:120]}",
                 stage="realize",
-                hints={"command": cmd, "log_tail": (r.err or r.out)[-1500:],
+                hints={"command": cmd,
+                       **failure_evidence(adapter, log_rel,
+                                          r.err or r.out),
+                       **(_syslib_hints((r.err or "") + (r.out or ""))
+                          or {}),
                        "note": "post_install runs on the target site inside "
                                "the activated env — air-gapped sites cannot "
                                "fetch; pin sources (e.g. dated CRAN snapshot "
@@ -1105,7 +1181,8 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     site_plat = pack_tools["site_platform"]
     if delta.get("layers_added"):
         from .toolchain import toolchain_fingerprint
-        tc = ensure_toolchain(adapter, adapter.pixi_bin, site_plat)
+        tc = ensure_toolchain(adapter, adapter.pixi_bin, site_plat,
+                              emit=store.emit)
         if tc:
             prelude = build_env_prelude(adapter, tc, parent_layout_dir)
             # the compile cache must key on what ACTUALLY builds and links:
@@ -1148,7 +1225,8 @@ def _build_overlay(env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
         except WeftError:
             if prelude:
                 raise           # a compiler was already on PATH: real failure
-            tc = ensure_toolchain(adapter, adapter.pixi_bin, site_plat)
+            tc = ensure_toolchain(adapter, adapter.pixi_bin, site_plat,
+                                  emit=store.emit)
             if not tc:
                 raise
             activation.append(_overlay_pypi(
