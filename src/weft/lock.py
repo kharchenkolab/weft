@@ -426,6 +426,14 @@ def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi",
             hints={
                 "solver_message": tail,
                 "user_pins": spec.conda + spec.pypi,
+                # labeled separately: on the extends_env path these are
+                # MACHINE-written parent pins (one map per platform) —
+                # folding them into user_pins would bury the authored
+                # constraints under hundreds of entries
+                **({"variant_pins": {
+                    p: (v.get("conda") or []) + (v.get("pypi") or [])
+                    for p, v in sorted(spec.variants.items())}}
+                   if spec.variants else {}),
                 # weft's own one-call answer to this exact error — agents read
                 # hints under pressure, not the reference docs (eval finding)
                 "suggestion": "mark the negotiable pins SOFT with a trailing "

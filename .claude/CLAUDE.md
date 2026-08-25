@@ -169,4 +169,21 @@ remotes, removable in one command.
   (2026-08-25). test_adopt_only.py's publish-in-A/adopt-in-fresh-B
   fixture is the pattern: hand-off artifacts cross REAL workspace
   boundaries, only site tooling the lane lacks gets stubbed.
+- Fixture AXES sit at the shipped shape, not the minimal one: an axis
+  pinned simpler than the field norm (single-platform packs when every
+  publish is [linux-64, osx-arm64]) makes a whole bug class
+  unobservable at ANY test depth — platforms[0] pinning rode months of
+  REAL layered-install tests because with one platform "first" and
+  "correct" are the same value; the tests could not FALSIFY the claim,
+  so their green certified nothing about it. Depth on a degenerate
+  fixture is not coverage. When two axis values behave differently,
+  the fixture encodes the difference (per-platform build strings), so
+  cross-contamination cannot pass by coincidence.
+- WIDENING an input is a class-sweep trigger: a round that grows a
+  field's reachable range (new default, newly inherited value,
+  loosened validation) audits every downstream consumer of that field
+  against the new range BEFORE shipping — grep the field name, re-read
+  each use. The #117 platforms-from-parent declaration was correct in
+  isolation; it activated a latent platforms[0] two functions
+  downstream, and the round's tests all exercised the OLD range.
 - No biological examples in specs, tests, or docs.

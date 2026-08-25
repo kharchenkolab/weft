@@ -90,7 +90,12 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   - `{"extends_env": <parent EnvID>, "deps": {...}}` — **freeze the base**:
     every package in the parent's lock becomes an exact pin (conda, pypi,
     cran/julia layers including github SHAs and the parent's snapshot
-    date), so the child's lock is a superset *by construction*. The solve
+    date), so the child's lock is a superset *by construction*. Pins are
+    per-platform (each declared platform pins from its own lock section;
+    a multi-platform pack never sees another platform's build strings);
+    a delta conflicting with any platform's pin names that platform in
+    the `env.layer_conflict` payload. On an adopt-only workspace the
+    child also inherits the channels recorded in the parent's lock. The solve
     is fast (tiny search space), and if the delta is pure language-layer
     (`deps.pypi` / `deps.cran` / `deps.julia`), the child **realizes as an
     O(delta) overlay** on the parent's already-realized prefix: seconds and

@@ -120,7 +120,10 @@ class EnvManager:
         conda-forge; warning there would false-fire on every pure
         conda-forge R spec). A warning, never a refusal."""
         from .spec import split_constraint
-        bio = sorted({split_constraint(d)[0] for d in spec.conda
+        conda_deps = list(spec.conda) + [
+            d for v in (spec.variants or {}).values()
+            for d in (v.get("conda") or [])]
+        bio = sorted({split_constraint(d)[0] for d in conda_deps
                       if split_constraint(d)[0].startswith("bioconductor-")})
         if bio and not any("bioconda" in c for c in spec.channels):
             return {"packages": bio,
@@ -146,50 +149,119 @@ class EnvManager:
         from .lock import parent_pins, parent_pypi_pins
         from .spec import split_constraint
         out = deepcopy(spec)
-        plat = spec.platforms[0] if spec.platforms else "linux-64"
         canonical = parent_env["canonical"]
+        parent_spec = self._lookup_spec(parent_env["spec_hash"])
+        # PER-PLATFORM pins (consumer audit 2026-08-25): the old
+        # platforms[0] choice applied ONE platform's exact build
+        # strings to EVERY declared platform's solve — a zero-add
+        # snapshot of a [linux-64, osx-arm64] pack (the ordinary
+        # published shape) asked osx-arm64 to satisfy linux builds
+        # ("No candidates for _openmp_mutex ==4.5 20_gnu") and could
+        # never resolve. Latent since the feature (every fixture was
+        # single-platform, where platforms[0] is always right); the
+        # snapshot's parent-platform declaration made it the default
+        # path. Each platform now pins from ITS OWN lock via variants
+        # ([target.<plat>.dependencies]); shared deps carry only the
+        # delta.
+        locked = set((canonical.get("platforms") or {}))
+        plats = [p for p in (spec.platforms or ["linux-64"])
+                 if p in locked] or (sorted(locked)[:1] or ["linux-64"])
+        # the extends remedy must name a door that OPENS: on an
+        # adopt-only workspace "re-ensure the parent's SPEC" raises
+        # parent-spec-not-found (the very failure the adopt round
+        # fixed by moving away from)
+        move_base = (
+            "`extends_env` freezes the base on purpose. To move it, "
+            + ("re-ensure with `extends` (the parent's SPEC hash) for "
+               "a free re-solve and a full prefix."
+               if parent_spec is not None else
+               "adopt a newer published version of the pack, or "
+               "bundle_import the env from a workspace that holds its "
+               "spec (this adopt-only workspace has no spec body to "
+               "re-solve from)."))
 
-        def resolve(pins: list[str], delta: list[str], kind: str) -> list[str]:
-            pinned = {split_constraint(p)[0]: split_constraint(p)[1]
-                      for p in pins}
-            keep_delta = []
+        def pin_maps(pins_fn):
+            return {p: {split_constraint(x)[0]: split_constraint(x)[1]
+                        for x in pins_fn(canonical, p)} for p in plats}
+
+        def check_delta(delta: list[str], by_plat: dict,
+                        kind: str) -> list[str]:
+            """Delta vs EVERY platform's pins: conflicting anywhere =>
+            layer_conflict naming the platform; pinned-and-satisfied
+            EVERYWHERE => redundant, dropped (the pin stands); new on
+            any platform => kept in shared deps (the per-target pin
+            outranks it where the parent already provides it)."""
+            keep = []
             for dep in delta:
                 name, constraint = split_constraint(dep)
-                if name not in pinned:
-                    keep_delta.append(dep)
-                    continue
-                version = pinned[name].lstrip("=").split()[0]
-                if constraint == "*" or _satisfies(version, constraint):
-                    continue      # redundant: the frozen base already has it
-                raise WeftError(
-                    "env.layer_conflict",
-                    f"the delta asks for {kind} {name} {constraint}, but the "
-                    f"parent has it pinned at {version}",
-                    stage="solve",
-                    hints={
-                        "parent": spec.extends_env, "package": name,
-                        "parent_version": version, "requested": constraint,
-                        "suggestion": "`extends_env` freezes the base on "
-                                      "purpose. To move it, re-ensure with "
-                                      "`extends` (the parent's SPEC hash) for "
-                                      "a free re-solve and a full prefix.",
-                    })
-            return pins + keep_delta
+                satisfied_everywhere = bool(by_plat)
+                for p, pinned in by_plat.items():
+                    if name not in pinned:
+                        satisfied_everywhere = False
+                        continue
+                    version = pinned[name].lstrip("=").split()[0]
+                    if constraint == "*" or _satisfies(version, constraint):
+                        continue
+                    raise WeftError(
+                        "env.layer_conflict",
+                        f"the delta asks for {kind} {name} {constraint}, "
+                        f"but the parent has it pinned at {version} "
+                        f"on {p}",
+                        stage="solve",
+                        hints={"parent": spec.extends_env,
+                               "package": name, "platform": p,
+                               "parent_version": version,
+                               "requested": constraint,
+                               "suggestion": move_base})
+                if not satisfied_everywhere:
+                    keep.append(dep)
+            return keep
 
-        out.conda = resolve(parent_pins(canonical, plat), spec.conda, "conda")
-        out.pypi = resolve(parent_pypi_pins(canonical, plat), spec.pypi, "pypi")
+        conda_by_plat = pin_maps(parent_pins)
+        out.conda = check_delta(spec.conda, conda_by_plat, "conda")
+        for p in plats:
+            v = dict(out.variants.get(p) or {})
+            child_variant = check_delta(list(v.get("conda") or []),
+                                        {p: conda_by_plat[p]}, "conda")
+            v["conda"] = parent_pins(canonical, p) + child_variant
+            out.variants[p] = v
+        # pypi pins are version-only and the manifest has no per-target
+        # pypi table: pin the versions COMMON to every platform; a
+        # cross-platform divergent pypi version stays UNPINNED (rare —
+        # noted honestly rather than poisoning other platforms' solves
+        # with one platform's version)
+        pypi_by_plat = pin_maps(parent_pypi_pins)
+        kept_pypi = check_delta(spec.pypi, pypi_by_plat, "pypi")
+        pypi_sets = [set(parent_pypi_pins(canonical, p)) for p in plats]
+        common_pypi = sorted(set.intersection(*pypi_sets)) if pypi_sets \
+            else []
+        out.pypi = common_pypi + kept_pypi
         # channels inherit (child's prepend, like the spec-hash extends
         # merge): a child spec authored without the parent's bioconda
         # made every parent bioconda package invisible to the DELTA
-        # solve (aba2's isolated-env incident — their #3, root-caused
-        # to the authored spec; inheritance makes extends_env carry the
-        # base's universe by default). Solve-side only: merged_hash was
-        # captured before pinning, so identity is the authored spec's.
-        parent_spec = self._lookup_spec(parent_env["spec_hash"])
+        # solve. Solve-side only: merged_hash was captured before
+        # pinning, so identity is the authored spec's. When the parent
+        # SPEC is absent (adopt-only workspace), the channels come from
+        # the parent's own LOCK — pixi records the channels that
+        # actually solved it (consumer audit: canonical carries no
+        # channels, so the synth spec ran channel-less and channel_hint
+        # fired on a pack whose spec lists bioconda).
+        from .spec import _prepend_unique
         if parent_spec is not None:
-            from .spec import _prepend_unique
             out.channels = _prepend_unique(out.channels,
                                            parent_spec.channels)
+        elif parent_env.get("native_lock"):
+            try:
+                import yaml as _yaml
+                doc = _yaml.safe_load(parent_env["native_lock"]) or {}
+                urls = [str(c.get("url", "")).rstrip("/") for c in
+                        ((doc.get("environments") or {})
+                         .get("default", {}).get("channels") or [])]
+                urls = [u for u in urls if u]
+                if urls:
+                    out.channels = _prepend_unique(out.channels, urls)
+            except Exception:   # noqa: BLE001 — inheritance is
+                pass            # best-effort; the solve stays honest
         # the parent's extras carry over and MERGE with the child's: the
         # child's identity must account for everything the parent's does
         # (post_install products, modules), or the same child EnvID behaves
@@ -447,12 +519,23 @@ class EnvManager:
                               "conflicts with the frozen base; note a conda "
                               "delta realizes as a full prefix, not an "
                               "overlay)")
-            else:
+            elif self._lookup_spec(parent_env["spec_hash"]) is not None:
                 suggestion = ("re-ensure with `extends` (the parent's SPEC "
                               "hash) instead of `extends_env`: that frees "
                               "the base to move, costs a full solve and a "
                               "full prefix, and is the right call when the "
                               "delta genuinely needs a newer base")
+            else:
+                # same shut door as the layer_conflict remedy (consumer
+                # audit 2026-08-25): on an adopt-only workspace there is
+                # no parent spec body — "re-ensure with extends" raises
+                # parent-spec-not-found
+                suggestion = ("the base is frozen and this workspace holds "
+                              "no spec body for the parent (adopt-only) — "
+                              "adopt a newer published version of the pack, "
+                              "or bundle_import the env from a workspace "
+                              "that has its spec, then re-ensure with "
+                              "`extends`")
             hints = {
                 "parent": merged.extends_env,
                 "delta": merged.conda + merged.pypi
@@ -750,7 +833,10 @@ class EnvManager:
         target = resolve_extends(EnvSpec.from_dict(spec_body),
                                  self._lookup_spec)
         want = {}
-        for dep in target.conda + target.pypi:
+        variant_deps = [d for v in (target.variants or {}).values()
+                        for k in ("conda", "pypi")
+                        for d in (v.get(k) or [])]
+        for dep in target.conda + target.pypi + variant_deps:
             from .spec import split_constraint
             n, c = split_constraint(dep)
             want[n] = c

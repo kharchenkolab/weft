@@ -40,22 +40,33 @@ def _subdir() -> str:
             else "linux-64")
 
 
+# MULTI-platform, deliberately (consumer audit #2 on this fixture):
+# the ordinary published pack ships [linux-64, osx-arm64], and with a
+# single-platform pack platforms[0] pinning is always accidentally
+# right — the fixture could not falsify the claim. Each subdir gets a
+# DIFFERENT build string so cross-platform pin poisoning cannot hide.
+PACK_PLATFORMS = ["linux-64", "osx-arm64"]
+
+
 def _offline_env(w, tmp_path, name="pack-base", verify=False):
     chan = tmp_path / f"chan-{name}"
-    sub = _subdir()
-    for d in (chan / sub, chan / "noarch"):
-        d.mkdir(parents=True, exist_ok=True)
-    fn = f"{name}pkg-1.0-h0_0.conda"
-    (chan / sub / "repodata.json").write_text(json.dumps(
-        {"info": {"subdir": sub}, "packages": {}, "packages.conda": {
-            fn: {"name": f"{name}pkg", "version": "1.0", "build": "h0_0",
-                 "build_number": 0, "subdir": sub, "depends": [],
-                 "sha256": hashlib.sha256(fn.encode()).hexdigest()}}}))
+    for sub, build in (("linux-64", "h_linux_0"),
+                       ("osx-arm64", "h_osx_0")):
+        (chan / sub).mkdir(parents=True, exist_ok=True)
+        fn = f"{name}pkg-1.0-{build}.conda"
+        (chan / sub / "repodata.json").write_text(json.dumps(
+            {"info": {"subdir": sub}, "packages": {}, "packages.conda": {
+                fn: {"name": f"{name}pkg", "version": "1.0",
+                     "build": build, "build_number": 0, "subdir": sub,
+                     "depends": [],
+                     "sha256": hashlib.sha256(
+                         fn.encode()).hexdigest()}}}))
+    (chan / "noarch").mkdir(parents=True, exist_ok=True)
     (chan / "noarch" / "repodata.json").write_text(json.dumps(
         {"info": {"subdir": "noarch"}, "packages": {},
          "packages.conda": {}}))
     env = w.env_ensure({"name": name, "channels": [chan.as_uri()],
-                        "platforms": [sub],
+                        "platforms": PACK_PLATFORMS,
                         "deps": {"conda": [f"{name}pkg ==1.0"]},
                         **({"verify": {"loads": [f"{name}mod"]}}
                            if verify else {})})
@@ -165,7 +176,7 @@ def test_adoption_stores_the_spec_row(tmp_path, pixi_bin, wb,
     assert body["verify"]["loads"] == ["vpackmod"]
     # spec-hash extends resolves now too
     child = wb.env_ensure({"name": "child", "extends": spec_hash,
-                           "platforms": [_subdir()],
+                           "platforms": PACK_PLATFORMS,
                            "deps": {"conda": []}})
     assert "error" not in child, child
 
@@ -211,3 +222,138 @@ def test_synth_spec_declares_parent_platforms(published_tree, wb):
     assert spec["platforms"] == \
         wb.store.get_env(got["env_id"])["platforms"]
     wb.session_stop(s["session_id"])
+
+
+def _fake_parent(native_lock=None, spec_stored=False):
+    return {
+        "spec_hash": "spec:v1:parent",
+        "platforms": ["linux-64", "osx-arm64"],
+        "native_lock": native_lock,
+        "canonical": {
+            "platforms": {
+                "linux-64": [
+                    {"kind": "conda", "name": "zlib", "version": "1.3",
+                     "build": "h_linux_1", "sha256": "a" * 64},
+                    {"kind": "pypi", "name": "idna", "version": "3.7",
+                     "build": "", "sha256": "b" * 64}],
+                "osx-arm64": [
+                    {"kind": "conda", "name": "zlib", "version": "1.3",
+                     "build": "h_osx_9", "sha256": "c" * 64},
+                    {"kind": "pypi", "name": "idna", "version": "3.7",
+                     "build": "", "sha256": "d" * 64}]},
+            "extras": {}},
+    }
+
+
+def test_pin_to_parent_pins_each_platform_from_its_own_lock(wb):
+    """The mechanism pin: linux pins carry linux builds, osx pins carry
+    osx builds — via per-target variants; shared deps hold ONLY the
+    delta. platforms[0]'s build strings must never reach the other
+    platform's solve."""
+    from weft.spec import EnvSpec
+    spec = EnvSpec.from_dict({
+        "name": "snap", "extends_env": "env:v1:parent",
+        "platforms": ["linux-64", "osx-arm64"],
+        "deps": {"conda": ["newpkg"]}})
+    out = wb.envman._pin_to_parent(spec, _fake_parent())
+    assert out.conda == ["newpkg"]                     # delta only
+    assert out.variants["linux-64"]["conda"] == \
+        ["zlib ==1.3 h_linux_1"]
+    assert out.variants["osx-arm64"]["conda"] == \
+        ["zlib ==1.3 h_osx_9"]
+    assert out.pypi == ["idna ==3.7"]                  # common version
+
+
+def test_pin_to_parent_conflict_names_the_platform(wb):
+    from weft.spec import EnvSpec
+    spec = EnvSpec.from_dict({
+        "name": "snap", "extends_env": "env:v1:parent",
+        "platforms": ["linux-64", "osx-arm64"],
+        "deps": {"conda": ["zlib >=2"]}})
+    with pytest.raises(WeftError) as ei:
+        wb.envman._pin_to_parent(spec, _fake_parent())
+    e = ei.value
+    assert e.code == "env.layer_conflict"
+    assert e.hints["platform"] in ("linux-64", "osx-arm64")
+    # adopt-only parent (no spec stored): the remedy must NOT send the
+    # user through the door that raises parent-spec-not-found
+    assert "re-ensure with `extends`" not in e.hints["suggestion"]
+    assert "adopt a newer published version" in e.hints["suggestion"]
+
+
+def test_pin_to_parent_inherits_channels_from_the_lock(wb):
+    """Adopt-only (no parent spec row, canonical carries no channels):
+    the channels that ACTUALLY solved the parent are in its lock —
+    inherit from there, so channel_hint stops firing on a pack whose
+    own spec lists bioconda."""
+    import yaml
+    from weft.spec import EnvSpec
+    lock = yaml.safe_dump({
+        "environments": {"default": {"channels": [
+            {"url": "https://conda.anaconda.org/conda-forge/"},
+            {"url": "https://conda.anaconda.org/bioconda/"}],
+            "packages": {}}},
+        "packages": []})
+    spec = EnvSpec.from_dict({
+        "name": "snap", "extends_env": "env:v1:parent",
+        "platforms": ["linux-64", "osx-arm64"],
+        "deps": {"conda": ["bioconductor-toolpkg"]}})
+    from weft.envman import EnvManager
+    assert EnvManager._channel_hint(spec) is not None  # falsifiable:
+    out = wb.envman._pin_to_parent(spec, _fake_parent(native_lock=lock))
+    assert "https://conda.anaconda.org/bioconda" in out.channels
+    assert EnvManager._channel_hint(out) is None       # ...and healed
+
+
+def test_solve_failure_remedy_discriminates_adopt_only(published_tree,
+                                                       wb):
+    """SIBLING of the layer_conflict remedy (class sweep, this round):
+    the delta-does-not-fit handler had its own hardcoded 're-ensure
+    with `extends` (the parent's SPEC hash)' — a door that raises
+    parent-spec-not-found on an adopt-only workspace. A delta naming a
+    package the channel does not carry drives the real solve failure.
+    The parent is a PRE-spec_body tree: with the sidecar's spec_body
+    adopted (the modern shape), re-ensure-with-extends is a door that
+    opens and remains the right suggestion."""
+    tree = published_tree["tree"]
+    lock_file = next((tree / "locks").glob("*.json"))
+    side = json.loads(lock_file.read_text())
+    del side["spec_body"]
+    lock_file.write_text(json.dumps(side))
+    r = wb.env_adopt("local", str(tree), "pack")
+    assert "error" not in r, r
+    got = wb.env_ensure({"name": "snap-broken",
+                         "extends_env": r["env_id"],
+                         "platforms": PACK_PLATFORMS,
+                         "deps": {"conda": ["weft-no-such-pkg"]}})
+    assert got["error"] == "env.layer_conflict", got
+    sug = got["hints"]["suggestion"]
+    assert "re-ensure with `extends` (the parent's SPEC hash)" not in sug
+    assert "adopt a newer published version" in sug
+
+
+def test_channel_hint_sees_variant_deps(wb):
+    """Class sweep: _channel_hint scanned only shared deps — a
+    hand-authored [target.<plat>] naming bioconductor-* without
+    bioconda got no pointer to the real cause."""
+    from weft.envman import EnvManager
+    from weft.spec import EnvSpec
+    spec = EnvSpec.from_dict({
+        "name": "t", "platforms": ["linux-64"], "deps": {"conda": []},
+        "variants": {"linux-64": {"conda": ["bioconductor-toolpkg"]}}})
+    hint = EnvManager._channel_hint(spec)
+    assert hint and "bioconductor-toolpkg" in hint["packages"]
+
+
+def test_find_near_sees_variant_deps(tmp_path, pixi_bin):
+    """Class sweep: find_near's want-map read only shared deps — a spec
+    expressing its asks per-platform ([target.<plat>]) built an empty
+    want and matched NOTHING. Also this verb's first fast-lane test
+    (edit => coverage; the allowlist only shrinks)."""
+    w = Weft(tmp_path / "ws-n", pixi_bin=pixi_bin, resume="off")
+    env_id = _offline_env(w, tmp_path, name="near")
+    got = w.env_find_near({
+        "name": "q", "platforms": PACK_PLATFORMS,
+        "deps": {"conda": []},
+        "variants": {"linux-64": {"conda": ["nearpkg ==1.0"]}}})
+    assert any(r["env_id"] == env_id for r in got), got

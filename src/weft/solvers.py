@@ -1420,7 +1420,13 @@ def check_layer_requirements(spec, layers_present: dict[str, list[str]],
     # here refused "r-base=4.4" (the '=' pin never matched r-base) while
     # the hint itself told users to version-pin interpreters — aba 1.2,
     # live; the model dropped its pin to appease the check
-    conda_names = {split_constraint(d)[0].lower() for d in spec.conda}
+    # union over shared deps AND per-platform variants: the extends_env
+    # pins live in variants now (per-platform build strings), and an
+    # inherited r-base must stay visible to the cran layer's check
+    conda_names = {split_constraint(d)[0].lower() for d in spec.conda} | {
+        split_constraint(d)[0].lower()
+        for v in (spec.variants or {}).values()
+        for d in (v.get("conda") or [])}
     for eco, deps in layers_present.items():
         if not deps:
             continue
