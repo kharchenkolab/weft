@@ -90,10 +90,18 @@ def test_remote_kernel_capture_and_late_promote(tmp_path, pixi_bin,
 
 
 def test_mid_transfer_failure_is_honest_and_resumable(tmp_path, pixi_bin,
-                                                      sshd_site):
+                                                      sshd_site_wan):
     """Kill the wire DURING the tar-pipe: state lands failed+retryable
     (no lying 'done'), forget-during-inflight is refused, and a retry
-    after recovery converges to correct content."""
+    after recovery converges to correct content.
+
+    WAN fixture, deliberately (R1 triage): over loopback the 48MB
+    tar-pipe can COMPLETE between observing state=inflight and the
+    docker pause landing (~200ms) — the racing-forget assert then sees
+    a settled retain and fails intermittently (observed pass-solo/
+    fail-in-lane twice, then one solo failure). 50ms netem makes the
+    in-flight window real — the machine-cadence rule's exact class."""
+    sshd_site = sshd_site_wan
     w = Weft(tmp_path / "ws-c", pixi_bin=pixi_bin)
     w.register_site("beam", "ssh", {
         "host": sshd_site["host"], "port": sshd_site["port"],

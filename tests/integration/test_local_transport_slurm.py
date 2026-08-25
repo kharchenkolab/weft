@@ -60,8 +60,12 @@ def test_submit_node_controller_no_ssh(slurm_site):
     assert r.returncode == 0, r.stderr
     # the topology premise: ssh-to-self is NOT available in-container
     # (no client keys) — only the scheduler is
+    # `python3 -` (not /dev/stdin): under `su -` the docker-exec stdin
+    # pipe is root-owned and re-OPENING the path is EPERM; `-` reads
+    # the inherited FD (R1 triage — surfaced once the missing
+    # /opt/weft-src parent was fixed)
     r = _exec(c, "su", "-", "physicist", "-c",
-              "command -v sbatch && python3 /dev/stdin",
+              "command -v sbatch && python3 -",
               input=DRIVER)
     assert r.returncode == 0, (r.stdout[-800:], r.stderr[-800:])
     assert '"ok": true' in r.stdout

@@ -87,9 +87,24 @@ def cloud_weft(tmp_path, pixi_bin, sshd_site, tmp_path_factory):
         })
         return prov
 
+    provs: list[DockerProvisioner] = []
+
+    def make_tracked(w, rate, budget):
+        prov = make(w, rate, budget)
+        provs.append(prov)
+        return prov
+
     w = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
-    w.make_cloud = lambda rate, budget: make(w, rate, budget)
-    return w
+    w.make_cloud = lambda rate, budget: make_tracked(w, rate, budget)
+    yield w
+    # a FAILED/timed-out test never reaches site_teardown, and --rm
+    # only fires on STOP: the orphan ran for HOURS competing with every
+    # later test (R1 triage found two, one per lane run — a timeout
+    # that leaks load makes the NEXT timeout likelier)
+    import subprocess as _sp
+    for prov in provs:
+        for name in prov.launched:
+            _sp.run(["docker", "rm", "-f", name], capture_output=True)
 
 
 def test_burst_run_and_teardown(cloud_weft, tmp_path):

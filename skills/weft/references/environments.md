@@ -294,7 +294,11 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
 - **Toolchains are envs too:** no compiler on site → spec
   `{"deps": {"conda": ["cxx-compiler", "make"]}}`; compile as a task with
   the source tree as an input; downstream tasks run the binary via
-  site-side chaining. `${CXX}` etc. are set by activation.
+  site-side chaining. Invoke compilers by NAME from the activated
+  PATH (`g++`, `gcc`, `cc`) or as `"${CXX:-g++}"` — conda-forge's
+  compiler metapackages 2.0 (2026) no longer export `CC`/`CXX` at
+  activation (the activate.d wrappers were dropped upstream), so
+  `${CXX}` alone is empty on any FRESH solve.
 
 ## Julia (and the solver registry generally)
 
