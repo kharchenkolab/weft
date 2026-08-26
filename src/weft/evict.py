@@ -356,6 +356,7 @@ def footprint(weft, site: str) -> dict:
     envs = du("envs")
     cache = du("cache")
     cas = du("cas")
+    logs = du("logs")
     reals = []
     known = set()
     for x in weft.store.realizations_for_site(site):
@@ -436,6 +437,9 @@ def footprint(weft, site: str) -> dict:
         "site": site,
         "free_bytes": _free_bytes(adapter),
         "prefixes_bytes": envs, "package_cache_bytes": cache,
+        # weft-written evidence logs (long-lane full outputs);
+        # bounded by the logs_max_age_days policy via gc_sweep
+        "logs_bytes": logs,
         "data_cache_bytes": cas,
         "bytes_note": "area sizes are apparent (du) and share hardlinked "
                       "blocks — they sum to MORE than the disk they occupy; "

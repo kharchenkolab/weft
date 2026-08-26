@@ -156,6 +156,35 @@ def plan(weft, site: str | None = None) -> dict:
                         "session_id": s["session_id"],
                         "base_env_id": s.get("base_env_id"),
                         "idle_days": round((now - last) / 86400, 1)})
+        # weft-written evidence logs (<root>/logs/): every long-lane
+        # op persists its FULL output there (the L2 evidence
+        # contract), so the dir grows without bound. Bounded by AGE,
+        # not reference — a log's consumers are agents reading past
+        # failures; logs_max_age_days=0 opts a site out. The count
+        # ride uses one wc per file: log counts are small, and the
+        # per-file form avoids wc's ambiguous "total" row.
+        logs_age = site_policy(row).get("logs_max_age_days", 30)
+        stale_logs = {"count": 0, "bytes": 0,
+                      "policy_days": logs_age}
+        if logs_age:
+            try:
+                import shlex as _sh
+                adapter = weft.adapters[name]
+                lr = adapter.run_cmd(
+                    f"find {_sh.quote(adapter.path('logs'))} "
+                    f"-type f -mtime +{int(logs_age)} "
+                    "-exec wc -c {} \\; 2>/dev/null || true",
+                    timeout=120)
+                rows = [ln.split(None, 1) for ln in
+                        lr.out.splitlines() if ln.strip()]
+                stale_logs["count"] = len(rows)
+                stale_logs["bytes"] = sum(
+                    int(r0[0]) for r0 in rows if r0[0].isdigit())
+            except WeftError:
+                # a dead site must not break the whole plan —
+                # honest "unknown", never a silent zero
+                stale_logs = {"error": "site unreachable",
+                              "policy_days": logs_age}
         out["sites"][name] = {
             "idle_days_policy": idle_days,
             "evictable_realizations": realizations,
@@ -166,6 +195,7 @@ def plan(weft, site: str | None = None) -> dict:
             "run_remains": remains,
             "session_idle_days_policy": session_idle,
             "idle_sessions": idle_sessions,
+            "stale_logs": stale_logs,
             "reclaimable_bytes": sum(r["bytes"] for r in stale_refs),
         }
     return out
@@ -209,6 +239,20 @@ def sweep(weft, site: str, confirm: bool = False) -> dict:
             stopped_sessions += 1
         except WeftError:
             pass    # raced an explicit stop, or touched since the plan
+    swept_logs = p.get("stale_logs") or {}
+    swept_log_bytes = 0
+    if swept_logs.get("count"):
+        import shlex as _sh
+        days = int(swept_logs["policy_days"])
+        adapter.run_cmd(
+            f"find {_sh.quote(adapter.path('logs'))} -type f "
+            f"-mtime +{days} -delete 2>/dev/null || true",
+            timeout=300)
+        swept_log_bytes = swept_logs.get("bytes", 0)
+        weft.store.emit("gc.logs_swept", site=site,
+                        count=swept_logs["count"],
+                        bytes=swept_log_bytes,
+                        policy_days=days)
     evicted_envs, skipped = 0, []
     for r in p["evictable_realizations"]:
         # through evict(), NOT a raw rm: the in-use and overlay-dependent

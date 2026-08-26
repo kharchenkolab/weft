@@ -1064,6 +1064,7 @@ w.env_find_near(spec, site="hpc") # warm near-matches, with their diffs
 
 # reclaim disk without losing the way back
 w.site_footprint("hpc")           # prefixes vs shared cache vs data
+                                  # vs evidence logs (logs_bytes)
 w.env_evict(env_id, "hpc")        # rebuild = seconds, offline (cache warm)
 ```
 

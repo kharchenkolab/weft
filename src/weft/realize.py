@@ -1911,7 +1911,7 @@ def _build_squashfs(
     t0 = __import__("time").time()
     emit("realize.squashfs", env_id=env_id, site=adapter.name)
     from .evidence import failure_evidence as _fe, run_logged as _rl
-    _lg = "logs/mksquashfs.log"
+    _lg = f"logs/{env_id.rsplit(':', 1)[-1][:12]}-mksquashfs.log"
     r = _rl(
         adapter,
         f"{shlex.quote(mk)} {shlex.quote(adapter.path(content))} "

@@ -164,6 +164,11 @@ evicted content re-stages/rebuilds automatically on next use.
 `gc_events(older_than_days=30)` prunes the event log (terminal digests
 kept). `policy.gc_idle_days` and `policy.kernel_idle_stop_s` tune the
 knobs per site; `doctor()` nags about idle kernels and bloat.
+Long-lane operations persist their full output under
+`<root>/logs/` (the `log_path` every build failure carries);
+`site_footprint` reports the total as `logs_bytes`, and the sweep
+removes logs older than `policy.logs_max_age_days` (default 30;
+`0` keeps them forever).
 
 ## Shared sites (team caches)
 
