@@ -137,7 +137,8 @@ def stat_batch(adapter, paths: list[str]) -> dict[str, dict | None]:
             f"stat batch produced no marker for {len(missing)} "
             f"path(s) — probe trouble, not a file verdict",
             stage="infra", retryable=True,
-            hints={"rc": r.rc, "log_tail": (r.err or r.out)[-500:]})
+            hints={"paths": [paths[i] for i in missing][:8],
+                   "rc": r.rc, "log_tail": (r.err or r.out)[-500:]})
     out: dict[str, dict | None] = {}
     for i, p in enumerate(paths):
         g = got[i]
@@ -197,8 +198,10 @@ def _read_shim(cand: dict, offset: int, want: int,
                         stage="infra")
     if r.rc != 0:
         raise WeftError("data.missing",
-                        f"range read failed: {(r.err or '')[:200]}",
-                        stage="infra", retryable=True)
+                        f"range read of {what} failed: "
+                        f"{(r.err or '')[:200]}",
+                        stage="infra", retryable=True,
+                        hints={"what": what})
     lines = (r.out or "").splitlines()
     head = lines[0].split() if lines else []
     if head[:1] == ["ABSENT"]:

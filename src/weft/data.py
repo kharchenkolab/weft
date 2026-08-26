@@ -180,9 +180,12 @@ class DataManager:
             f"([ -f {_sh.quote(blob)} ] || ln {q} {_sh.quote(blob)} "
             f"2>/dev/null || cp -p {q} {_sh.quote(blob)})", timeout=1800)
         if r.rc != 0:
-            raise WeftError("data.transfer_failed",
-                            f"site-side ingest failed: {r.err[:200]}",
-                            stage="staging", retryable=True)
+            raise WeftError(
+                "data.transfer_failed",
+                f"site-side ingest of {abs_path} failed on "
+                f"{adapter.name}: {r.err[:200]}",
+                stage="staging", retryable=True,
+                hints={"path": abs_path, "site": adapter.name})
         self.store.put_dataref(ref, "file", size,
                                meta={"origin": origin or abs_path,
                                      "trust": trust, "site_direct": site})
@@ -265,10 +268,12 @@ class DataManager:
         adapter.run_cmd(f"rm -f {_sh.quote(adapter.path(plan_rel))}",
                         timeout=120)
         if r.rc != 0:
-            raise WeftError("data.transfer_failed",
-                            f"site-side tree ingest failed: "
-                            f"{(r.err or r.out)[:200]}",
-                            stage="staging", retryable=True)
+            raise WeftError(
+                "data.transfer_failed",
+                f"site-side tree ingest of {abs_path} failed on "
+                f"{adapter.name}: {(r.err or r.out)[:200]}",
+                stage="staging", retryable=True,
+                hints={"path": abs_path, "site": adapter.name})
         ref = f"dref:{tree_hash}"
         trust = "verified" if expected_sha256 else "first-fetch"
         self.cas.put_tree_manifest(tree_hash, tree_entries)
@@ -378,10 +383,12 @@ class DataManager:
             adapter.run_cmd(
                 f"rm -f {_sh.quote(adapter.path(plan_rel))}", timeout=120)
             if r.rc != 0:
-                raise WeftError("data.transfer_failed",
-                                f"ingest of external tree failed: "
-                                f"{(r.err or r.out)[:200]}",
-                                stage="staging", retryable=True)
+                raise WeftError(
+                    "data.transfer_failed",
+                    f"ingest of external tree {home} failed on "
+                    f"{adapter.name}: {(r.err or r.out)[:200]}",
+                    stage="staging", retryable=True,
+                    hints={"home": home, "site": adapter.name})
             for e in manifest:
                 if e["kind"] != "file":
                     continue
@@ -401,10 +408,12 @@ class DataManager:
                 f"{_sh.quote(blob)} 2>/dev/null || cp -p {_sh.quote(home)} "
                 f"{_sh.quote(blob)})", timeout=3600)
             if r.rc != 0:
-                raise WeftError("data.transfer_failed",
-                                f"ingest of external file failed: "
-                                f"{r.err[:200]}",
-                                stage="staging", retryable=True)
+                raise WeftError(
+                    "data.transfer_failed",
+                    f"ingest of external file {home} failed on "
+                    f"{adapter.name}: {r.err[:200]}",
+                    stage="staging", retryable=True,
+                    hints={"home": home, "site": adapter.name})
         # the location flips to CAS-backed; meta.external stays as record
         self.store.set_location(ref, adapter.name, endpoint["cas_root"])
         self.store.emit("data.ingested_for_transfer", ref=ref,
@@ -514,10 +523,13 @@ class DataManager:
             f"wc -c < {adapter.path(tmp_rel)}", timeout=600)
         parts = out.out.split()
         if out.rc != 0 or len(parts) < 2:
-            raise WeftError("data.transfer_failed",
-                            "site-side hash of fetched artifact failed",
-                            stage="staging", retryable=True,
-                            hints={"detail": (out.err or out.out)[-300:]})
+            raise WeftError(
+                "data.transfer_failed",
+                f"site-side hash of artifact fetched from {url} "
+                f"failed on {adapter.name}",
+                stage="staging", retryable=True,
+                hints={"url": url, "site": adapter.name,
+                       "detail": (out.err or out.out)[-300:]})
         digest, size = parts[0], int(parts[1])
         self._check_expected(url, digest, expected_sha256, adapter, tmp_rel)
         endpoint = adapter.transfer_endpoint()
