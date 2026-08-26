@@ -50,3 +50,43 @@ def test_session_composition_carries_the_umbrella(tmp_path, pixi_bin,
     assert pre.index("ACTIVATE") < pre.index("R_LIBS_USER")  # post-act
     assert "PIP_CONFIG_FILE=/dev/null" in pre
     w.close()
+
+
+def test_kernel_activation_carries_the_umbrella(tmp_path, pixi_bin,
+                                                monkeypatch):
+    """Behavioral, through a REAL kernel_start on a local site: the
+    written activate.sh carries the umbrella AFTER activation. This is
+    the third of the interpreter x surface table's three surfaces —
+    the first version of this file covered only tasks and sessions,
+    and the kernel wiring shipped with a use-before-local-import that
+    crashed EVERY kernel_start; two green targeted rounds never drove
+    the verb (a green lane certifies only what it covers)."""
+    from weft.api import Weft
+    from weft.realize import env_dir_rel
+    import weft.realize as realize_mod
+    w = Weft(tmp_path / "ws3", pixi_bin=pixi_bin, resume="off")
+    w.register_site("local", "local",
+                    {"root": str(tmp_path / "site3"),
+                     "pixi_source": pixi_bin})
+    env_id = "env:v1:" + "d" * 64
+    w.store.put_env(env_id, "spec:x", {"platforms": {}}, "", "", ["any"])
+
+    def fake_realize(eid, env_row, adapter, store, **kw):
+        rel = env_dir_rel(eid)
+        adapter.write_file(f"{rel}/activate.sh", b": ok\n")
+        adapter.write_file(f"{rel}/.weft-ready", b"{}\n")
+        store.set_realization(eid, adapter.name, "prefix", rel, "ready")
+
+    monkeypatch.setattr(realize_mod, "ensure_realization", fake_realize)
+    r = w.kernel_start("local", lang="python", env_id=env_id)
+    assert "kernel_id" in r, r
+    root = tmp_path / "site3"
+    act = next(root.glob("kernels/krn_*/activate.sh")).read_text()
+    assert "PYTHONNOUSERSITE=1" in act
+    assert "R_LIBS_USER=" in act
+    assert "PIP_CONFIG_FILE=/dev/null" in act
+    # after activation, not before: R_LIBS_USER needs WEFT_PREFIX
+    # (the kernel activate.sh SOURCES the env's activate.sh by path)
+    assert act.index("activate.sh") < act.index("R_LIBS_USER")
+    w.kernel_stop(r["kernel_id"])
+    w.close()

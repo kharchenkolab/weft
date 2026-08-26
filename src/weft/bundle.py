@@ -299,6 +299,26 @@ def import_bundle(weft, path: str) -> dict:
                                         str(weft.cas.root))
 
     for eid, e in man["envs"].items():
+        # intake shape-check: canonical["platforms"] is the lock's core —
+        # a row without it would import green and crash every later
+        # verb (env_status, staging, realize). extras stays OPTIONAL
+        # (get_env normalizes it); platforms is REQUIRED vocabulary.
+        canon = e.get("canonical")
+        if not isinstance(canon, dict) \
+                or not isinstance(canon.get("platforms"), dict):
+            raise WeftError(
+                "task.invalid",
+                f"bundle env {eid} carries a malformed canonical lock: "
+                "'platforms' (dict of per-platform package records) is "
+                "missing", stage="staging",
+                hints={"env_id": eid,
+                       "present_keys": sorted(canon)[:12]
+                       if isinstance(canon, dict)
+                       else f"canonical is {type(canon).__name__}",
+                       "suggestion": "re-export the bundle with a "
+                                     "current weft — the canonical lock "
+                                     "is the env's identity and cannot "
+                                     "be reconstructed at import"})
         if e["spec_body"]:
             weft.store.put_spec(e["spec_hash"], e["spec_body"].get(
                 "name", "bundled"), e["spec_body"])

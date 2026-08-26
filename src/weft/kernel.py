@@ -219,6 +219,9 @@ class KernelManager:
                 f". {shlex.quote(overlay)}; true; }} && "
                 f"export WEFT_SESSION_RLIB={shlex.quote(rlib)}")
 
+        from .runner_util import (activation_guard_lines,
+                                  hermetic_interpreter_lines as
+                                  _hermetic_lines)
         kernel_id = "krn_" + uuid.uuid4().hex[:10]
         jobdir_rel = f"kernels/{kernel_id}"
         driver_src = (_DRIVER_DIR / driver_file).read_bytes()
@@ -230,7 +233,6 @@ class KernelManager:
             (self.runner.site_prelude(site)
              + activate + "\n"
              + "\n".join(_hermetic_lines()) + "\n").encode())
-        from .runner_util import hermetic_interpreter_lines as _hermetic_lines, activation_guard_lines
         guard = "\n".join(activation_guard_lines(env_id or ns_env_id))
         adapter.write_file(
             f"{jobdir_rel}/cmd.sh",

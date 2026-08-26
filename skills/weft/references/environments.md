@@ -131,6 +131,15 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   NOW" (ready = fast no-op; evicted/missing = rebuild from the lock).
   NEVER run a placebo task for this: memoization returns the recorded
   manifest and nothing rebuilds.
+  `wait=False` submits instead of blocking: poll `env_status(env_id)`
+  (site's realization state; terminal `ready`|`failed`, failed rows
+  carry the error envelope as `log_tail`); `realize.async_done` /
+  `realize.async_failed` events close the lane. Use it to build on
+  TWO sites concurrently or to end a turn during a long build. It is
+  process-bound (dies with the controller — safely, resumable); for a
+  build that must outlive the controller:
+  `task_submit({"command": "true", "env": ..., "site": ...},
+  force=True)` (force busts memoization).
 - **Re-solve only on request:** `env_ensure(spec, update=True)` picks up new
   channel state; the old EnvID stays valid for reproducing old results.
 - **GPU:** `env_gpu_hint(site)` reads the probed driver and returns the

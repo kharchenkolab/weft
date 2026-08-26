@@ -130,6 +130,21 @@ with memoization — the recorded manifest comes back and nothing
 rebuilds; field finding). `env_repair` stays the force lever for a
 realization the marker still wrongly claims.
 
+`env_realize(..., wait=False)` submits the build instead of blocking:
+the return says how to poll (`env_status(env_id)` renders the site's
+realization state; terminal is `ready`|`failed`, and a failed row
+carries the error envelope — log_path, error_regions — as `log_tail`;
+`realize.*` events narrate, with `realize.async_done` /
+`realize.async_failed` closing the lane). Two sites build
+CONCURRENTLY with two submits, and a turn can end during a long build
+instead of dying at its cap. Honesty: the build is process-bound — it
+runs in the controller process and dies with it (safely: the site
+lease goes stale and the next realize/task resumes). For a build that
+must outlive the controller, submit a real task:
+`task_submit({"command": "true", "env": env_id, "site": site},
+force=True)` — `force` busts memoization so the realize side effect
+actually runs.
+
 Re-solving an unchanged spec never happens implicitly; pass
 `update=True` to `env_ensure` to pick up new channel state (old EnvID
 remains valid for reproducing past results).

@@ -663,7 +663,14 @@ class EnvManager:
             "name": spec.get("name"),
             "packages_per_platform": counts,
             "platforms": row["platforms"],
-            "modules": row["canonical"]["extras"]["modules"],
+            # .get: canonical rows can arrive through bundle_import /
+            # publish-adopt sidecars, which do not shape-check extras —
+            # rendering a sparse-but-accepted record must not crash
+            # (the overlay merge at extras= above already treats it as
+            # optional; a hard index here was the second, contradictory
+            # implementation of that vocabulary)
+            "modules": (row["canonical"].get("extras") or {}).get(
+                "modules", []),
             # graded confidence, with the soft component identified
             "reproducibility": g["grade"],
             "reproducibility_meaning": g["meaning"],
@@ -880,4 +887,4 @@ class EnvManager:
         row = self.store.get_env(env_id)
         if not row:
             raise WeftError("task.invalid", f"unknown EnvID: {env_id}", stage="solve")
-        return row["canonical"]["extras"]
+        return row["canonical"].get("extras") or {}

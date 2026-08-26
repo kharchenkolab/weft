@@ -575,9 +575,17 @@ class Store:
         r = self._row("SELECT * FROM envs WHERE env_id=?", (env_id,))
         if not r:
             return None
+        canonical = json.loads(r["canonical"])
+        # extras is OPTIONAL in the canonical vocabulary (bundle_import /
+        # publish-adopt sidecars carry no shape guarantee), but seven
+        # consumers hard-index it. Normalize at the ONE hydration door
+        # instead of teaching every consumer tolerance. Identity-safe:
+        # EnvIDs hash mint-time canonicals (envman), never a get_env
+        # round-trip.
+        canonical.setdefault("extras", {})
         return {
             "env_id": r["env_id"], "spec_hash": r["spec_hash"],
-            "canonical": json.loads(r["canonical"]), "native_lock": r["native_lock"],
+            "canonical": canonical, "native_lock": r["native_lock"],
             "manifest": r["manifest"], "platforms": json.loads(r["platforms"]),
             "weakly_reproducible": bool(r["weakly_reproducible"]),
             "parent_env_id": r["parent_env_id"] if "parent_env_id" in r.keys()

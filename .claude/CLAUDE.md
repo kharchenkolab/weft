@@ -72,6 +72,16 @@ remotes, removable in one command.
   tests illuminated, and the third rode two full green lanes).
   Scripted replaces assert occurrence counts; the Edit tool's
   uniqueness check exists for exactly this.
+  Edit shapes that PARSE clean but kill every call of a function get
+  AST conformance tests, not process vows: use-before-local-import
+  (test_local_import_order — the kernel_start outage rode THREE
+  commits because the alias also existed at module level, so the code
+  read fine and only DRIVING the verb crashed) joins the _vocab-fold
+  parameter test. A fourth instance of an edit family = write the AST
+  test for the family, and give the surface's cheapest fast-lane
+  DRIVER a place in the touched-file targeted set (the umbrella's
+  three consumers had two behavioral tests; the third surface was the
+  broken one).
 - A green lane certifies ONLY what it covers. Every PUBLIC_TOOLS verb
   needs a FAST-LANE test (docker/solver suites don't gate pushes);
   test_public_tools pins the uncovered-verbs allowlist, which may only

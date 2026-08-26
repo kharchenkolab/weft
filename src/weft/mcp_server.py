@@ -92,6 +92,19 @@ SCHEMA_HINTS: dict[str, dict] = {
                             'lanes=[...]'),
         },
     },
+    "env_realize": {
+        "wait": {
+            "type": "boolean",
+            "description": ("wait=false submits the build (background, "
+                            "process-bound) and returns immediately: "
+                            "poll env_status(env_id) for the site's "
+                            "realization state (terminal: ready|failed; "
+                            "failed carries the error envelope as "
+                            "log_tail); realize.* events narrate. Two "
+                            "sites build concurrently with two submits. "
+                            "Default true blocks until done."),
+        },
+    },
 }
 
 # fallback descriptions for thin wrappers (docstrings win when present)

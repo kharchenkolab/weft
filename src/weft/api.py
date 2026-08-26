@@ -367,6 +367,10 @@ class Weft:
             self.adapters, self.transfers, pixi_pack=self.pixi_pack,
         )
         self._module_cache: dict[tuple[str, str], bool] = {}
+        # in-flight async realizes: (env_id, site) -> Thread. A second
+        # wait=False submit JOINS a live build instead of stacking a
+        # thread behind realize's in-process build lock.
+        self._realize_inflight: dict = {}
         # cloud provisioner factories: name -> (site_config) -> CloudProvisioner.
         # "skypilot" is the intended production entry; tests register mocks.
         self.provisioners: dict = {}
@@ -406,7 +410,11 @@ class Weft:
         sshd's MaxSessions/MaxStartups, and deferred-submit probe
         re-drives starved with it (R1b — the in-lane-only STAGING
         hangs). Watches are not failed: a reopened Weft re-attaches
-        via resume. Idempotent."""
+        via resume. In-flight async realizes (env_realize wait=False)
+        are NOT interrupted — they are process-bound daemon threads
+        that finish with the build or die with the process; killing a
+        build mid-flight here would churn the site lease for nothing.
+        Idempotent."""
         self.runner.stop()
 
     # -- site management ---------------------------------------------------
@@ -1088,7 +1096,8 @@ class Weft:
 
         return _ctx()
 
-    def env_realize(self, env_id: str, site: str) -> dict:
+    def env_realize(self, env_id: str, site: str,
+                    wait: bool = True) -> dict:
         """Idempotently realize an env on a site: ready-and-intact is a
         fast no-op; a missing / demoted / evicted realization rebuilds
         from the stored lock through the standard path (adopt, shared
@@ -1098,7 +1107,24 @@ class Weft:
         collide with memoization — an evicted env's fixed probe task
         returns the recorded manifest and the prefix never rebuilds
         (aba field finding). env_repair remains the force-rebuild
-        lever for a realization the marker still (wrongly) claims."""
+        lever for a realization the marker still (wrongly) claims.
+
+        wait=False submits the build instead of blocking: the return
+        carries state="submitted" and the realization row is the
+        pollable state — env_status(env_id) renders per-site state
+        (terminal: ready | failed, failed rows carry the error
+        envelope as log_tail), and realize.* events narrate progress
+        (realize.submitted opens the lane; realize.async_done /
+        realize.async_failed close it, the latter with the same
+        log_path/error_regions evidence the blocking lane raises).
+        Two sites build CONCURRENTLY with two submits. HONESTY: the
+        build runs in a background thread of THIS controller process —
+        it does not survive the process. A mid-build exit is safe (the
+        site-side build lease goes stale and the next realize/task
+        resumes), but for a build that must outlive the controller,
+        submit a task instead: task_submit({"command": "true",
+        "env": env_id, "site": site}, force=True) — force busts
+        memoization so the realize side effect actually runs."""
         import time as _t
         adapter = self._adapter(site)
         env_row = self.store.get_env(env_id)
@@ -1113,19 +1139,101 @@ class Weft:
                       "solvers": self.envman.solvers, "store": self.store,
                       "dataman": self.dataman}
         from .realize import ensure_realization
-        t0 = _t.monotonic()
-        real = ensure_realization(
-            env_id, env_row, adapter, self.store,
-            caps=site_row.get("capabilities"),
-            site_config=site_row.get("config"),
-            prefer=(site_row.get("config") or {}).get("prefer"),
-            pack_tools=pack_tools)
-        out = {"env_id": env_id, "site": site,
-               "seconds": round(_t.monotonic() - t0, 2)}
-        for k in ("strategy", "location", "state", "read_only"):
-            if k in (real or {}):
-                out[k] = real[k]
-        return out
+
+        def _work():
+            return ensure_realization(
+                env_id, env_row, adapter, self.store,
+                caps=site_row.get("capabilities"),
+                site_config=site_row.get("config"),
+                prefer=(site_row.get("config") or {}).get("prefer"),
+                pack_tools=pack_tools)
+
+        if wait:
+            t0 = _t.monotonic()
+            real = _work()
+            out = {"env_id": env_id, "site": site,
+                   "seconds": round(_t.monotonic() - t0, 2)}
+            for k in ("strategy", "location", "state", "read_only"):
+                if k in (real or {}):
+                    out[k] = real[k]
+            return out
+        return self._realize_submit(env_id, site, _work)
+
+    def _realize_submit(self, env_id: str, site: str, work) -> dict:
+        """The wait=False lane: spawn (or join) the background build
+        and describe how to poll it. Split out so the submit contract
+        — refusals stay synchronous, the thread never raises past its
+        own frame — is testable without a real build."""
+        import threading as _threading
+        poll = {"verb": "env_status", "env_id": env_id,
+                "site_field": "realizations[].state",
+                "terminal": ["ready", "failed"],
+                "events": "events_poll: realize.* (env_id-keyed); "
+                          "realize.async_done / realize.async_failed "
+                          "close the lane"}
+        note = ("process-bound: builds in this controller process and "
+                "dies with it (safely — the site lease goes stale and "
+                "the next realize/task resumes). To outlive the "
+                "controller: task_submit({'command': 'true', "
+                f"'env': {env_id!r}, 'site': {site!r}}}, force=True)")
+        key = (env_id, site)
+        live = self._realize_inflight.get(key)
+        if live is not None and live.is_alive():
+            return {"env_id": env_id, "site": site, "state": "submitted",
+                    "joined": True, "process_bound": True,
+                    "poll": poll, "note": note}
+
+        def _bg():
+            try:
+                real = work()
+                self.store.emit("realize.async_done", env_id=env_id,
+                                site=site,
+                                state=(real or {}).get("state"),
+                                strategy=(real or {}).get("strategy"))
+            except WeftError as e:
+                self._realize_record_failure(env_id, site, e.to_dict())
+            except Exception as e:  # noqa: BLE001 — a daemon thread's
+                # raise is a silent crash; convert to the failed-state
+                # contract the poll lane documents
+                self._realize_record_failure(
+                    env_id, site,
+                    {"error": "internal.error", "stage": "realize",
+                     "detail": f"{type(e).__name__}: {e}"[:500],
+                     "retryable": False, "hints": {}})
+            finally:
+                if self._realize_inflight.get(key) is th:
+                    self._realize_inflight.pop(key, None)
+
+        th = _threading.Thread(
+            target=_bg, name=f"weft-realize-{site}", daemon=True)
+        self._realize_inflight[key] = th
+        self.store.emit("realize.submitted", env_id=env_id, site=site,
+                        process_bound=True)
+        th.start()
+        return {"env_id": env_id, "site": site, "state": "submitted",
+                "process_bound": True, "poll": poll, "note": note}
+
+    def _realize_record_failure(self, env_id: str, site: str,
+                                payload: dict) -> None:
+        """Failure landing site for the async lane: the row flips to
+        state=failed carrying the error envelope (env_status renders
+        it as log_tail) and realize.async_failed re-emits it — the
+        same evidence (log_path, error_regions in hints) the blocking
+        lane raises, minus the raise, which has no caller here."""
+        import json as _json
+        from .realize import env_dir_rel
+        try:
+            prev = self.store.get_realization(env_id, site) or {}
+            self.store.set_realization(
+                env_id, site, prev.get("strategy") or "prefix",
+                prev.get("location") or env_dir_rel(env_id), "failed",
+                log=_json.dumps(payload, default=str)[:4000])
+        finally:
+            self.store.emit("realize.async_failed", env_id=env_id,
+                            site=site, **{
+                                k: payload.get(k) for k in
+                                ("error", "stage", "detail", "retryable",
+                                 "hints") if k in payload})
 
     def env_repair(self, env_id: str, site: str) -> dict:
         """Force-rebuild lever: clears a realization the marker still claims
