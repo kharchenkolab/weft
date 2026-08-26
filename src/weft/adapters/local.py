@@ -124,7 +124,10 @@ class LocalAdapter(SiteAdapter):
     def read_file(self, rel: str, max_bytes: int | None = None) -> bytes:
         p = self._root / rel
         if not p.exists():
-            raise WeftError("data.missing", f"no such file on site: {rel}", stage="infra")
+            raise WeftError(
+                "data.missing",
+                f"no such file on {self.name}: {rel}",
+                stage="infra", hints={"site": self.name})
         data = p.read_bytes()
         return data[:max_bytes] if max_bytes else data
 

@@ -309,8 +309,12 @@ class SessionManager:
         )
         if r.rc != 0:
             raise WeftError(
-                "env.realize_failed", "session clone failed", stage="realize",
-                hints={"log_tail": (r.err or r.out)[-1000:]},
+                "env.realize_failed",
+                f"session {s['session_id']} clone failed on "
+                f"{adapter.name}", stage="realize",
+                hints={"session_id": s["session_id"],
+                       "site": adapter.name,
+                       "log_tail": (r.err or r.out)[-1000:]},
             )
         s["_clone_seconds"] = round(time.monotonic() - _t0, 2)
         if flip:
@@ -821,12 +825,18 @@ class SessionManager:
             ok_entry = lambda x: isinstance(x, str) or (
                 isinstance(x, dict) and "name" in x
                 and not set(x) - ({"name", "conda", "pypi", "cran"}))
-            if not request or not all(ok_entry(x) for x in request):
+            bad = [x for x in request if not ok_entry(x)]
+            if not request or bad:
                 raise WeftError(
                     "task.invalid",
                     "ranked request entries are package strings or "
-                    '{"name": ..., "<lane>": "<spelling>"} objects',
-                    stage="realize")
+                    '{"name": ..., "<lane>": "<spelling>"} objects'
+                    + (f" — {len(bad)} entr"
+                       f"{'y' if len(bad) == 1 else 'ies'} rejected"
+                       if bad else " — the request list is empty"),
+                    stage="realize",
+                    hints={"rejected": [repr(x)[:80] for x in bad[:5]]}
+                    if bad else {})
         elif not isinstance(request, dict) or \
                 set(request) - {"conda", "pypi", "cran"} or \
                 not any(request.get(k) for k in ("conda", "pypi", "cran")):
@@ -1025,16 +1035,20 @@ class SessionManager:
         ns = ranked_namespace(norm, lanes)
         # dialect is only safe under a postcondition (verify-in-loop
         # bounds a dialect miss) — the NOT-X case is closed, not open
-        derives = ns == "r" and "conda" in lanes and any(
-            not ov.get("conda") and "/" not in d.partition("@")[0]
-            for d, ov in norm)
-        if derives and eff is None:
+        bare_r = [d for d, ov in norm
+                  if not ov.get("conda")
+                  and "/" not in d.partition("@")[0]] \
+            if ns == "r" and "conda" in lanes else []
+        if bare_r and eff is None:
             raise WeftError(
                 "task.invalid",
-                "bare R names on a conda lane need dialect derivation, "
-                "and derivation requires an effective postcondition",
+                f"bare R names on a conda lane need dialect derivation "
+                f"({', '.join(bare_r[:6])}"
+                f"{', …' if len(bare_r) > 6 else ''}), and derivation "
+                "requires an effective postcondition",
                 stage="realize",
-                hints={"levers": ["pass verify=True (or an explicit "
+                hints={"bare_names": bare_r,
+                       "levers": ["pass verify=True (or an explicit "
                                   "verify dict)",
                                   'or per-lane spellings: {"name": '
                                   '"X", "conda": "r-x"}']})
@@ -1330,11 +1344,14 @@ class SessionManager:
             if r.rc != 0:
                 tail = (r.err or r.out)[-1500:]
                 code, retryable = _pip_failure(tail)
-                hints = {"log_tail": tail}
+                hints = {"log_tail": tail, "requested": list(pypi)}
                 if code == "env.realize_failed":
                     hints.update(_syslib_hints(tail) or {})
                 raise WeftError(
-                    code, "pypi install into the session layer failed",
+                    code,
+                    "pypi install into the session layer failed for: "
+                    + ", ".join(list(pypi)[:6])
+                    + (" …" if len(pypi) > 6 else ""),
                     stage="realize", retryable=retryable, hints=hints)
             note = ("this site's pip predates --dry-run/--report: the "
                     "full dependency closure was installed into the "

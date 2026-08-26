@@ -930,8 +930,14 @@ def _stage_post_install_inputs(env_row: dict, adapter: SiteAdapter, rel: str,
     if r.rc != 0:
         raise WeftError(
             "env.realize_failed",
-            "could not stage post_install_inputs into the env",
-            stage="realize", hints={"detail": r.err[:300]})
+            "could not stage post_install_inputs into the env on "
+            f"{adapter.name}",
+            stage="realize",
+            hints={"site": adapter.name,
+                   "inputs": [{"ref": i["ref"],
+                               "mount_as": i["mount_as"]}
+                              for i in inputs[:8]],
+                   "detail": r.err[:300]})
 
 
 def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
@@ -1279,9 +1285,12 @@ def _verify_overlay(env_row: dict, parent_row: dict, adapter: SiteAdapter,
         raise WeftError(
             "env.realize_failed",
             "overlay composition check failed (ABI mismatch, shadowing, or a "
-            "missing native dependency)",
+            "missing native dependency) on "
+            f"{adapter.name}",
             stage="realize",
-            hints={"log_tail": (r.err or r.out)[-1200:]})
+            hints={"site": adapter.name,
+                   "checks": checks[:6],
+                   "log_tail": (r.err or r.out)[-1200:]})
 
 
 def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
@@ -1325,8 +1334,12 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
     if r.rc != 0:
         raise WeftError(
             "env.realize_failed",
-            "could not install the pypi delta into the overlay layer",
-            stage="realize", hints={"log_tail": (r.err or r.out)[-1200:]})
+            "could not install the pypi delta into the overlay layer: "
+            + ", ".join(req_lines[:6])
+            + (" …" if len(req_lines) > 6 else ""),
+            stage="realize",
+            hints={"requested": req_lines, "site": adapter.name,
+                   "log_tail": (r.err or r.out)[-1200:]})
     # entry-point scripts: pip --target does not place them on PATH
     binw = f"{adapter.path(rel)}/bin"
     adapter.run_cmd(
@@ -1643,9 +1656,10 @@ def _build_packed(
     if unpack.rc != 0:
         raise WeftError(
             "env.realize_failed",
-            "pixi-unpack failed on site",
+            f"pixi-unpack failed on {adapter.name}",
             stage="realize",
-            hints={"log_tail": (unpack.err or unpack.out)[-1500:],
+            hints={"site": adapter.name, "dest": dest,
+                   "log_tail": (unpack.err or unpack.out)[-1500:],
                    "retryable": True},
         )
     # pixi-unpack writes <dest>/env plus an activation script; wrap it so
@@ -1815,8 +1829,11 @@ def _build_squashfs(
         timeout=3600)
     if r.rc != 0:
         raise WeftError(
-            "env.realize_failed", "mksquashfs failed on site",
-            stage="realize", hints={"log_tail": (r.err or r.out)[-1500:]})
+            "env.realize_failed",
+            f"mksquashfs failed on {adapter.name}",
+            stage="realize",
+            hints={"site": adapter.name,
+                   "log_tail": (r.err or r.out)[-1500:]})
     meta = adapter.run_cmd(
         f"h=$({sha256_shell(shlex.quote(img))}); "
         f"printf '%s %s' \"${{h%% *}}\" \"$(wc -c < {shlex.quote(img)} | tr -d ' ')\"",

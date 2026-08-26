@@ -461,8 +461,10 @@ class SSHAdapter(SiteAdapter):
         )
         if r.rc != 0:
             raise WeftError(
-                "site.bootstrap_failed", f"failed to push {rel}: {r.err[:300]}",
+                "site.bootstrap_failed",
+                f"failed to push {rel} to {self.name}: {r.err[:300]}",
                 stage="infra", retryable=True,
+                hints={"site": self.name},
             )
 
     def shim(self, argv: list[str], *, timeout: float = 60.0) -> ShimResult:
@@ -525,8 +527,10 @@ class SSHAdapter(SiteAdapter):
                                        timeout=120)
         if rc != 0:
             raise WeftError(
-                "data.missing", f"no such file on site: {rel}", stage="infra",
-                hints={"stderr": err.decode("utf-8", "replace")[-300:]})
+                "data.missing",
+                f"no such file on {self.name}: {rel}", stage="infra",
+                hints={"site": self.name,
+                       "stderr": err.decode("utf-8", "replace")[-300:]})
         return out
 
     def transfer_endpoint(self) -> dict:
@@ -554,8 +558,10 @@ class SSHAdapter(SiteAdapter):
             # "user command failed" and sent agents debugging their code
             raise WeftError(
                 "sched.rejected",
-                f"shim run failed: {(r.err or r.out)[:300]}",
+                f"shim run failed on {self.name} for {jobdir_rel}: "
+                f"{(r.err or r.out)[:300]}",
                 stage="submit",
+                hints={"site": self.name, "jobdir": jobdir_rel},
             )
         return f"pid:{r.json().get('pid', 0)}"
 
@@ -576,8 +582,10 @@ class SSHAdapter(SiteAdapter):
         )
         if r.rc != 0:
             raise WeftError(
-                "site.unreachable", f"status-batch failed: {r.err[-300:]}",
+                "site.unreachable",
+                f"status-batch failed on {self.name}: {r.err[-300:]}",
                 stage="infra", retryable=True,
+                hints={"site": self.name},
             )
         out: dict[str, dict] = {}
         for line in r.out.splitlines():

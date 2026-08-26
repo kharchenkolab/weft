@@ -692,3 +692,18 @@ def test_shadows_base_rides_the_envelope(tmp_path, pixi_bin,
                              verify=False)
     assert out["satisfied"] is True
     assert out["attempts"][0]["shadows_base"][0]["base"] == "1.9"
+
+
+def test_malformed_ranked_entries_are_echoed(tmp_path, pixi_bin):
+    """Subject sweep round 2: the refusal names WHICH entries were
+    rejected (repr-trimmed), not just the grammar."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    r = w.ensure_available({"session": sid},
+                           ["good", {"nope": 1}, 7], lanes=["pypi"])
+    assert r["error"] == "task.invalid"
+    assert "2 entries rejected" in r["detail"]
+    joined = " ".join(r["hints"]["rejected"])
+    assert "nope" in joined and "7" in joined
+    r2 = w.ensure_available({"session": sid}, [], lanes=["pypi"])
+    assert r2["error"] == "task.invalid"
+    assert "empty" in r2["detail"]

@@ -206,10 +206,12 @@ class SlurmAdapter(SSHAdapter):
         if r.rc != 0:
             raise WeftError(
                 "site.unreachable",
-                "sinfo failed during partition probe — refusing to "
-                "record an empty partition list as fact",
+                f"sinfo failed during partition probe on "
+                f"{self.name} — refusing to record an empty "
+                "partition list as fact",
                 stage="infra", retryable=True,
-                hints={"stderr": (r.err or r.out)[-300:]})
+                hints={"site": self.name,
+                       "stderr": (r.err or r.out)[-300:]})
         rows = "\n".join(sorted(set(r.out.splitlines())))
         partitions = parse_partition_rows(rows)
         # scontrol has the partition facts sinfo cannot show: who may use
@@ -643,9 +645,10 @@ class SlurmAdapter(SSHAdapter):
         if r.rc != 0 and "Invalid job id" not in (r.err + r.out):
             raise WeftError(
                 "site.unreachable",
-                "scheduler query failed (control plane, not the jobs)",
+                f"scheduler query failed on {self.name} (control "
+                "plane, not the jobs)",
                 stage="running", retryable=True,
-                hints={"command": cmd[:80],
+                hints={"site": self.name, "command": cmd[:80],
                        "stderr": (r.err or r.out)[-300:]})
         return r
 
