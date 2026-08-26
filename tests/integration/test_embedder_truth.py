@@ -316,6 +316,7 @@ def test_slurm_find_handle_by_name_discriminates(monkeypatch, tmp_path):
     from weft.adapters.slurm import SlurmAdapter
     a = SlurmAdapter.__new__(SlurmAdapter)
     a.poll_timeout = 10.0
+    a.name = "hpc"      # subject sweep: refusals name their site
 
     class R:
         def __init__(self, rc, out, err=""):
@@ -329,3 +330,4 @@ def test_slurm_find_handle_by_name_discriminates(monkeypatch, tmp_path):
     with pytest.raises(WeftError) as ei:
         a.find_handle_by_name("weft-jb_x")
     assert ei.value.code == "site.unreachable"
+    assert "hpc" in ei.value.detail    # the refusal names its site
