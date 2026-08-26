@@ -100,9 +100,12 @@ class SshPipe:
         if v.returncode != 0:
             raise WeftError(
                 "data.verify_failed",
-                "post-transfer verification failed at destination",
+                f"post-transfer verification failed at "
+                f"{endpoint['destination']} ({len(blobs)} blob(s))",
                 stage="staging", retryable=True,
-                hints={"stderr": v.stderr.decode()[-500:]},
+                hints={"destination": endpoint["destination"],
+                       "refs": [d for d, _ in blobs][:6],
+                       "stderr": v.stderr.decode()[-500:]},
             )
 
     def fetch(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:
@@ -116,9 +119,13 @@ class SshPipe:
         )
         if proc.returncode != 0:
             raise WeftError(
-                "data.transfer_failed", "ssh-pipe fetch failed",
+                "data.transfer_failed",
+                f"ssh-pipe fetch from {endpoint['destination']} "
+                f"failed ({len(blobs)} blob(s))",
                 stage="staging", retryable=True,
-                hints={"stderr": proc.stderr.decode()[-500:]},
+                hints={"destination": endpoint["destination"],
+                       "refs": [d for d, _ in blobs][:6],
+                       "stderr": proc.stderr.decode()[-500:]},
             )
         with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
             for digest, _ in blobs:

@@ -241,8 +241,12 @@ def import_bundle(weft, path: str) -> dict:
     with tarfile.open(p, "r:gz") as tar:
         man = json.loads(tar.extractfile("bundle/manifest.json").read())
         if man.get("schema") != SCHEMA:
-            raise WeftError("task.invalid",
-                            f"not a {SCHEMA} bundle", stage="staging")
+            raise WeftError(
+                "task.invalid",
+                f"not a {SCHEMA} bundle "
+                f"(schema: {man.get('schema')!r})",
+                stage="staging",
+                hints={"found_schema": man.get("schema")})
         # the host's sealed envelope: json in, json out verbatim; BYTES
         # cross as base64 with metadata_encoding="base64" — every
         # envelope is JSON-shaped (boundary contract; raw bytes here

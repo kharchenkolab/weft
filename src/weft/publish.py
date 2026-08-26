@@ -116,8 +116,10 @@ def _validate(weft, site: str, tree: str, name: str, version: str) -> tuple:
         raise WeftError("task.invalid", f"bad version {version!r}",
                         stage="infra")
     if not tree.startswith("/"):
-        raise WeftError("task.invalid", "tree must be an absolute path",
-                        stage="infra")
+        raise WeftError(
+            "task.invalid",
+            f"tree must be an absolute path (got {tree!r})",
+            stage="infra")
     adapter = weft.adapters.get(site)
     if adapter is None:
         raise WeftError("task.invalid", f"unknown site: {site}", stage="infra",

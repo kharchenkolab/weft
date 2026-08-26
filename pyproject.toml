@@ -18,6 +18,10 @@ packages = ["src/weft"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 timeout = 600
+# full assertion payloads in lane logs: pytest's default
+# truncation elided the deferral evidence a failure already
+# carried, and the triage burned a lane re-run recovering it
+verbosity_assertions = 2
 markers = [
     "docker: needs local docker daemon",
     "solver: needs network access to package indexes",

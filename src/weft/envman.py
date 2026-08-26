@@ -576,12 +576,16 @@ class EnvManager:
                 result.native_lock, synth_url_map,
                 synth_root=workdir / "parent-channel")
             if "parent-channel" in result.native_lock:
+                surv = [ln.strip()[:120] for ln in
+                        result.native_lock.splitlines()
+                        if "parent-channel" in ln][:4]
                 raise WeftError(
                     "internal.error",
                     "synth-channel URL survived the lock rewrite — the "
                     "child lock would be unrealizable off-controller",
                     stage="solve",
-                    hints={"parent": merged.extends_env})
+                    hints={"parent": merged.extends_env,
+                           "surviving_lines": surv})
         soft_hash = None
         if relaxed:
             # the relaxed spec is what actually got solved — store it as the

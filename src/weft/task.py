@@ -93,7 +93,10 @@ class Task:
                     "label"]},
             )
         if not d.get("command"):
-            raise WeftError("task.invalid", "task.command is required", stage="submit")
+            raise WeftError(
+                "task.invalid", "task.command is required",
+                stage="submit",
+                hints={"given_fields": sorted(d)[:12]})
 
         def _input(x) -> TaskInput:
             return TaskInput(ref=x["ref"], mount_as=x["mount_as"])
@@ -115,7 +118,11 @@ class Task:
                                       res.get("scheduler_directives", [])],
             ),
             site=d.get("site", "auto"),
-            array=int(d["array"]) if d.get("array") else None,
+            # `is not None`, not truthiness: array=0 silently
+            # became a NON-array task instead of refusing (found
+            # by the echo test — the string "0" already refused)
+            array=int(d["array"]) if d.get("array") is not None
+            else None,
             env_vars={k: str(v) for k, v in (d.get("env_vars") or {}).items()},
             after=[str(x) for x in d.get("after", [])],
             label=str(d.get("label", "")),
@@ -224,7 +231,10 @@ class Task:
                            "suggestion": "write the result to a different "
                                          "declared output path"})
         if self.array is not None and self.array < 1:
-            raise WeftError("task.invalid", "array must be >= 1", stage="submit")
+            raise WeftError(
+                "task.invalid",
+                f"array must be >= 1 (got {self.array})",
+                stage="submit")
         if self.resources.walltime:
             # one grammar (slurm's --time); an unparseable walltime used
             # to crash the POLLER mid-tick instead of refusing at submit

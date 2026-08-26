@@ -128,9 +128,14 @@ class RsyncSSH:
         if proc.returncode != 0:
             raise WeftError(
                 "data.verify_failed",
-                "post-transfer hash verification failed at destination",
+                f"post-transfer hash verification failed at "
+                f"{endpoint['destination']}:{endpoint['cas_root']} "
+                f"({len(blobs)} blob(s))",
                 stage="staging", retryable=True,
-                hints={"stderr": proc.stderr.decode()[-500:]},
+                hints={"destination": endpoint["destination"],
+                       "cas_root": endpoint["cas_root"],
+                       "refs": [d for d, _ in blobs][:6],
+                       "stderr": proc.stderr.decode()[-500:]},
             )
 
     def fetch(self, blobs, cas: LocalCAS, endpoint, progress=None) -> None:

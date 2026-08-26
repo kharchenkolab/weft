@@ -47,8 +47,8 @@ def test_every_public_method_is_registered_or_excluded():
 FAST_LANE_UNCOVERED = {
     "doctor", "env_gpu_hint",  # env_revise: covered by the remedy test
     "env_repair", "env_unpublish", "gc_packages",
-    "job_node_exec", "module_list", "site_associations", "site_footprint",
-    "site_load", "site_probe", "site_probe_deep", "site_route_probe",
+    "job_node_exec", "module_list", "site_associations",
+    "site_load", "site_probe", "site_probe_deep", 
     "site_teardown",
 }
 

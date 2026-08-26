@@ -699,8 +699,10 @@ class Weft:
         plans route accordingly, controller detour as fallback."""
         import uuid as _uuid
         if src == dst:
-            raise WeftError("task.invalid", "src and dst are the same site",
-                            stage="infra")
+            raise WeftError(
+                "task.invalid",
+                f"src and dst are the same site ({src!r})",
+                stage="infra")
         a, b = self._adapter(src), self._adapter(dst)
         shared_fs_path = None
         nonce = f".weft-fsprobe-{_uuid.uuid4().hex[:12]}"
@@ -1085,7 +1087,8 @@ class Weft:
                 "task.invalid",
                 "actor must be a non-empty string, <=200 chars, no "
                 "control characters (audit rows stay parseable)",
-                stage="infra")
+                stage="infra",
+                hints={"got": repr(actor)[:80]})
 
         @contextmanager
         def _ctx():
@@ -2095,12 +2098,15 @@ class Weft:
                 # the kernel is where the agent IS (aba2 ask): resolve
                 # to what the kernel runs on — its session when it has
                 # one, else its env
-                krow = self.store.get_kernel(target.pop("kernel"))
+                kid = target.pop("kernel")
+                krow = self.store.get_kernel(kid)
                 if not krow:
                     raise WeftError(
-                        "task.invalid", "unknown kernel in target",
+                        "task.invalid",
+                        f"unknown kernel in target: {kid}",
                         stage="realize",
-                        hints={"suggestion": "list_kernels shows live "
+                        hints={"kernel": kid,
+                               "suggestion": "list_kernels shows live "
                                              "kernels"})
                 if krow.get("session_id"):
                     target["session"] = krow["session_id"]

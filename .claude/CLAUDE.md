@@ -51,7 +51,10 @@ remotes, removable in one command.
 - misc/ is gitignored (ledger, designs, specs, handoff);
   misc/HANDOFF.md is the session-to-session index — read it first.
 - Test lanes: fast `pixi run pytest -q -m "not solver and not docker"`;
-  docker lane needs a container runtime; solver lane hits real indexes.
+  docker lane `WEFT_SSH_TIMING=10 pixi run pytest -q -m docker`
+  (the timing lever prints slow transport ops — slow SUCCESSES
+  are invisible to every failure path); solver lane hits real
+  indexes.
   (On the current mac: PYTHONNOUSERSITE=1, docker = OrbStack.)
 - Reality matrix is per-PROTOCOL, not per-site: validating a site (or
   changing a protocol) covers every job kind — env, task, kernel

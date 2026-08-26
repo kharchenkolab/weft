@@ -115,7 +115,8 @@ class RcloneFetcher(HttpFetcher):
     def fetch_on_site(self, adapter, url, dest_abs):
         raise WeftError(
             "data.transfer_failed",
-            "site-direct object-store ingest is not supported yet",
+            f"site-direct object-store ingest is not supported yet "
+            f"({url})",
             stage="staging",
             hints={"suggestion": "omit site= (controller fetch) or use an "
                                  "https URL the site can curl"})
