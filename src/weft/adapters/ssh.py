@@ -18,6 +18,7 @@ import os
 import shlex
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from ..errors import WeftError
@@ -267,6 +268,35 @@ class SSHAdapter(SiteAdapter):
         return results
 
     def _run_bytes(
+        self, remote_cmd: str, *, input_bytes: bytes | None = None,
+        timeout: float = 120.0,
+    ) -> tuple[int, bytes, bytes]:
+        """Timing shell around the transport core: WEFT_SSH_TIMING=<s>
+        prints every op slower than the threshold to stderr (site,
+        duration, outcome, command head). Diagnosis lever for the
+        in-lane transport crawl (R1b: staging ops each ran near their
+        timeouts with NO error to carry evidence — a slow success is
+        invisible to every failure path)."""
+        import sys as _sys
+        thresh = os.environ.get("WEFT_SSH_TIMING")
+        if not thresh:
+            return self._run_bytes_inner(
+                remote_cmd, input_bytes=input_bytes, timeout=timeout)
+        t0 = time.monotonic()
+        outcome = "raised"
+        try:
+            r = self._run_bytes_inner(
+                remote_cmd, input_bytes=input_bytes, timeout=timeout)
+            outcome = f"rc={r[0]}"
+            return r
+        finally:
+            dt = time.monotonic() - t0
+            if dt >= float(thresh):
+                print(f"[weft-ssh-timing] site={self.name} {dt:.1f}s "
+                      f"{outcome} cmd={remote_cmd[:90]!r}",
+                      file=_sys.stderr, flush=True)
+
+    def _run_bytes_inner(
         self, remote_cmd: str, *, input_bytes: bytes | None = None,
         timeout: float = 120.0,
     ) -> tuple[int, bytes, bytes]:
