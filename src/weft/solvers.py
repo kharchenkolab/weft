@@ -1065,8 +1065,16 @@ class CranSolver:
         env_dir = adapter.path(env_rel)
         rlib = f"{env_dir}/rlib"
         pack_dir = f"{env_dir}/cran-pack"
-        r = adapter.run_activated(
+        # the most compile-heavy lane in the tree (EVERY package is a
+        # source tarball) finally gets what its two siblings had:
+        # persisted evidence, make-level parallelism, and the syslib
+        # classifier (parity sweep gap 5)
+        from .evidence import _syslib_hints, failure_evidence, run_logged
+        log_rel = f"logs/{env_rel.rsplit('/', 1)[-1]}-cran-pack.log"
+        r = run_logged(
+            adapter,
             f". {shlex.quote(env_dir)}/activate.sh && "
+            f"{_build_jobs_prefix(pack_tools.get('build_jobs'))}"
             f"rm -rf {shlex.quote(pack_dir)} && mkdir -p {shlex.quote(pack_dir)} "
             f"{shlex.quote(rlib)} && tar -xf {shlex.quote(site_tar)} "
             f"-C {shlex.quote(pack_dir)} && "
@@ -1075,16 +1083,17 @@ class CranSolver:
             f"while read -r f; do "
             f"R CMD INSTALL --library={shlex.quote(rlib)} \"$f\" || exit 1; "
             f"done < ../order.txt",
-            timeout=7200)
+            log_rel, timeout=7200, runner=adapter.run_activated)
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed",
                 "offline cran layer install failed on site",
                 stage="realize",
                 hints={"ecosystem": "cran",
-                       "log_tail": (r.err or r.out)[-1500:],
-                       # evidence wiring for this offline lane is task
-                       # #124; the note GATE lands now (in-memory text)
+                       **failure_evidence(adapter, log_rel,
+                                          r.err or r.out),
+                       **(_syslib_hints((r.err or "")
+                                        + (r.out or "")) or {}),
                        "note": _remedies.packed_cran_note(
                            _extract_regions((r.err or "")
                                             + (r.out or "")))})
@@ -1472,9 +1481,16 @@ class JuliaSolver:
         _w = pack_tools.get("wrap_cmd") or (lambda s: s)
         from .evidence import failure_evidence, run_logged
         log_rel = f"logs/{env_rel.rsplit('/', 1)[-1]}-julia-overlay.log"
+        # the prelude was ACCEPTED and silently discarded here while
+        # _build_overlay eagerly built the toolchain for this very lane
+        # (parity sweep gap 4): a deps/build.jl compile ran bare on
+        # compiler-less sites. Activation FIRST, prelude AFTER — the
+        # same PATH-reset catch as the cran lanes.
+        _pl = (prelude or "").replace("\n", "; ").rstrip("; ")
         r = run_logged(adapter, _w(
             f". {shlex.quote(parent_dir)}/activate.sh && "
-            f"JULIA_DEPOT_PATH={shlex.quote(depot)} "
+            + (f"{_pl} && " if _pl else "")
+            + f"JULIA_DEPOT_PATH={shlex.quote(depot)} "
             f"julia --project={shlex.quote(env_dir + '/julia')} "
             f"-e 'using Pkg; Pkg.instantiate()'"),
             log_rel, timeout=3600, runner=adapter.run_activated)

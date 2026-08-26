@@ -133,7 +133,11 @@ class EnvManager:
                             "list — the solve will not find them",
                     "fix": "add \"bioconda\" to the spec's channels "
                            "(conda-forge first, bioconda second is the "
-                           "conventional order)"}
+                           "conventional order); from a SESSION — whose "
+                           "synthesized spec cannot set channels — mint "
+                           "the env with env_ensure({..., 'channels': "
+                           "['conda-forge', 'bioconda']}) and "
+                           "session_start on it"}
         return None
 
     def _pin_to_parent(self, spec: EnvSpec, parent_env: dict) -> EnvSpec:

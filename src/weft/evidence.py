@@ -108,15 +108,21 @@ def _syslib_hints(text: str) -> dict | None:
             found[kind] = m.group(1)
     if not hit:
         return None
+    # attached from SESSION and REALIZE lanes alike — the remedy names
+    # each surface's OWN lever (the old text named only
+    # session_install(build_deps=), unreachable from env_realize/
+    # task_submit/kernel_start; bug5-A2 sweep)
     out = {"failure_class": "missing_system_lib",
            "remedy": "a system library is missing on this site — "
-                     "retrying the session lane will fail identically; "
-                     "session_install(build_deps=[\"<conda pkg>\"]) "
-                     "supplies its headers/libs to source compiles "
-                     "without touching the base (e.g. build_deps="
-                     "[\"xz\"] for lzma.h), or mint an isolated env "
-                     "with a full solve (extends_env / "
-                     "ensure_available env target)"}
+                     "retrying the same lane fails identically. In a "
+                     "session: session_install(build_deps="
+                     "[\"<conda pkg>\"]) serves its headers/libs to "
+                     "source compiles without touching the base (e.g. "
+                     "[\"xz\"] for lzma.h). In an env spec: add the "
+                     "package to deps.conda — the compiled .so links "
+                     "it at runtime, so it is a real dependency. Or "
+                     "mint an isolated env with a full solve "
+                     "(extends_env / ensure_available env target)"}
     if found:
         out["missing_system"] = found
     return out

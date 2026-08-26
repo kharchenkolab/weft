@@ -621,9 +621,13 @@ class SessionManager:
         # system compilers on Ubuntu sites; a bare RHEL10 VM finally
         # showed configure finding no pkg-config while the deps prefix
         # sat fully provisioned (eight-asks D reality catch).
+        # policy max_build_cores reaches THIS lane too: the bare
+        # _build_jobs_prefix(None) hardcoded cap 8 and bypassed the
+        # site lever every other build lane honors (parity sweep)
+        from .realize import _build_jobs_cap
         script = (act + " && "
                   + (prelude_inline + " && " if prelude_inline else "")
-                  + f"{_build_jobs_prefix(None)}"
+                  + f"{_build_jobs_prefix(_build_jobs_cap(self.store, adapter.name))}"
                   f"mkdir -p {shlex.quote(rlib)} && "
                   f"export R_LIBS={shlex.quote(rlib)}\"${{R_LIBS:+:$R_LIBS}}\" && "
                   # standalone: remotes uses ONLY base R — no callr/
@@ -638,7 +642,13 @@ class SessionManager:
         from .evidence import failure_evidence, run_logged
         log_rel = f"logs/{s['session_id']}-cran-install.log"
         try:
-            r = run_logged(adapter, wrap(script), log_rel, timeout=3600,
+            # 10800 like the solver lane, not 3600: the loadcheck arm
+            # (bug5 A3) means a broken-ABI binary set can rebuild the
+            # whole delta from source in-script — the solver lane's
+            # budget exists for exactly that worst case, and this lane
+            # gained the arm while keeping the pre-arm number
+            # (parity-sweep gap 1)
+            r = run_logged(adapter, wrap(script), log_rel, timeout=10800,
                            runner=adapter.run_activated)
         except WeftError as e:
             raise _keep_transport_code(
@@ -1303,11 +1313,15 @@ class SessionManager:
                     f"--manifest-path {shlex.quote(manifest)} "
                     + " ".join(shlex.quote(_pixi_spec(x))
                                for x in pypi_rec))
-                r = run_logged(adapter, replay_cmd, log_rel, timeout=900)
+                # 1800s: the replay REBUILDS any sdists (same budget as
+                # the other sdist-capable lanes; 900 predated the
+                # toolchain arm and would cut the very build the retry
+                # exists to complete)
+                r = run_logged(adapter, replay_cmd, log_rel, timeout=1800)
                 if r.rc != 0:
-                    # the replay REBUILDS any sdists — an install that
-                    # only ever succeeded with the toolchain (bug5 A1)
-                    # would die here without the same arm
+                    # an install that only ever succeeded with the
+                    # toolchain (bug5 A1) would die here without the
+                    # same arm
                     tail = (r.err or r.out)[-1500:]
                     pl = self._pypi_build_retry_prelude(
                         s, adapter, _pixi_add_failure(tail)[0], tail)
@@ -1315,7 +1329,7 @@ class SessionManager:
                         log_rel = (f"logs/{s['session_id']}"
                                    "-clone-replay-tc.log")
                         r = run_logged(adapter, pl + " && " + replay_cmd,
-                                       log_rel, timeout=900)
+                                       log_rel, timeout=1800)
                 if r.rc != 0:
                     raise WeftError(
                         "env.realize_failed",
@@ -1379,11 +1393,19 @@ class SessionManager:
                          "below",
                 "julia": "not yet wired for sessions; extends_env works",
             }, "options": {
-                "extends": "mint a real delta env instead: env_ensure("
-                           f"{{'extends': '{env_row.get('spec_hash', '?')}',"
-                           " 'deps': {...}}) — pypi/cran/julia deltas "
-                           "realize as overlays; a conda delta is a full "
-                           "realize",
+                # extends_env, not spec-hash extends: this refusal fires
+                # EXACTLY on adopted/packed bases, where no spec row may
+                # exist (the adopt-only lesson — the old hint printed
+                # spec_hash '?' and dead-ended the whole population that
+                # can hit it; errors.py's CODES text said extends_env
+                # all along)
+                "extends_env": "mint a real delta env instead: "
+                               "env_ensure("
+                               f"{{'extends_env': '{s['base_env_id']}',"
+                               " 'deps': {...}}) — resolves off the env "
+                               "row adoption DOES create; pypi/cran/"
+                               "julia deltas realize as overlays; a "
+                               "conda delta is a full realize",
                 "warm_site": "run this where the base was BUILT (warm pixi "
                              "cache): the clone is a local hardlink forest "
                              "there",
@@ -1880,7 +1902,21 @@ class SessionManager:
                 f"{shlex.quote(manifest)} {' '.join(shlex.quote(_pixi_spec(p)) for p in pypi)}"
             )
         _t_add = time.monotonic()
-        r = adapter.run_cmd(" && ".join(parts), timeout=900)
+        # run_logged, not raw run_cmd: this was the last session install
+        # lane raising with only an in-memory tail (parity sweep #2) —
+        # and its new toolchain retry can spend minutes of sdist-build
+        # output that would die with the process. 1800s like the other
+        # sdist-capable lanes: pixi add compiles too (the 900s budget
+        # predated that understanding).
+        from .evidence import failure_evidence, run_logged
+        add_log = f"logs/{s['session_id']}-pixi-add.log"
+        try:
+            r = run_logged(adapter, " && ".join(parts), add_log,
+                           timeout=1800)
+        except WeftError as e:
+            raise _keep_transport_code(
+                e, "the session pixi add stalled or timed out",
+                requested=conda + pypi) from e
         if r.rc != 0:
             tail = (r.err or r.out)[-1500:]
             code, retryable, why, stg = _pixi_add_failure(tail)
@@ -1890,14 +1926,23 @@ class SessionManager:
             pl = (self._pypi_build_retry_prelude(s, adapter, code, tail)
                   if pypi else "")
             if pl:
-                r = adapter.run_cmd(pl + " && " + " && ".join(parts),
-                                    timeout=900)
+                add_log = f"logs/{s['session_id']}-pixi-add-tc.log"
+                try:
+                    r = run_logged(adapter,
+                                   pl + " && " + " && ".join(parts),
+                                   add_log, timeout=1800)
+                except WeftError as e:
+                    raise _keep_transport_code(
+                        e, "the pixi-add toolchain retry stalled or "
+                           "timed out",
+                        requested=conda + pypi) from e
                 if r.rc != 0:
                     tail = (r.err or r.out)[-1500:]
                     code, retryable, why, stg = _pixi_add_failure(tail)
         _add_s = round(time.monotonic() - _t_add, 2)
         if r.rc != 0:
-            hints = {"log_tail": tail, "requested": conda + pypi}
+            hints = {"requested": conda + pypi,
+                     **failure_evidence(adapter, add_log, r.out)}
             if code == "env.realize_failed":
                 hints.update(_syslib_hints(tail) or {})
             if code == "internal.error":

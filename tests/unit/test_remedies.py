@@ -54,9 +54,14 @@ def test_cran_note_dep_unavailable_is_not_networking():
     assert "air-gapped" not in got
 
 
-def test_cran_note_syslib_names_the_build_deps_lever():
+def test_cran_note_syslib_names_a_reachable_lever():
+    """bug5-A2 class: this note fires ONLY on realize surfaces, where
+    build_deps (a session-only kwarg) is unpullable — the old
+    assertion PINNED the unreachable word, certifying the misdirection
+    (the CODES-registry lesson, for levers)."""
     got = cran_realize_note(_regions("syslib"), "zlib.h: No such file")
-    assert "build_deps" in got
+    assert "deps.conda" in got
+    assert "build_deps" not in got
 
 
 def test_cran_note_network_only_on_network_markers():
@@ -111,6 +116,9 @@ def test_fingerprint_note_only_for_old_shim_shapes():
 def test_snapshot_advice_needs_unportable_paths():
     got = snapshot_verify_failed(["/home/u/local-src"])
     assert got and "session_run_installer" in got
+    # the verb's REAL kwarg — the old text advised inputs=[...], a
+    # task-vocabulary kwarg the tool wrapper refuses at bind time
+    assert "source=" in got and "inputs=" not in got
     assert snapshot_verify_failed([]) is None
     assert snapshot_verify_failed(None) is None
 

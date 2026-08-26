@@ -52,21 +52,25 @@ def test_policy_stamps_the_adapter(w, tmp_path):
     assert w.adapters["local"]._weft_ppm_binaries is True   # default
 
 
-def test_overlay_lane_carries_the_load_check():
-    """D2: both cran realize lanes carry the loadNamespace + source-
-    rebuild arm — the overlay lane verified by presence only (a
-    broken-ABI binary passed). Pinned on the source text: the arm has
-    ONE recipe; a lane losing it drifts silently."""
+def test_cran_lanes_route_through_the_loadcheck_owner():
+    """D2, upgraded by bug5 A3: the loadNamespace + source-rebuild arm
+    is ONE owner (_r_loadcheck) — this test used to pin the recipe's
+    literals in each lane's inline copy; now it pins that every cran
+    install lane ROUTES through the owner and that the owner still
+    carries the recipe (the session lane's routing is pinned in
+    test_session_ppm)."""
     import inspect
 
-    from weft.solvers import CranSolver
+    from weft.solvers import CranSolver, _r_loadcheck
     layer_src = inspect.getsource(CranSolver.realize_layer)
     overlay_src = inspect.getsource(CranSolver.realize_overlay)
     for src, lane in ((layer_src, "realize_layer"),
                       (overlay_src, "realize_overlay")):
-        assert "loadNamespace" in src, f"{lane} lost the load check"
-        assert "rebuilding from source" in src, lane
-        assert 'sub("__linux__/[^/]+/", ""' in src, lane
+        assert "_r_loadcheck" in src, f"{lane} lost the load-check arm"
+    owner = _r_loadcheck('c("x")', "lib", 'getOption("repos")')
+    assert "loadNamespace" in owner
+    assert "rebuilding from source" in owner
+    assert 'sub("__linux__/[^/]+/", ""' in owner
 
 
 def test_toolchain_id_extras_fork_the_prefix_not_the_default():

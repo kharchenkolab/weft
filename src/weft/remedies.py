@@ -174,11 +174,17 @@ def cran_realize_note(regions: list[dict] | None, text: str) -> str:
                 "r_repositories), or use conda-forge r-<name> in "
                 "deps.conda.")
     if "syslib" in marks or "compiler_missing" in marks:
-        return ("the build is missing a compiler or system library on "
-                "this site — see failure_class/missing_system: "
-                "build_deps supplies headers/libs; a toolchain-less "
-                "site needs cxx-compiler and friends via the conda "
-                "layer.")
+        # REALIZE surface: build_deps is a session-only lever — naming
+        # it here was the bug5-A2 class (advice an env spec cannot
+        # follow). deps.conda is the spec's lever, and it is CORRECT,
+        # not a workaround: the compiled .so links the library at
+        # runtime. Compilers are weft's errand (toolchain retry).
+        return ("the build is missing a system library on this site — "
+                "see failure_class/missing_system: add its conda "
+                "package to deps.conda (the built .so links it at "
+                "runtime, so it is a real dependency); compilers are "
+                "weft's own toolchain — a toolchain.failed event says "
+                "if provisioning was the problem.")
     if _looks_network(text):
         return ("cran realization needs network from the install point "
                 "in v1; on air-gapped sites prefer conda-forge "
@@ -193,10 +199,12 @@ def cran_overlay_note(regions: list[dict] | None) -> str:
     the evidence says so."""
     marks = _region_markers(regions)
     if "syslib" in marks or "compiler_missing" in marks:
-        return ("the package needs a native library/toolchain the "
-                "parent lacks — it cannot be layered: add that conda "
-                "package to the parent env (or build_deps for "
-                "compile-time-only needs).")
+        # same bug5-A2 sweep: "(or build_deps …)" pointed a realize
+        # surface at a session-only lever
+        return ("the package needs a native library the parent lacks "
+                "— it cannot be layered: add that conda package to "
+                "the parent env's deps.conda (the runtime .so must "
+                "resolve from the parent every consumer sources).")
     if "r_dep_unavailable" in marks:
         return ("R reports dependencies 'not available' — a repo/name "
                 "problem: check the name or add the repo "
@@ -245,10 +253,15 @@ def snapshot_verify_failed(unportable: list[str] | None) -> str | None:
     syslib/network diagnosis) with installer-inputs advice — only
     earned when unportable installer paths actually exist."""
     if unportable:
+        # the verb takes source=<path> (weft content-addresses and
+        # re-stages it) — the old text said inputs=[...], a TASK-
+        # vocabulary kwarg this verb refuses at bind time (bug5-A2
+        # sweep: the sibling copy at run_installer's own refusal
+        # already spelled it right; two copies, one dead)
         return ("an installer step depends on a local path that will "
-                "not exist at realize time: register its sources "
-                "(data_register) and re-run it via "
-                "session_run_installer(..., inputs=[...]), or make "
-                "the step self-contained "
+                "not exist at realize time: re-run it via "
+                "session_run_installer(..., source=\"<path>\") so "
+                "weft content-addresses and re-stages the source, or "
+                "make the step self-contained "
                 f"(unportable: {unportable[:4]})")
     return None

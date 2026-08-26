@@ -334,7 +334,13 @@ def test_cold_base_conda_add_refused_with_levers(tmp_path, pixi_bin):
     out = w.session_install(sid, conda=["somepkg"])
     assert out["error"] == "session.cold_base"
     opts = out["hints"]["options"]
-    assert "extends" in opts and "full_clone" in opts and "warm_site" in opts
+    # extends_env, not spec-hash extends: this refusal fires exactly on
+    # adopted bases, where no spec row may exist — the hint must name
+    # the door that resolves there (and the base EnvID rides in it)
+    assert "extends_env" in opts and "full_clone" in opts \
+        and "warm_site" in opts
+    s = w.store.get_session(sid)
+    assert s["base_env_id"] in opts["extends_env"]
 
 
 def test_cold_base_installer_refused(tmp_path, pixi_bin):

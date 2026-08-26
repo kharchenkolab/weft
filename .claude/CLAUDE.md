@@ -71,6 +71,25 @@ remotes, removable in one command.
   test, write a one-line hypothesis in the ledger (percent-level races
   look exactly like flakes) — and READ the captured failure output
   before writing the hypothesis.
+- LANE-FAMILY PARITY: a capability added to ONE lane of a surface
+  family (install lanes, evidence persistence, classifiers, URL
+  grammars, budgets, policy levers) triggers a family enumeration —
+  wire every sibling or record a reasoned n/a in the round. bug5 was
+  three cells of a matrix nobody had drawn: the toolchain went to the
+  cran lane (its incident), PPM URLs to the solver lanes (their
+  incident), and the sibling lanes an agent actually drives got
+  neither. Sweeping the DEFECT is not sweeping the CAPABILITY; the
+  matrix artifact is misc/lane_parity_2026-08-26.md.
+- ADVICE NAMES PULLABLE LEVERS: every hint/remedy names only levers
+  reachable from the surface that can hit the raise (a lever with a
+  surface-specific spelling names both spellings). The bug5-A2 sweep
+  found a refusal advising a kwarg the verb REFUSES at bind time and
+  session-only levers printed on realize surfaces — with test_remedies
+  PINNING the unreachable word (a test asserting the implementation
+  ratifies miscoding: the CODES-registry lesson, for levers).
+  test_lever_reachability.py mechanically binds every
+  `verb(kwarg=)`-shaped advice string against the live signature;
+  surface mismatches are pinned per-remedy.
 - Field bug => CLASS SWEEP before closing: generalize the defect and
   sweep the codebase for siblings (subagents; see
   misc/sweep_findings_2026-07.md — 4 field bugs generalized to ~35).

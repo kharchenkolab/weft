@@ -159,7 +159,10 @@ def ensure_realization(
                 "suggestion": "add the site's platform to the spec's "
                               "'platforms' and env_ensure again (platform "
                               "membership is identity: this yields a new "
-                              "EnvID, solved for both)",
+                              "EnvID, solved for both); an ADOPTED env "
+                              "may hold no local spec — there, adopt or "
+                              "publish a version solved for this "
+                              "platform instead",
             },
         )
     # solvers that compile on site key their build caches on the platform
@@ -812,12 +815,17 @@ def _build_prefix(
         emit("realize.prefix.done", env_id=env_id, site=adapter.name,
              elapsed_s=round(_t.time() - t0, 1))
     if build.rc != 0:
+        from .evidence import _syslib_hints
         raise WeftError(
             "env.realize_failed",
             f"pixi install failed on {adapter.name}",
             stage="realize",
             hints={
                 **failure_evidence(adapter, log_rel, build.out),
+                # after the toolchain retry, the residual failure mode
+                # IS the missing-header class — name it like every
+                # sibling lane does (parity sweep)
+                **(_syslib_hints(build.out or "") or {}),
                 "retryable": "maybe — check for network or disk errors "
                              "in the error_regions / log_path",
                 # the adaptive lever, where an agent will actually read it
@@ -1442,6 +1450,7 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
         # unhashed rather than paying a full-prefix rebuild — but say so.
         r = install("")
     if r.rc != 0:
+        from .evidence import _syslib_hints
         raise WeftError(
             "env.realize_failed",
             "could not install the pypi delta into the overlay layer: "
@@ -1449,7 +1458,11 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
             + (" …" if len(req_lines) > 6 else ""),
             stage="realize",
             hints={"requested": req_lines, "site": adapter.name,
-                   **_fe(adapter, _lg, r.out)})
+                   **_fe(adapter, _lg, r.out),
+                   # the cran sibling attaches this classifier on the
+                   # same function's failures; a missing lzma.h here
+                   # was an unclassified failure (parity sweep)
+                   **(_syslib_hints(r.out or "") or {})})
     # entry-point scripts: pip --target does not place them on PATH
     binw = f"{adapter.path(rel)}/bin"
     adapter.run_cmd(
@@ -1922,7 +1935,9 @@ def _build_squashfs(
     _realize_layers(env_id, env_row, build, inner,
                     pack_tools.get("solvers") or {}, emit,
                     offline=not internet, pack_tools=pack_tools,
-                    build_jobs=8)
+                    # the policy cap, not a literal 8: max_build_cores
+                    # must reach the squashfs staging build too
+                    build_jobs=_build_jobs_cap(store, adapter.name))
     _stage_post_install_inputs(env_row, build, inner, pack_tools)
     _run_post_install(env_row, build, inner)
     _install_url_pins(env_row, build, inner, pack_tools)

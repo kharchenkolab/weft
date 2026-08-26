@@ -80,7 +80,8 @@ def test_retry_failure_evidence_points_at_retry_log(tmp_path, pixi_bin,
                                                     monkeypatch):
     w, ad, installs, emit, events = _rig(
         tmp_path, pixi_bin, monkeypatch, GXX,
-        second=ShimResult(1, GXX + "still failing", ""))
+        second=ShimResult(1, "fatal error: zlib.h: No such file or "
+                             "directory\ncompilation terminated.", ""))
     try:
         _build_prefix("env:v1:aa", ENV_ROW, ad, "envs/aa", [],
                       emit=emit, site_platform="linux-64")
@@ -89,6 +90,12 @@ def test_retry_failure_evidence_points_at_retry_log(tmp_path, pixi_bin,
         assert len(installs) == 2
         assert "-prefix-tc.log" in e.hints["log_path"], \
             "evidence names the log of the attempt that DECIDED"
+        # after the toolchain retry, the residual failure IS the
+        # missing-header class — this lane classifies it like every
+        # sibling (parity sweep gap 3)
+        assert e.hints.get("failure_class") == "missing_system_lib"
+        assert "deps.conda" in e.hints.get("remedy", ""), \
+            "the remedy names the lever THIS surface can pull"
 
 
 def test_unprovisionable_toolchain_keeps_original_error(
