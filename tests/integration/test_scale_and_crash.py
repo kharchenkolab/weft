@@ -111,10 +111,18 @@ def test_remote_hard_crash_yields_node_failure(tmp_path, pixi_bin, sshd_site):
         w.runner.poll_interval = 0.5
         r = w.task_submit({"command": "sleep 300", "site": "beamlab"})
         assert "job_id" in r, r
-        for _ in range(100):
-            if w.task_status(r["job_id"])[0]["state"] == "RUNNING":
-                break
-            time.sleep(0.1)
+        # the crash premise is "the job was RUNNING when the node
+        # rebooted" — ASSERT it with a real deadline instead of a fixed
+        # 10s budget: under full-lane load staging exceeded 10s, the
+        # restart fired mid-STAGING, and the test silently became a
+        # deferred-submit scenario with a different honest verdict
+        # (R1b: stuck STAGING against the 3600s outage grace)
+        deadline = time.time() + 180
+        while w.task_status(r["job_id"])[0]["state"] != "RUNNING":
+            assert time.time() < deadline, (
+                "job never reached RUNNING — the crash premise is unmet: "
+                f"{w.task_status(r['job_id'])[0]}")
+            time.sleep(0.2)
         # hard restart: kills every process; the filesystem (pid files
         # without exit codes) survives — exactly what a reboot leaves behind
         subprocess.run(["docker", "restart", "-t", "0", name],

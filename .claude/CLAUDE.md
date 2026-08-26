@@ -40,6 +40,14 @@ remotes, removable in one command.
   the flake ledger; real breakage = immediate fix-forward commit).
   Exception, flagged explicitly: high-blast-radius changes (store/
   engine refactors touching everything) still gate on the full lane.
+  The background lane's log is READ before the NEXT round closes —
+  a round never closes on an unread lane log, and exit!=0 includes
+  COLLECTION errors (exit=2, "N deselected, 1 error": NOTHING ran).
+  The kernel_start outage rode exactly this: a duplicate test
+  basename aborted every full-lane collection for three commits, the
+  would-have-caught test never ran, and the exit=2 logs went unread
+  while serial docker lanes occupied attention.
+  test_unique_basenames pins the collision class.
 - misc/ is gitignored (ledger, designs, specs, handoff);
   misc/HANDOFF.md is the session-to-session index — read it first.
 - Test lanes: fast `pixi run pytest -q -m "not solver and not docker"`;

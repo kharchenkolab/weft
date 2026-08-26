@@ -27,6 +27,7 @@ from .runner_util import parse_walltime
 WALLTIME_GRACE_S = 10.0
 OUTAGE_BACKOFF_CAP_S = 30.0
 LOST_STRIKES = 2
+UNREACHABLE_REDRIVE_STRIKES = 3
 IDLE_TICKS_BEFORE_EXIT = 5
 
 
@@ -45,6 +46,7 @@ class Watch:
     cancelled: bool = False
     cancel_sent: bool = False
     lease: str | None = None     # "kernel"|"service": report deaths, not results
+    unreachable_strikes: int = 0  # probe ticks that rode dead transport
     probe: bool = False          # deferred submit (site outage cut _drive):
                                  # on the next successful poll, JOBDIR TRUTH
                                  # decides — exited -> collect, running ->
@@ -231,6 +233,8 @@ class SitePoller:
                     # path minted FAILED(site.unreachable) on the
                     # walltime-cancel path before — aba, live,
                     # 2026-08-09.)
+                    if was_probe and self._probe_unreachable(w):
+                        continue
                     self._note_outage(len(items))
                     continue
                 self._fail(w, e)
@@ -361,6 +365,41 @@ class SitePoller:
                        "suggestion": "raise resources.walltime or shrink the task"},
             )
 
+    def _probe_unreachable(self, w: Watch) -> bool:
+        """A probe tick rode dead transport. When the parked drive NEVER
+        reached its submit call (deferral.submit_attempted False — the
+        submit is the one call whose loss can leave a live remote run),
+        waiting for the site to ANSWER can deadlock: an ephemeral site
+        (cloud instance, torn-down container) only exists when a drive
+        provisions it, so answering needs the re-drive and the re-drive
+        waited on answering — both R1b jobs sat STAGING against the
+        3600s grace while their tests timed out. After N consecutive
+        unreachable ticks, re-drive ONCE: the drive owns provisioning
+        and either lands or produces a typed verdict; a second cut hits
+        the existing attempts guard, and the grace window stays the
+        outer bound. Returns True when the watch was handed back to the
+        runner (caller skips the outage bookkeeping for this tick)."""
+        w.unreachable_strikes += 1
+        if w.unreachable_strikes < UNREACHABLE_REDRIVE_STRIKES:
+            return False
+        store = self.runner.store
+        job = store.get_job(w.job_id)
+        dfr = dict((job or {}).get("deferral") or {})
+        if not job or dfr.get("submit_attempted") \
+                or int(dfr.get("attempts") or 0) >= 1:
+            return False
+        dfr["attempts"] = int(dfr.get("attempts") or 0) + 1
+        store.set_job_deferral(w.job_id, dfr)
+        store.emit("job.redriven", job_id=w.job_id, site=self.site,
+                   note="submit was never attempted and the site stayed "
+                        "unreachable — re-driving (the drive owns "
+                        "provisioning/reachability)")
+        self._unregister(w.job_id)
+        import threading as _th
+        _th.Thread(target=self.runner._drive, args=(w.job_id,),
+                   daemon=True).start()
+        return True
+
     def _probe_transition(self, w: Watch) -> None:
         """A submit cut by a site outage was PARKED, not failed. Now the
         site answers again: decide from what actually happened on disk.
@@ -381,7 +420,8 @@ class SitePoller:
             ["status", "--dir", self.adapter.path(w.jobdir_rel)],
             timeout=self.adapter.poll_timeout
             if hasattr(self.adapter, "poll_timeout") else 60.0).json()
-        state = st.get("state")
+        w.unreachable_strikes = 0   # the site answered — strikes are
+        state = st.get("state")     # CONSECUTIVE dead-transport ticks
         if state == "exited":
             store.set_job_deferral(w.job_id, None)
             store.update_job(w.job_id, queue_reason="")

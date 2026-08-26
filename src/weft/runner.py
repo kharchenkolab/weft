@@ -608,6 +608,11 @@ class JobRunner:
             "since": since,
             "stage": err.stage,
             "delivered": (err.hints or {}).get("delivered", "no"),
+            # sticky across re-parks: once ANY drive of this job reached
+            # its submit call, a later pre-submit cut must not erase the
+            # duplicate risk the earlier one created
+            "submit_attempted": bool(prior.get("submit_attempted"))
+            or bool((err.hints or {}).get("submit_attempted")),
             "attempts": int(prior.get("attempts") or 0),
         }
         self.store.set_job_deferral(job_id, deferral)
@@ -709,7 +714,17 @@ class JobRunner:
 
         if self._cancelled(job_id):
             return
-        handle = adapter.submit(jobdir_rel, task.to_dict())
+        try:
+            handle = adapter.submit(jobdir_rel, task.to_dict())
+        except WeftError as e:
+            if e.code == "site.unreachable":
+                # the ONE call whose loss can leave a live remote run —
+                # everything before it is idempotent re-drive material.
+                # _defer_job records this (sticky); the probe only waits
+                # for the site to answer when a duplicate is actually
+                # possible.
+                e.hints["submit_attempted"] = True
+            raise
         self.store.update_job(job_id, sched_handle=handle,
                               submitted_at=time.time())
         if job.get("deferral"):
