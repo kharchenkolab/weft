@@ -230,9 +230,12 @@ class RetainManager:
         r = adapter.shim(["list-tree", "--root", adapter.path(jobdir_rel),
                           "--max", "100000"], timeout=600)
         if r.rc != 0:
-            raise WeftError("data.missing",
-                            f"cannot scan run sandbox: {r.err[:200]}",
-                            stage="staging", retryable=True)
+            raise WeftError(
+                "data.missing",
+                f"cannot scan run sandbox {jobdir_rel} on "
+                f"{adapter.name}: {r.err[:200]}",
+                stage="staging", retryable=True,
+                hints={"jobdir": jobdir_rel, "site": adapter.name})
         out = []
         for line in r.out.splitlines():
             p = line.split("\t")
@@ -419,8 +422,10 @@ class RetainManager:
             if not selected:
                 raise WeftError(
                     "data.missing",
-                    "selection matched no files", stage="staging",
-                    hints={"include": include, "exclude": exclude,
+                    f"selection matched no files in {target}",
+                    stage="staging",
+                    hints={"target": target,
+                           "include": include, "exclude": exclude,
                            **({"note": "settle='now' captures only bytes "
                                        "that exist now; the default "
                                        "retain pins for capture at run "
@@ -787,9 +792,12 @@ class RetainManager:
             script.append(f"echo placed")
             r = adapter.run_cmd("\n".join(script), timeout=3600)
             if r.rc != 0 or "placed" not in r.out:
-                raise WeftError("data.transfer_failed",
-                                f"placement failed: {(r.err or r.out)[-300:]}",
-                                stage="staging", retryable=True)
+                raise WeftError(
+                    "data.transfer_failed",
+                    f"placement failed on {adapter.name}: "
+                    f"{(r.err or r.out)[-300:]}",
+                    stage="staging", retryable=True,
+                    hints={"site": adapter.name})
             return "reflink|link|copy"
         # remote -> workspace: tar pipe over the adapter's transport
         # (rsync-free: works on bare sites; one-shot pulls don't need
@@ -975,9 +983,12 @@ class RetainManager:
                     f"head -c {max_bytes} {shlex.quote(cand['path'])} "
                     f"| base64", timeout=300)
                 if r.rc != 0:
-                    raise WeftError("data.missing",
-                                    f"read failed: {(r.err or '')[:200]}",
-                                    stage="infra", retryable=True)
+                    raise WeftError(
+                        "data.missing",
+                        f"read of {rel} in {target} failed: "
+                        f"{(r.err or '')[:200]}",
+                        stage="infra", retryable=True,
+                        hints={"target": target, "path": rel})
                 b64 = "".join(r.out.split())
             return {"target": target, "path": rel, "at": cand["at"],
                     "bytes_b64": b64, "bytes_total": st["bytes"],
@@ -1196,9 +1207,11 @@ class RetainManager:
                         f"rm -rf {shlex.quote(row['location'])}",
                         timeout=1800)
                     if r.rc != 0:
-                        raise WeftError("data.transfer_failed",
-                                        f"delete failed: {r.err[:200]}",
-                                        stage="infra",
+                        raise WeftError(
+                            "data.transfer_failed",
+                            f"delete of {row['location']} on "
+                            f"{row['site']} failed: {r.err[:200]}",
+                            stage="infra",
                                         hints={"suggestion":
                                                "permissions or a busy "
                                                "file at the retained "
