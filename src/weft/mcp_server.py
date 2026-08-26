@@ -65,6 +65,17 @@ SCHEMA_HINTS: dict[str, dict] = {
     # as the key had no signal it was wrong until the refusal (aba2
     # th594060f7 item 2b) — the dict-shape belongs in the schema, not
     # only the docstring
+    "session_start": {"env_id": {
+        "description": ('An EnvID string, or an inline spec (same '
+                        'shape as env_ensure: {"name", "deps": '
+                        '{"conda": [...], "pypi": [...], ...}}) — '
+                        'auto-ensured'),
+    }},
+    "kernel_start": {"env_id": {
+        "description": ('An EnvID string, or an inline spec (same '
+                        'shape as env_ensure) — auto-ensured and '
+                        'auto-realized on the site'),
+    }},
     "env_find_near": {"spec": {
         "description": ('Same spec shape as env_ensure: {"name", '
                         '"deps": {"conda": [...], "pypi": [...], '
