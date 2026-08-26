@@ -8,6 +8,6 @@ mkdir -p "$keydir"
 if [ ! -f "$keydir/id_ed25519" ]; then
     ssh-keygen -t ed25519 -N "" -f "$keydir/id_ed25519" -q
 fi
-cp "$keydir/id_ed25519.pub" "$here/authorized_keys"
+# NO key bake: the tag is shared by every fixture; keys are
+# injected per-container at run time (-v <pub>:/run/host-key.pub:ro)
 docker build -q -t weft-test-sshd "$here"
-rm -f "$here/authorized_keys"

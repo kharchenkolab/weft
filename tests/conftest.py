@@ -89,6 +89,7 @@ def sshd_site(docker_available, tmp_path_factory):
     run = _sh("docker", "run", "-d", "--rm", "--name", name,
               # FUSE + userns for squashfs-realization paths
               "--device", "/dev/fuse", "--cap-add", "SYS_ADMIN",
+              "-v", f"{keydir}/id_ed25519.pub:/run/host-key.pub:ro",
               "-p", "127.0.0.1::22", "weft-test-sshd")
     assert run.returncode == 0, run.stderr
     cid = run.stdout.strip()
@@ -132,6 +133,7 @@ def sshd_site_wan(docker_available, tmp_path_factory):
     run = _sh("docker", "run", "-d", "--rm", "--name", name,
               "--device", "/dev/fuse", "--cap-add", "SYS_ADMIN",
               "--cap-add", "NET_ADMIN",
+              "-v", f"{keydir}/id_ed25519.pub:/run/host-key.pub:ro",
               "-p", "127.0.0.1::22", "weft-test-sshd")
     assert run.returncode == 0, run.stderr
     tc = _sh("docker", "exec", name,
@@ -182,11 +184,13 @@ def bastion_chain(docker_available, tmp_path_factory):
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         fixed_port = s.getsockname()[1]
+    keymount = ("-v", f"{keydir}/id_ed25519.pub:/run/host-key.pub:ro")
     rb = _sh("docker", "run", "-d", "--rm", "--name", bastion,
              "--network", net, "-p", f"127.0.0.1:{fixed_port}:22",
-             "weft-test-sshd")
+             *keymount, "weft-test-sshd")
     rt = _sh("docker", "run", "-d", "--rm", "--name", target,
-             "--network", net, "weft-test-sshd")    # NO published ports
+             "--network", net, *keymount,
+             "weft-test-sshd")    # NO published ports
     if rb.returncode != 0 or rt.returncode != 0:
         _sh("docker", "rm", "-f", bastion, target)
         _sh("docker", "network", "rm", net)
@@ -235,6 +239,7 @@ def slurm_site(docker_available, tmp_path_factory):
     name = f"weft-slurm-{uuid.uuid4().hex[:8]}"
     run = _sh("docker", "run", "-d", "--rm", "--name", name,
               "--device", "/dev/fuse", "--cap-add", "SYS_ADMIN",
+              "-v", f"{keydir}/id_ed25519.pub:/run/host-key.pub:ro",
               "--hostname", "weftslurm", "-p", "127.0.0.1::22", "weft-test-slurm")
     assert run.returncode == 0, run.stderr
     port = _sh("docker", "port", name, "22").stdout.strip().rsplit(":", 1)[-1]

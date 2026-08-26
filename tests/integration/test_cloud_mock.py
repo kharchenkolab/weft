@@ -30,6 +30,7 @@ class DockerProvisioner:
         name = f"weft-cloud-{uuid.uuid4().hex[:8]}"
         subprocess.run(
             ["docker", "run", "-d", "--rm", "--name", name,
+             "-v", f"{self.keydir}/id_ed25519.pub:/run/host-key.pub:ro",
              "-p", "127.0.0.1::22", "weft-test-sshd"],
             check=True, capture_output=True,
         )

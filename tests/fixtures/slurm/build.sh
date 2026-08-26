@@ -7,6 +7,5 @@ mkdir -p "$keydir"
 if [ ! -f "$keydir/id_ed25519" ]; then
     ssh-keygen -t ed25519 -N "" -f "$keydir/id_ed25519" -q
 fi
-cp "$keydir/id_ed25519.pub" "$here/authorized_keys"
+# NO key bake (shared-tag rule; see sshd/build.sh)
 docker build -q -t weft-test-slurm "$here"
-rm -f "$here/authorized_keys"

@@ -34,6 +34,7 @@ def pair(docker_available, tmp_path_factory):
     for name in (a, b):
         r = subprocess.run(["docker", "run", "-d", "--rm", "--name", name,
                             "--network", net, "-p", "127.0.0.1::22",
+                            "-v", f"{keydir}/id_ed25519.pub:/run/host-key.pub:ro",
                             "weft-test-sshd"], capture_output=True)
         if r.returncode != 0:
             subprocess.run(["docker", "rm", "-f", a, b], capture_output=True)

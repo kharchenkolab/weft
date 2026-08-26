@@ -88,8 +88,10 @@ def test_remote_hard_crash_yields_node_failure(tmp_path, pixi_bin, sshd_site):
     port = _free_port()
     name = f"weft-crash-{uuid.uuid4().hex[:8]}"
     # an explicit -p mapping survives docker restart; a random one does not
+    pubkey = sshd_site["ssh_opts"][1] + ".pub"   # ["-i", key, ...]
     subprocess.run(
         ["docker", "run", "-d", "--rm", "--name", name,
+         "-v", f"{pubkey}:/run/host-key.pub:ro",
          "-p", f"127.0.0.1:{port}:22", "weft-test-sshd"],
         check=True, capture_output=True,
     )
@@ -102,6 +104,14 @@ def test_remote_hard_crash_yields_node_failure(tmp_path, pixi_bin, sshd_site):
             if ok.returncode == 0:
                 break
             time.sleep(0.5)
+        else:
+            # PROCEEDING BLIND here is how the re-keyed-tag bug
+            # read as three different transport theories: every
+            # later weft op failed auth while this loop's failure
+            # was silent (R1b)
+            raise AssertionError(
+                "dedicated container never accepted the fixture "
+                f"key: {ok.stderr.decode()[-300:]}")
         w = Weft(tmp_path / "ws", pixi_bin=pixi_bin)
         w.register_site("beamlab", "ssh", {
             "host": "127.0.0.1", "port": port,
