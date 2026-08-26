@@ -431,6 +431,22 @@ def test_mux_verdict_connect_phase_is_not_delivered():
         assert evict is True and delivered == "no", s
 
 
+def test_mux_verdict_preauth_drops_never_evict_and_never_delivered():
+    """A dial that died before key exchange (MaxStartups drop, early
+    reset) involves NO master — mux'd calls do not kex — so eviction
+    must not fire: killing a master a parallel call just established
+    turns one drop into a re-dial stampede that keeps tripping
+    MaxStartups (the R1b in-lane storm). And nothing was delivered:
+    kex precedes any command, so the probe may re-drive safely."""
+    from weft.adapters.ssh import _mux_verdict
+    for s in ("kex_exchange_identification: Connection closed by "
+              "remote host",
+              "Connection closed by remote host",
+              "Connection reset by peer"):
+        evict, delivered = _mux_verdict(s)
+        assert evict is False and delivered == "no", s
+
+
 def test_mux_verdict_unknown_shapes_keep_the_wedge_protection():
     """The original lesson stands: an UNRECOGNIZED 255 still evicts —
     a stale master poisons every retry until ControlPersist expires.

@@ -157,7 +157,16 @@ def test_submit_attempted_is_sticky_across_reparks(w):
                              "delivered": "unknown"})
     w.runner._defer_job(job_id, first)
     second = WeftError("site.unreachable", "cut at staging",
-                       stage="staging", retryable=True)
+                       stage="staging", retryable=True,
+                       hints={"stderr": "kex_exchange_identification: "
+                                        "Connection closed"})
     w.runner._defer_job(job_id, second)
     dfr = w.store.get_job(job_id)["deferral"]
     assert dfr["submit_attempted"] is True
+    # the park carries WHAT cut it (R1b triage: stage/delivered alone
+    # forced a lane re-run per hypothesis)
+    assert dfr["cut"] == "cut at staging"
+    assert "kex_exchange" in dfr["stderr"]
+    ev = [e for e in w.store.events_since(0, limit=200)
+          if e["kind"] == "job.deferred"][-1]
+    assert ev["cut"] == "cut at staging" and "kex" in ev["stderr"]

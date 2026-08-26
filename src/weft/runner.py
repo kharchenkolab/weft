@@ -608,6 +608,12 @@ class JobRunner:
             "since": since,
             "stage": err.stage,
             "delivered": (err.hints or {}).get("delivered", "no"),
+            # WHAT cut the drive, verbatim (bounded): a park with only
+            # stage/delivered forced a full lane re-run per hypothesis
+            # during the R1b triage — the transport stderr names the
+            # failure shape (kex drop vs refused vs timeout) instantly
+            "cut": err.detail[:200],
+            "stderr": ((err.hints or {}).get("stderr") or "")[-240:],
             # sticky across re-parks: once ANY drive of this job reached
             # its submit call, a later pre-submit cut must not erase the
             # duplicate risk the earlier one created
@@ -623,6 +629,7 @@ class JobRunner:
                          f"{deferral['delivered']})")
         self.store.emit("job.deferred", job_id=job_id, site=job["site"],
                         stage=err.stage, delivered=deferral["delivered"],
+                        cut=deferral["cut"], stderr=deferral["stderr"],
                         attempts=deferral["attempts"],
                         **self.group_payload(job.get("array_group")))
         self._register_probe(job, deferral)
@@ -1277,7 +1284,8 @@ class JobRunner:
                 # deferral/redrive events carry the WHY — a name-only
                 # tail forced a full lane re-run to learn which stage
                 # was cut (R1b triage, twice)
-                extra = {k: e[k] for k in ("stage", "delivered", "note")
+                extra = {k: e[k]
+                         for k in ("stage", "delivered", "cut", "note")
                          if e.get(k)}
                 tail.append(f"{e['kind']}#{e['seq']}"
                             + (f"{extra}" if extra else ""))

@@ -48,6 +48,18 @@ _NOT_DELIVERED_255 = (
     "no route to host",
     "network is unreachable",
 )
+# PRE-AUTH connection deaths: the dial died before key exchange
+# completed — nothing was delivered (kex precedes any command), and NO
+# master was involved (mux'd calls do not kex), so eviction must not
+# fire: killing a master a PARALLEL call just established turns one
+# MaxStartups drop into a re-dial stampede that keeps tripping
+# MaxStartups (the R1b in-lane storm: fast 255s, delivered=unknown,
+# each eviction forcing every next call to dial cold).
+_PREAUTH_255 = (
+    "kex_exchange_identification",
+    "connection closed by remote host",
+    "connection reset by peer",
+)
 
 
 def _mux_verdict(stderr: str) -> tuple[bool, str]:
@@ -55,6 +67,8 @@ def _mux_verdict(stderr: str) -> tuple[bool, str]:
     low = stderr.lower()
     if any(m in low for m in _CHANNEL_255):
         return False, "unknown"
+    if any(m in low for m in _PREAUTH_255):
+        return False, "no"
     if any(m in low for m in _NOT_DELIVERED_255):
         return True, "no"
     return True, "unknown"
