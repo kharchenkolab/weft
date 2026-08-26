@@ -61,6 +61,7 @@ class SitePoller:
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
+        self._stopped = False
         self._outage_since: float | None = None
         self._backoff = 0.0
 
@@ -102,11 +103,24 @@ class SitePoller:
 
     # -- loop ------------------------------------------------------------------
 
+    def stop(self) -> None:
+        """Stop the poll loop (Weft.close): a poller with LIVE watches
+        otherwise polls forever — ~50 never-closed instances in one
+        test lane each opening ssh sessions every tick starved sshd's
+        MaxSessions/MaxStartups and the deferred-probe re-drives with
+        it (R1b). Watches are NOT failed — a reopened Weft re-attaches
+        via resume."""
+        self._stopped = True
+        self._wake.set()
+
     def _run(self) -> None:
         idle = 0
-        while True:
+        while not self._stopped:
             self._wake.wait(timeout=self._backoff or self._interval())
             self._wake.clear()
+            if self._stopped:
+                self._thread = None
+                return
             with self._lock:
                 items = list(self._watches.values())
                 if not items:

@@ -396,6 +396,19 @@ class Weft:
         elif resume == "poll":
             self.runner.resume_polls()
 
+    def close(self) -> None:
+        """Stop this instance's background machinery (site pollers).
+
+        Lifecycle for EMBEDDERS, not an agent tool: a long-lived host
+        that opens Weft per-workspace leaked pollers on every switch —
+        each kept opening ssh sessions on the shared ControlMaster
+        forever. ~50 never-closed instances in one test lane starved
+        sshd's MaxSessions/MaxStartups, and deferred-submit probe
+        re-drives starved with it (R1b — the in-lane-only STAGING
+        hangs). Watches are not failed: a reopened Weft re-attaches
+        via resume. Idempotent."""
+        self.runner.stop()
+
     # -- site management ---------------------------------------------------
 
     def _restore_sites(self) -> None:

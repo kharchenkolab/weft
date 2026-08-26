@@ -98,6 +98,14 @@ class JobRunner:
         self._load_cache[site] = (now, info)
         return info
 
+    def stop(self) -> None:
+        """Stop every site poller (Weft.close). Threads are daemons —
+        this is about stopping their ssh traffic, not process exit."""
+        with self._pollers_lock:
+            pollers = list(self._pollers.values())
+        for p in pollers:
+            p.stop()
+
     def poller_for(self, site: str) -> SitePoller:
         with self._pollers_lock:
             p = self._pollers.get(site)

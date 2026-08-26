@@ -18,6 +18,9 @@ EXCLUDED = {
     "as_actor": "embedder-scoped attribution contextmanager — a per-call "
                 "tool parameter would let an agent spoof the audit trail "
                 "(design refusal, footprint round 26)",
+    "close": "embedder lifecycle (stop pollers on workspace switch) — "
+             "an agent stopping its own substrate's supervision would "
+             "orphan every live job it is waiting on (R1b)",
 }
 
 

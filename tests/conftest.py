@@ -16,6 +16,31 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 os.environ.setdefault("WEFT_STRICT_ENVELOPES", "1")
 
 
+@pytest.fixture(autouse=True)
+def _close_weft_instances(monkeypatch):
+    """Every Weft a test creates gets close()d at test end. Without
+    this, instances with live watches (unstopped kernels, deferred
+    probes) polled FOREVER — by mid docker-lane ~50 leaked pollers
+    were opening ssh sessions every tick against one sshd, starving
+    MaxSessions/MaxStartups and every later test's deferred-probe
+    re-drive with it (R1b: the in-lane-only STAGING hangs)."""
+    from weft.api import Weft
+    made: list = []
+    orig = Weft.__init__
+
+    def tracking(self, *a, **kw):
+        orig(self, *a, **kw)
+        made.append(self)
+
+    monkeypatch.setattr(Weft, "__init__", tracking)
+    yield
+    for w in made:
+        try:
+            w.close()
+        except Exception:
+            pass
+
+
 def _sh(*args, **kw):
     return subprocess.run(args, capture_output=True, text=True, **kw)
 
