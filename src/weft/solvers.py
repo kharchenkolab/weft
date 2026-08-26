@@ -1219,11 +1219,17 @@ class JuliaSolver:
             [self.pixi_bin, "install", "--manifest-path", str(manifest)],
             capture_output=True, text=True, timeout=1800)
         if r.returncode != 0:
+            # evidence outlives the process (L2b): the FULL output
+            # persists; the payload tail is a window onto it
+            ep = self.home / "solver-env-build.err"
+            ep.write_text((r.stdout or "") + (r.stderr or ""))
             raise WeftError(
                 "env.solve_failed",
                 "could not build the controller-side julia solver env",
                 stage="solve", retryable=True,
-                hints={"ecosystem": "julia",
+                hints={"ecosystem": "julia", "log_path": str(ep),
+                       "error_regions": _extract_regions(
+                           (r.stdout or "") + (r.stderr or "")),
                        "solver_message": (r.stderr or r.stdout)[-1000:]})
         (self.home / ".ready").write_text("ok\n")
         return manifest
@@ -1264,7 +1270,11 @@ class JuliaSolver:
             env={**__import__("os").environ,
                  "JULIA_DEPOT_PATH": str(depot)})
         if r.returncode != 0 or not (workdir / "Manifest.toml").exists():
-            raise _julia_solve_error((r.stderr or r.stdout)[-1200:], deps)
+            ep = workdir / "julia-solve.err"
+            ep.write_text((r.stdout or "") + (r.stderr or ""))
+            e = _julia_solve_error((r.stderr or r.stdout)[-1200:], deps)
+            e.hints["log_path"] = str(ep)
+            raise e
         import tomllib
         man = tomllib.loads((workdir / "Manifest.toml").read_text())
         records = []
@@ -1316,11 +1326,15 @@ class JuliaSolver:
                 env={**__import__("os").environ,
                      "JULIA_DEPOT_PATH": str(depot)})
             if r.returncode != 0:
+                ep = self.home / "depot-build.err"
+                ep.write_text((r.stdout or "") + (r.stderr or ""))
                 raise WeftError(
                     "env.realize_failed",
                     "controller-side julia depot build failed",
                     stage="realize",
-                    hints={"ecosystem": "julia",
+                    hints={"ecosystem": "julia", "log_path": str(ep),
+                           "error_regions": _extract_regions(
+                               (r.stdout or "") + (r.stderr or "")),
                            "log_tail": (r.stderr or r.stdout)[-1200:]})
             archive = tdp / "julia-layer.tar"
             with tarfile.open(archive, "w") as tar:
@@ -1339,7 +1353,10 @@ class JuliaSolver:
         adapter.write_file(f"{env_rel}/julia/Project.toml", proj.encode())
         adapter.write_file(f"{env_rel}/julia/Manifest.toml", man.encode())
         depot_site = adapter.path("cache/julia-depot")
-        r = adapter.run_activated(
+        from .evidence import failure_evidence, run_logged
+        log_rel = f"logs/{env_rel.rsplit('/', 1)[-1]}-julia-instantiate.log"
+        r = run_logged(
+            adapter,
             f". {shlex.quote(env_dir)}/activate.sh && "
             f"mkdir -p {shlex.quote(depot_site)} && "
             f"tar -xf {shlex.quote(site_tar)} -C {shlex.quote(depot_site)} "
@@ -1347,13 +1364,13 @@ class JuliaSolver:
             f"JULIA_PKG_OFFLINE=true "
             f"julia --project={shlex.quote(env_dir + '/julia')} "
             f"-e 'using Pkg; Pkg.instantiate()'",
-            timeout=3600)
+            log_rel, timeout=3600, runner=adapter.run_activated)
         if r.rc != 0:
             raise WeftError(
                 "env.realize_failed",
                 "offline julia instantiate failed on site", stage="realize",
                 hints={"ecosystem": "julia",
-                       "log_tail": (r.err or r.out)[-1500:],
+                       **failure_evidence(adapter, log_rel, r.out),
                        "note": "the shipped depot covers packages/artifacts "
                                "the controller resolved; a platform mismatch "
                                "between controller and site can invalidate "

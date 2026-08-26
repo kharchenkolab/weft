@@ -301,11 +301,14 @@ class SessionManager:
         adapter.write_file(f"{rel}/pixi.toml", env_row["manifest"].encode())
         adapter.write_file(f"{rel}/pixi.lock", env_row["native_lock"].encode())
         from .realize import _virtual_pkg_overrides
-        r = adapter.run_cmd(
+        from .evidence import failure_evidence, run_logged
+        log_rel = f"logs/{s['session_id']}-clone.log"
+        r = run_logged(
+            adapter,
             _virtual_pkg_overrides(env_row) +
             f"{shlex.quote(adapter.pixi_bin)} install "
             f"--manifest-path {shlex.quote(adapter.path(rel))}/pixi.toml",
-            timeout=900,
+            log_rel, timeout=900,
         )
         if r.rc != 0:
             raise WeftError(
@@ -314,7 +317,7 @@ class SessionManager:
                 f"{adapter.name}", stage="realize",
                 hints={"session_id": s["session_id"],
                        "site": adapter.name,
-                       "log_tail": (r.err or r.out)[-1000:]},
+                       **failure_evidence(adapter, log_rel, r.out)},
             )
         s["_clone_seconds"] = round(time.monotonic() - _t0, 2)
         if flip:
@@ -584,8 +587,11 @@ class SessionManager:
                   # message would dodge the classifier
                   "export LC_ALL=C LANGUAGE=C && "
                   f"Rscript -e {shlex.quote(rcmd)} 2>&1")
+        from .evidence import failure_evidence, run_logged
+        log_rel = f"logs/{s['session_id']}-cran-install.log"
         try:
-            r = adapter.run_activated(wrap(script), timeout=3600)
+            r = run_logged(adapter, wrap(script), log_rel, timeout=3600,
+                           runner=adapter.run_activated)
         except WeftError as e:
             raise _keep_transport_code(
                 e, "fetching/compiling the R delta stalled or timed out",
@@ -594,7 +600,15 @@ class SessionManager:
         # presence, or a broken add would report success (R's trap)
         ref_installed: list[str] = []
         if refs and r.rc == 0:
-            marker_lines = [ln for ln in r.out.splitlines()
+            # markers come from the PERSISTED log, not the tail window:
+            # a big compile after an early ref could scroll its
+            # WEFT-INSTALLED line past the tail and mint a false
+            # silent-compile-failure verdict
+            mk = adapter.run_cmd(
+                "grep '^WEFT-INSTALLED ' "
+                f"{shlex.quote(adapter.path(log_rel))} || true",
+                timeout=60)
+            marker_lines = [ln for ln in mk.out.splitlines()
                             if ln.startswith("WEFT-INSTALLED ")]
             for ln in marker_lines:
                 ref_installed += ln.split()[1:]
@@ -612,6 +626,8 @@ class SessionManager:
                     hints={"requested": cran, "confirmed": ref_installed,
                            "out_tail": r.out[-1500:],
                            "err_tail": r.err[-800:],
+                           **failure_evidence(adapter, log_rel,
+                                              r.out),
                            **(_syslib_hints(r.out + r.err) or {})})
         verify_names = plain + ref_installed
         v_rc, v_out = 0, ""
@@ -636,7 +652,8 @@ class SessionManager:
             hints = {"requested": cran, "install_rc": r.rc,
                      "verify_rc": v_rc,
                      "out_tail": r.out[-1200:], "err_tail": r.err[-800:],
-                     "script_tail": rcmd[-400:]}
+                     "script_tail": rcmd[-400:],
+                     **failure_evidence(adapter, log_rel, r.out)}
             if code == "env.realize_failed":
                 hints.update(_syslib_hints(r.out + r.err + v_out) or {})
             if missing_line:
@@ -1211,12 +1228,16 @@ class SessionManager:
             got = self._fast_pypi(s, adapter, pypi_rec)
             if got is None or "error" in (got or {}):
                 manifest = adapter.path(f"{s['location']}/pixi.toml")
-                r = adapter.run_cmd(
+                from .evidence import failure_evidence, run_logged
+                log_rel = (f"logs/{s['session_id']}"
+                           "-clone-replay.log")
+                r = run_logged(
+                    adapter,
                     f"{shlex.quote(adapter.pixi_bin)} add --pypi "
                     f"--manifest-path {shlex.quote(manifest)} "
                     + " ".join(shlex.quote(_pixi_spec(x))
                                for x in pypi_rec),
-                    timeout=900)
+                    log_rel, timeout=900)
                 if r.rc != 0:
                     raise WeftError(
                         "env.realize_failed",
@@ -1226,7 +1247,8 @@ class SessionManager:
                         "retry or snapshot",
                         stage="realize",
                         hints={"replay": pypi_rec,
-                               "log_tail": (r.err or r.out)[-800:],
+                               **failure_evidence(adapter, log_rel,
+                                                  r.out),
                                **(_syslib_hints(r.err + r.out) or {})})
         pylib = adapter.path(f"{s['location']}/pylib")
         self._remove_overlay_line(s, adapter, "/pylib")
@@ -1337,14 +1359,18 @@ class SessionManager:
         missing: list[str] = []
         if ra.rc != 0 and ("no such option" in (ra.err + ra.out)
                            or "unrecognized arguments" in (ra.err + ra.out)):
-            r = adapter.run_activated(wrap(
+            from .evidence import failure_evidence, run_logged
+            lg = f"logs/{s['session_id']}-pypi-target.log"
+            r = run_logged(adapter, wrap(
                 f"{act} && mkdir -p {shlex.quote(pylib)} && "
                 f"python -m pip install --no-input --quiet "
-                f"--target {shlex.quote(pylib)} {specs}"), timeout=1800)
+                f"--target {shlex.quote(pylib)} {specs}"),
+                lg, timeout=1800, runner=adapter.run_activated)
             if r.rc != 0:
                 tail = (r.err or r.out)[-1500:]
                 code, retryable = _pip_failure(tail)
-                hints = {"log_tail": tail, "requested": list(pypi)}
+                hints = {"requested": list(pypi),
+                         **failure_evidence(adapter, lg, r.out)}
                 if code == "env.realize_failed":
                     hints.update(_syslib_hints(tail) or {})
                 raise WeftError(
@@ -1386,9 +1412,12 @@ class SessionManager:
                     f"--quiet --target {shlex.quote(pylib)} {pins} "
                     f"&& echo '#fetch pip'; fi")
                 t1 = _t.monotonic()
+                from .evidence import failure_evidence, run_logged
+                lgb = f"logs/{s['session_id']}-pypi-fetch.log"
                 try:
-                    rb = adapter.run_activated(wrap(fetch_cmd),
-                                               timeout=1800)
+                    rb = run_logged(adapter, wrap(fetch_cmd), lgb,
+                                    timeout=1800,
+                                    runner=adapter.run_activated)
                 except WeftError as e:
                     raise _keep_transport_code(
                         e, "fetching the pypi delta stalled or timed out",
@@ -1399,7 +1428,9 @@ class SessionManager:
                     # was always the wrong verdict for this raise
                     tail = (rb.err or rb.out)[-1500:]
                     code, retryable = _pip_failure(tail)
-                    hints = {"missing": missing, "log_tail": tail}
+                    hints = {"missing": missing,
+                             **failure_evidence(adapter, lgb,
+                                                rb.out)}
                     if code == "env.realize_failed":
                         hints.update(_syslib_hints(tail) or {})
                     raise WeftError(

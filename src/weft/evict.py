@@ -266,10 +266,15 @@ def _archive_to_controller(weft, env_id: str, site: str, adapter) -> str | None:
              "--output-file", str(out_tar), str(tdp)],
             capture_output=True, text=True, timeout=1800)
         if r.returncode != 0 or not out_tar.exists():
+            lp = weft.cas.root.parent / "logs"
+            lp.mkdir(parents=True, exist_ok=True)
+            ep = lp / f"archive-{env_id.rsplit(':', 1)[-1][:12]}.err"
+            ep.write_text((r.stdout or "") + (r.stderr or ""))
             raise WeftError(
                 "env.realize_failed", "archiving (pixi-pack) failed",
                 stage="realize",
-                hints={"log_tail": (r.stderr or r.stdout)[-1000:]})
+                hints={"log_path": str(ep),
+                       "log_tail": (r.stderr or r.stdout)[-1000:]})
         info = weft.cas.register_file(out_tar)
     meta = {"origin": f"archive:{env_id}", ARCHIVE_META: env_id,
             "platform": plat}

@@ -1352,7 +1352,10 @@ def _verify_overlay(env_row: dict, parent_row: dict, adapter: SiteAdapter,
     script = (f". {shlex.quote(adapter.path(rel))}/activate.sh && "
               + " && ".join(checks))
     wrap = wrap or (lambda s: s)
-    r = adapter.run_activated(wrap(script), timeout=600)
+    from .evidence import failure_evidence as _fe, run_logged as _rl
+    _lg = f"logs/{rel.rsplit('/', 1)[-1]}-overlay-verify.log"
+    r = _rl(adapter, wrap(script), _lg, timeout=600,
+            runner=adapter.run_activated)
     if r.rc != 0:
         raise WeftError(
             "env.realize_failed",
@@ -1362,7 +1365,7 @@ def _verify_overlay(env_row: dict, parent_row: dict, adapter: SiteAdapter,
             stage="realize",
             hints={"site": adapter.name,
                    "checks": checks[:6],
-                   "log_tail": (r.err or r.out)[-1200:]})
+                   **_fe(adapter, _lg, r.out)})
 
 
 def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
@@ -1388,14 +1391,17 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
 
     _w = wrap or (lambda s: s)
 
+    from .evidence import failure_evidence as _fe, run_logged as _rl
+    _lg = f"logs/{rel.rsplit('/', 1)[-1]}-overlay-pypi.log"
+
     def install(flags: str):
-        return adapter.run_activated(_w(
+        return _rl(adapter, _w(
             prelude +
             f". {shlex.quote(parent_dir)}/activate.sh && "
             f"mkdir -p {shlex.quote(pylib)} && "
             f"python -m pip install --no-deps --no-input {flags} "
             f"--target {shlex.quote(pylib)} -r {shlex.quote(req)} 2>&1"),
-            timeout=1800)
+            _lg, timeout=1800, runner=adapter.run_activated)
 
     r = install("--require-hashes" if all_hashed else "")
     if r.rc != 0 and all_hashed:
@@ -1411,7 +1417,7 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
             + (" …" if len(req_lines) > 6 else ""),
             stage="realize",
             hints={"requested": req_lines, "site": adapter.name,
-                   "log_tail": (r.err or r.out)[-1200:]})
+                   **_fe(adapter, _lg, r.out)})
     # entry-point scripts: pip --target does not place them on PATH
     binw = f"{adapter.path(rel)}/bin"
     adapter.run_cmd(
@@ -1690,11 +1696,18 @@ def _build_packed(
                 capture_output=True, text=True, timeout=1800,
             )
             if proc.returncode != 0 or not out_tar.exists():
+                # the tempdir dies with this frame — persist the
+                # full output where it can be re-read (L2b)
+                lp = cas.root.parent / "logs"
+                lp.mkdir(parents=True, exist_ok=True)
+                ep = lp / f"pixi-pack-{env_id.rsplit(':', 1)[-1][:12]}.err"
+                ep.write_text((proc.stdout or "") + (proc.stderr or ""))
                 raise WeftError(
                     "env.realize_failed",
                     "pixi-pack failed on the controller",
                     stage="realize",
-                    hints={"log_tail": (proc.stderr or proc.stdout)[-1500:]},
+                    hints={"log_path": str(ep),
+                           "log_tail": (proc.stderr or proc.stdout)[-1500:]},
                 )
             info = cas.register_file(out_tar)
         digest = info.ref.split(":")[-1]
@@ -1718,12 +1731,15 @@ def _build_packed(
         _wipe_aside(adapter, rel)
     else:
         adapter.run_cmd(f"mkdir -p {shlex.quote(dest)}")
-    unpack = adapter.run_cmd(
+    from .evidence import failure_evidence as _fe, run_logged as _rl
+    _lg = f"logs/{rel.rsplit('/', 1)[-1]}-unpack.log"
+    unpack = _rl(
+        adapter,
         f"cd {shlex.quote(dest)} && "
         f"{shlex.quote(adapter.path('bin/pixi-unpack'))} "
         f"--output-directory {shlex.quote(dest)} --shell bash "
         f"{shlex.quote(site_tar)}",
-        timeout=1800,
+        _lg, timeout=1800,
     )
     if unpack.rc != 0:
         raise WeftError(
@@ -1731,7 +1747,7 @@ def _build_packed(
             f"pixi-unpack failed on {adapter.name}",
             stage="realize",
             hints={"site": adapter.name, "dest": dest,
-                   "log_tail": (unpack.err or unpack.out)[-1500:],
+                   **_fe(adapter, _lg, unpack.out),
                    "retryable": True},
         )
     # pixi-unpack writes <dest>/env plus an activation script; wrap it so
@@ -1894,19 +1910,22 @@ def _build_squashfs(
     img = adapter.path(f"{rel}/image.sqfs")
     t0 = __import__("time").time()
     emit("realize.squashfs", env_id=env_id, site=adapter.name)
-    r = adapter.run_cmd(
+    from .evidence import failure_evidence as _fe, run_logged as _rl
+    _lg = "logs/mksquashfs.log"
+    r = _rl(
+        adapter,
         f"{shlex.quote(mk)} {shlex.quote(adapter.path(content))} "
         f"{shlex.quote(img)} -comp zstd -noappend -no-progress 2>&1 || "
         f"{shlex.quote(mk)} {shlex.quote(adapter.path(content))} "
         f"{shlex.quote(img)} -noappend -no-progress 2>&1",
-        timeout=3600)
+        _lg, timeout=3600)
     if r.rc != 0:
         raise WeftError(
             "env.realize_failed",
             f"mksquashfs failed on {adapter.name}",
             stage="realize",
             hints={"site": adapter.name,
-                   "log_tail": (r.err or r.out)[-1500:]})
+                   **_fe(adapter, _lg, r.out)})
     meta = adapter.run_cmd(
         f"h=$({sha256_shell(shlex.quote(img))}); "
         f"printf '%s %s' \"${{h%% *}}\" \"$(wc -c < {shlex.quote(img)} | tr -d ' ')\"",
