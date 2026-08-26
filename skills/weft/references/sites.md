@@ -24,8 +24,8 @@ w.register_site("beamlab", "ssh", {
 # resolved against the SITE's home at registration and stored
 # absolute — the result's resolved_paths echoes every rewrite.
 # pixi_source is a CONTROLLER path ("~" = the controller's home) and
-# must exist. A pre-existing registration that still carries a
-# literal "~" refuses with "re-register the site".
+# must exist. Stored configs are always absolute: one with an
+# unresolved "~" refuses — re-register the site.
 #
 # site config `prefer: "squashfs"` forces image-based realization
 # (read-only institutional envs, NFS trees); parallel-FS roots
@@ -111,11 +111,9 @@ w.register_site("cloud-gpu", "cloud", {
   says nothing about nodes). Fills per-partition `compute` records;
   realization strategy then keys on measured node egress. Run it once
   after registering a cluster; re-run on drift.
-- **`job_node_exec(job_id, cmd, why=...)`** — run a diagnostic INSIDE your
-  running job's allocation (`srun --overlap`): live `nvidia-smi` on the
-  node your job occupies, `ps`/`free` when it looks stuck, peek at
-  node-local scratch. Audited + deny-listed like site_exec; only while
-  the job RUNS (the allocation is the access).
+- **`job_node_exec(job_id, cmd, why=...)`** — diagnostics INSIDE a
+  running job's allocation; triage order and examples live in
+  references/failures.md ("Live-job triage").
 - **`site_associations(name)`** — what am *I* allowed to ask for: my
   accounts, allowed/default QOS per partition, structured QOS ceilings
   (`limits_per_user`: cpu/gpu/mem), fairshare factor. All None when the
@@ -156,6 +154,41 @@ watchdog re-checks accrued spend on every poll: on breach it cancels jobs,
 **terminates the instance**, then errors. `site_teardown(name)` is the
 explicit off switch; relay `cloud.launched` / `budget.watchdog` events to
 the user — they carry the dollars.
+
+## What registration validates
+
+Per-kind required keys are checked BEFORE any adapter is built — a
+typed `task.invalid` names what is missing, never a traceback: `local`
+and `slurm` need top-level `root`; `ssh` needs `host` + `root`; `cloud`
+is exempt (its provisioner owns the config shape). A key found NESTED
+(`{"ssh": {"host": …}}`) is called out with where it was found and
+where it belongs (`hints.found_nested` + a per-kind `example`).
+Path-shaped keys (`root`, `pixi_cache`, `durable`, `publish_staging`)
+are site-realm: a `~` resolves against the SITE's home at registration
+and is stored absolute (`resolved_paths` echoes every rewrite).
+
+## Site policy (the canonical key table)
+
+All keys live under `config["policy"]`; structured rules are ENFORCED
+(refusals name the rule and its source), notes are SURFACED.
+
+| key | governs |
+|---|---|
+| `partitions_allowed` | submit allowlist; first entry is the default partition |
+| `max_gpus`, `max_concurrent_jobs` | submit-time caps |
+| `poll_interval_s` | per-site poller cadence |
+| `storage` | role → path map (`large`/`scratch`/`node_tmp`; values may be lists — first entry becomes `WEFT_STORAGE_*`) |
+| `notes` | free-form prose, surfaced in lists/plans |
+| `max_build_cores` | source-build parallelism cap in EVERY build lane (default effective cap 8) |
+| `ppm_binaries` | `false` forces plain-source CRAN everywhere (see environments.md) |
+| `verify_on_adopt` | run a published env's verify block at adoption (default true) |
+| `on_drift` | `"revise"` auto-re-solves an env whose packages left the index |
+| `post_link` | `"warn"` accepts conda post-link scripts pixi won't run (default refuse) |
+| `ro_integrity` | `"fail"` stops on adopted-base integrity failure (default report + private rebuild) |
+| `outage_requeue_grace_s` | how long a submit cut by an outage may stay parked (default 3600) |
+| `gc_idle_days`, `kernel_idle_stop_s`, `session_idle_days`, `run_remains_days`, `logs_max_age_days`, `orphan_grace_minutes` | sweep/reaper knobs (all opt-in or defaulted conservative; `logs_max_age_days` defaults 30, `0` keeps forever) |
+
+Other files reference this table rather than re-listing keys.
 
 ## Cache hygiene
 
@@ -242,8 +275,11 @@ w.register_site("here", "slurm", {"root": "/scratch/me/.weft"})  # no host
 
 ## Institutional / managed roots (read-only base envs)
 
-When base environments are installed by an admin or service account and
-users may only READ them, list those roots in the site config:
+(The env-side verbs — publish/adopt/extend — live in
+references/environments.md "Published envs"; this section is the SITE
+config half.) When base environments are installed by an admin or
+service account and users may only READ them, list those roots in the
+site config:
 
 ```python
 w.register_site("hpc", "slurm", {..., "root": "/scratch/me/.weft",

@@ -2,13 +2,12 @@
 
 ## Setup
 
-Development happens through pixi (repo `pixi.toml`); the pixi binary lives
-in `.env/bin` (gitignored). All commands below assume:
+Development happens through pixi (repo `pixi.toml`) with a system pixi
+on PATH:
 
 ```sh
-source .env/env.sh          # PATH + pixi cache locations under .env/
-pixi run pytest -q -m "not solver and not docker"   # fast unit suite
-pixi run pytest -q                                   # everything (network + docker)
+PYTHONNOUSERSITE=1 pixi run pytest -q -m "not solver and not docker"  # fast suite
+pixi run pytest -q                            # everything (network + docker)
 ```
 
 Test markers: `solver` needs conda-forge access; `docker` needs the local
@@ -19,11 +18,11 @@ Docker daemon; `slow` marks long chaos tests.
 ```python
 from weft.api import Weft
 
-w = Weft(workspace="/path/to/project", pixi_bin=".env/bin/pixi")
+w = Weft(workspace="/path/to/project", pixi_bin="/path/to/pixi")
 
 # 1. register a site (user-confirmed action)
 w.register_site("local", "local", {"root": "/path/site-root",
-                                   "pixi_source": ".env/bin/pixi"})
+                                   "pixi_source": "/path/to/pixi"})
 w.sites_list()          # → [{name, kind, health, cpus, mem_gb, scheduler, …}]
 
 # 2. describe an environment (declarative; solved+locked once, cached forever)
@@ -151,7 +150,7 @@ realization rebuilds from the stored lock through the standard path.
 This is the honest primitive for "make it usable there NOW": never
 run a placebo task for the side effect (a fixed probe task collides
 with memoization — the recorded manifest comes back and nothing
-rebuilds; field finding). `env_repair` stays the force lever for a
+rebuilds). `env_repair` stays the force lever for a
 realization the marker still wrongly claims.
 
 `env_realize(..., wait=False)` submits the build instead of blocking:
@@ -201,7 +200,7 @@ coerced to the real container and the result echoes it
 parse refuses once naming the shape. String-typed params are never
 touched — `command='[ -f x ] && …'` stays shell.
 
-Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
+Never resubmit an unchanged failing task more than once (doctrine).
 
 ### Retaining run outputs (retain marks; storage moves only when it must)
 
@@ -453,7 +452,7 @@ behind NAT/port maps set `peer_host`/`peer_port`.
 # SSH workstation (uses your ~/.ssh config; nothing stored by weft)
 w.register_site("beamlab", "ssh", {
     "host": "beamlab", "root": "/data/$USER/.weft",
-    "pixi_source": ".env/bin/pixi",     # pushed once, hash-verified
+    "pixi_source": "/path/to/pixi",     # pushed once, hash-verified
 })
 # pixi_source is optional; registration checks bin/pixi RUNS on the site
 # and otherwise fetches the release pinned in weft.site_tools for the
@@ -479,7 +478,7 @@ w.register_site("beamlab", "ssh", {
 #     validated (weft-managed + identity flags refused, structured
 #     lever named); per-task: resources.scheduler_directives
 #   site_prelude: "module purge"   shell before EVERY job's activation
-#   capabilities_override / modules_init / prefer / policy: as before
+#   capabilities_override / modules_init / prefer / policy: see below
 # site_unregister(name) forgets a registration without touching the
 # site (refuses while work is live there; re-registering re-adopts
 # realized envs and staged data). site_teardown remains the cloud
@@ -493,7 +492,7 @@ w.register_site("beamlab", "ssh", {
 w.register_site("inner", "ssh", {
     "host": "node7.internal", "root": "/data/me/.weft",
     "jump": ["me@bastion.univ.edu"],
-    "pixi_source": ".env/bin/pixi",
+    "pixi_source": "/path/to/pixi",
 })
 
 # Slurm cluster through its login node. ro_roots: admin-owned base envs
@@ -502,7 +501,7 @@ w.register_site("inner", "ssh", {
 w.register_site("hpc", "slurm", {
     "host": "login.hpc.example.edu", "root": "/scratch/me/.weft",
     "ro_roots": ["/opt/team/weft-base"],
-    "pixi_source": ".env/bin/pixi",
+    "pixi_source": "/path/to/pixi",
     "scheduler": {"account": "phys-lab", "partition": None},
     "modules_init": "export MODULEPATH=/opt/site-modules",  # site quirk knob
     "policy": {                                # user rules, enforced+surfaced
@@ -537,7 +536,7 @@ w.env_gpu_hint("cloud-gpu")   # what cuda-version to pin for this site
 w.site_teardown("cloud-gpu")  # explicit; watchdog also tears down on overrun
 ```
 
-Session environments (interactive exploration, doc 03 §7):
+Session environments (interactive exploration):
 
 ```python
 s = w.session_start(env_id, "beamlab")           # LAZY: no clone yet —
@@ -585,7 +584,7 @@ built-here base they clone it (CoW where the volume supports it); on
 an **adopted/imported base** — a read-only pack or unpacked archive
 whose packages the site's cache has never held (a fact fixed at
 adoption and never re-probed) — the clone would re-download the entire
-base from the index (1.6 GB in the field case; impossible on an
+base from the index (gigabytes over the wire; impossible on an
 egress-restricted node), so they refuse with `session.cold_base` and
 three levers: `extends_env` (mint a real delta env — the citable twin
 of the same composition), run it where the base was *built* (warm
@@ -650,8 +649,8 @@ attempts. Use it for capability installs where correctness beats
 latency; the default stays the fast lane with the snapshot as the
 deferred check. Failing solves persist their stderr as
 `solve/<hash>/solve.err` and emit an `env.solve_conflict`/
-`env.solve_failed` event — a swallowed exception no longer destroys
-the forensics. `cran_repos=[urls]` names extra repositories for the cran
+`env.solve_failed` event, so the forensics survive any
+consumer-side exception handling. `cran_repos=[urls]` names extra repositories for the cran
 lane in EITHER mode (validated at intake; the attempt records the
 `repositories` actually used, like `spelling`). `probe=True` returns
 per-lane availability FACTS (404 is false; transport trouble is
@@ -840,10 +839,6 @@ Partition records carry `gres` (GPU model/count) and `features`; GPU asks
 validate against them (login nodes have no GPUs), and refusals name the
 fitting partitions.
 
-Off-CI regression scenarios live in `misc/scenarios/scenarios.py`
-(gitignored): 21 end-to-end runs against dockerized sites —
-`pixi run python misc/scenarios/scenarios.py`.
-
 ### Multi-ecosystem environments (R/CRAN/GitHub, more to come)
 
 R specs can widen the repository universe beyond the dated base mirror:
@@ -872,9 +867,9 @@ w.env_ensure(spec, dry_run=True)     # test a fix; nothing stored
 w.env_why(env_id, "data.table")      # what pulls it in / the locked record
 ```
 
-**The cran layer deltas against the conda layer** (measured on aba 1.2:
-25 of 26 cran installs were re-building, from source, packages the
-conda layer had binary-installed a minute earlier — 11.7 min → seconds).
+**The cran layer deltas against the conda layer** (measured: 25 of 26
+cran installs were re-building, from source, packages the conda layer
+had binary-installed a minute earlier — 11.7 min → seconds).
 Closure members the conda lock already provides on every platform
 (`r-<name>`) are dropped from the layer at solve time and recorded in
 `layers.cran.satisfied_by_conda` with both versions; top-level cran and
@@ -889,8 +884,7 @@ plain source URL, honest and slower). Source builds run with
 narrates: `realize.prefix`(+`.done`) around the conda build,
 `realize.layer`(+`.done`) per layer, `realize.progress`
 {layer, done, total} every ~5 s inside a long install — a
-multi-minute silent call reads as a hang and invites cancels
-(observed live, twice).
+multi-minute silent call reads as a hang and invites cancels.
 
 Missing interpreter → `env.layer_conflict` names exactly what to add
 (`=`/`==` version pins on the interpreter are fine — the check parses
@@ -981,9 +975,9 @@ nonterminal jobs a previous controller left behind:
   `job.redrive_exhausted` instead of crash-looping forever.
 - `"off"`: nothing happens until `reconcile()` — inspection tooling.
 
-Before this, a controller kill mid-job left the row RUNNING forever
-while the finished task's exit record sat on disk (aba bug3, reproduced
-live). Multiple controllers over one workspace are safe: collection is
+The invariant: a controller kill mid-job must never leave a row
+RUNNING forever while the finished task's exit record sits on disk —
+resume reads disk truth. Multiple controllers over one workspace are safe: collection is
 claimed in the store (one collector wins; a crashed collector's claim
 goes stale), like the drive claim.
 

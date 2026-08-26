@@ -8,9 +8,9 @@ an unchanged failing task more than once.
 |---|---|---|
 | `env.solve_conflict` | pins unsatisfiable | `hints.solver_message` names them; relax the offending pin in `hints.user_pins`, re-ensure |
 | `env.solve_failed` | index/network trouble | retryable — retry once, then tell the user |
-| `env.realize_failed` | build/unpack broke on site | `hints.error_regions` carry the CAUSAL lines (marker-anchored — a dep-availability error prints at the head, out of any tail's reach); the FULL log is at `hints.log_path` on the site (`site_exec "cat <path>"`); `hints.failure_class == missing_system_lib` names the build_deps lever; if corrupt → `env_repair(env_id, site)` + resubmit |
+| `env.realize_failed` | build/unpack broke on site | `hints.error_regions` carry the CAUSAL lines (marker-anchored — a dep-availability error prints at the head, out of any tail's reach); the FULL log is at `hints.log_path` on the site (`site_exec "cat <path>"`); compile-signature failures were already retried once with weft's toolchain before this surfaced, so `hints.failure_class == missing_system_lib` means a LIBRARY: add its conda package to the spec's `deps.conda` (the .so links it at runtime), or `session_install(build_deps=[...])` in a session; if corrupt → `env_repair(env_id, site)` + resubmit |
 | `env.layer_conflict` | one dep layer contradicts another (e.g. `cran` deps without `r-base` in `deps.conda`) | hints name the missing piece — add it to the spec |
-| `env.not_realized` | env exists but was never built on this site (kernels need this) | run any task with the env there first (even `true`) |
+| `env.not_realized` | env exists but was never built on this site | `env_realize(env_id, site)` — kernels/sessions/tasks realize it themselves, so this surfaces only from degenerate embeddings; NEVER a placebo task (memoization returns the recorded manifest and nothing rebuilds) |
 | `env.unsatisfiable_on_site` | musl libc, missing module, no runtime | `hints.suggestion` / alternatives; re-place to another site |
 | `env.platform_mismatch` | env locked for other platforms than the site's (e.g. linux-64 env, osx-arm64 site) | add `hints.site_platform` to the spec's `platforms`, `env_ensure` again (new EnvID) |
 | `internal.error` | a weft bug, not a known failure mode | `hints.traceback_tail` has the trace; a retry may or may not help — tell the user, include the trace |
@@ -30,6 +30,15 @@ an unchanged failing task more than once.
 | `task.dep_failed` | an `after` dependency failed/vanished — this job never ran | fix + re-run the upstream job (`hints.dependency`), then resubmit this one |
 | `env.unavailable_in_lanes` | every lane YOU ranked ran to a verdict and none provided it | read `hints.attempts` — each attempt carries its own lane's typed error and levers; there is no single fix |
 | `env.evict_blocked` | overlay children or live jobs/sessions/kernels use this env | hints name them: cascade=True for children, cancel/stop for live work |
+| `env.post_link_scripts` | packages stage conda post-link scripts pixi does not run — recorded installed, payloads possibly absent | `hints.levers`: a `post_install` step performing the payload with PINNED content (ending `rm` of the script), or site policy `post_link: "warn"` |
+| `env.activation_failed` | activation itself failed — YOUR COMMAND NEVER RAN (not a user-code failure) | check activate.sh output in the job log; a clobbering `site_prelude`/module init is the usual cause |
+| `data.transfer_failed` | bytes did not arrive (route died mid-move) | retryable — resubmit re-plans the route; `doctor()` if it repeats on one site |
+| `site.bootstrap_failed` | the site's shim/tools could not be placed | hints name the step; `pixi_source`/`WEFT_PIXI_VERSION` are the levers, `register_site` again is the retry |
+| `sched.timeout` | a scheduler/transport call exceeded its budget | retryable infra — not a job verdict; `site_load`/`doctor` if persistent |
+| `state.conflict` | another in-flight operation holds the claim (one ensure per session, one collector per job) | retryable — wait and re-call; stale claims are taken over automatically |
+| `tool.bad_arguments` | the call does not bind to the verb's signature | `hints.signature` is the live one; stringified arrays/objects on container params are auto-coerced, so this usually means a real parameter mistake |
+| `session.cold_base` | conda add on an adopted/packed base (cold cache — a clone would re-download the base) | `hints.delta_lanes` (pypi/cran layer without a clone) and `hints.options` (`extends_env` with the base EnvID, warm-cache site, `full_clone=true`) |
+| `retain.no_durable` / `retain.keep_exists` / `data.last_copy` / `data.pinned` / `data.external_home` | retention/eviction refusals | see references/data.md — each names its levers |
 
 Session install failures discriminate: a dead package index is
 `env.solve_failed` (retryable — the packages are not missing, the index

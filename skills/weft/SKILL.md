@@ -100,10 +100,13 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
    (seconds, up to 3600) and output caps (`max_out=`/`max_err=`);
    `session_exec` takes `timeout=` too — a long rebuild belongs on
    these levers, not on raw ssh. A miscalled verb (unknown/missing
-   parameter) answers `tool.bad_arguments` with the live signature
-   `tool.bad_arguments` with the live signature — restart recovery is
-   automatic (`Weft(resume=)`); `reconcile()` additionally re-drives
-   rows whose driver died before submit. Cancel with a cause:
+   parameter) answers `tool.bad_arguments` with the live signature.
+   Never hand-serialize containers: a JSON-stringified array/object on
+   a list/dict-typed param is coerced to the real container (the
+   result echoes `coerced_params`); an unparseable bracket-leading
+   string refuses naming the shape. Restart recovery is automatic
+   (`Weft(resume=)`); `reconcile()` additionally re-drives rows whose
+   driver died before submit. Cancel with a cause:
    `task_cancel(id, why=...)`.
 7. **On a new cluster, discover before you submit.** `sites_describe`
    (partitions with GRES/features/limits) → `site_associations` (MY
@@ -125,12 +128,17 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
   live load & per-partition ETAs, module discovery, the site notebook,
   budgets, teardown.
 - `references/environments.md` — spec schema, layering (`extends` /
-  `extends_env` + overlay realization), sessions+snapshot, GPU/CUDA
-  pinning, realization strategies, repair, reuse, eviction semantics.
+  `extends_env` + overlay realization), URL-pinned wheels,
+  sessions+snapshot, `ensure_available` (the one-verb install path:
+  lanes, dialects, probe), published/adopted institutional envs, extra
+  R repositories, GPU/CUDA pinning, realization strategies, repair,
+  reuse, eviction semantics.
 - `references/data.md` — DataRefs, staging plans, chaining, fetch,
-  transfer progress, chunked big files, site-to-site routing (shared-FS
-  links / direct pulls — the controller carries bytes only as a last
-  resort), reproducibility bundles.
+  RETENTION (keeping a run's files durable: `run_retain`/`run_forget`/
+  `run_discard`, pins, the (run, relpath) key), ranged/batched reads,
+  eviction, transfer progress, chunked big files, site-to-site routing
+  (shared-FS links / direct pulls — the controller carries bytes only
+  as a last resort), reproducibility bundles.
 - `references/jobs.md` — lifecycle, arrays & digests & retry, monitoring,
   queue reasons, logs, cancel, memoization, provenance.
 - `references/kernels.md` — persistent interactive interpreters
@@ -142,4 +150,5 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
 - `references/failures.md` — full error taxonomy with the remediation
   playbook; crash/outage semantics.
 - `references/scenarios.md` — worked end-to-end patterns (offload,
-  cluster scan, GPU burst, compile-from-source, exploration).
+  cluster scan, GPU burst, compile-from-source, site-licensed code,
+  exploration, after-anything-weird recovery).

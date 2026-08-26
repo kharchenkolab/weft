@@ -48,7 +48,7 @@ table knows which sites hold what; staging is the set difference.
 ## Retention: retain marks; storage moves only when storage demands it
 
 Runs leave files; most are never wanted, some become precious LATE.
-A KEEP is a pinned selection at a durable address (misc/retention2.md)
+A KEEP is a pinned selection at a durable address
 — ordinary browsable files, run-level provenance in a `.weft-run.json`
 sidecar. WHERE keeps live follows from the site's declared storage:
 
@@ -75,9 +75,12 @@ w.run_retain(target, include=["figs/**"], label="proj-9")
                                        # paths: 'outdir/' collects the
                                        # folder, '*name.csv' matches at
                                        # any depth, a bare basename is
-                                       # top-level only — a zero-match
-                                       # refusal names the NEAR-MISS
-                                       # paths the run actually holds.
+                                       # top-level only. A zero-match
+                                       # refusal TEACHES: hints carry
+                                       # near_misses (pattern → closest
+                                       # real paths), files_in_run,
+                                       # sample_paths (when nothing is
+                                       # close), and grammar.
 w.run_retain(target, include=[...], settle="now")
                                        # "these are DONE, keep them, the
                                        # run keeps living": captures the

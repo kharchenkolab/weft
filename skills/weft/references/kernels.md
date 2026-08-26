@@ -8,8 +8,8 @@ work through login nodes and survive disconnects.
 ```python
 k = w.kernel_start("beamlab", "python", env_id=env_id,
                    label="phonon exploration")["kernel_id"]
-# env must already be realized on the site (error: env.not_realized —
-# run any task with it first, even `true`)
+# env_id takes an EnvID OR an inline spec (auto-ensured, same contract
+# as session_start); a solved env auto-realizes on the site
 # label: display handle (≤200 chars) in kernel_status / list_kernels /
 # kernel.died; kernel_restart's successor inherits it
 
@@ -81,7 +81,8 @@ wasteful, or wouldn't reproduce it), promote instead:
 
 ```python
 m = w.kernel_promote(k, blocks=[7])     # only successful blocks
-m["reproducibility"]   # "transcript" — one rung below "task"
+m["reproducibility"]   # "state-dependent" — the worst rung; the
+                       # components name the interpreter-state step
 m["transcript"]        # the FULL ordered chain (0..7) that built the state
 m["outputs"]           # the blocks' artifacts, content-addressed
 ```

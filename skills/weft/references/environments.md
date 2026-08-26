@@ -24,7 +24,9 @@ w.env_ensure({
   "deps": {"conda": ["python =3.12", "root >=6.32"], "pypi": ["zfit ==0.24.*"]},
   # release-asset wheels pin as PEP 508 direct refs — #sha256= REQUIRED
   # (controller fetches + CAS-carries; sites never fetch URLs; installs
-  # --no-deps --no-index, so the dep closure rides the normal lanes):
+  # --no-deps --no-index, so the dep closure rides the normal lanes).
+  # WHEELS ONLY (an sdist URL refuses — compiled stacks belong in
+  # deps.pypi/deps.conda); file:///abs paths are CONTROLLER-realm:
   #   "pypi": ["pkgview @ https://…/pkgview-2.1-py3-none-any.whl#sha256=<hex64>"]
   "variants": {"linux-64": {"conda": ["cuda-version <=12.4", "cupy"]}},
   "modules": ["espresso/7.2"],         # site-provided software (check first:
@@ -110,20 +112,26 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     A contradiction raises `env.layer_conflict` naming the package and the
     lever (`extends` for a free re-solve). This is the right tool
     mid-analysis: "add emcee to what I have" without re-solving the world.
+- **R, in one map:** spec-level packages here (`deps.cran` + the cran
+  delta below); session-time adds in the Sessions section; ranked
+  installs + dialects under `ensure_available` above; extra
+  repositories in "Extra R repositories" at the bottom.
 - **The cran layer deltas against the conda layer**: closure members
   conda already provides (`r-<name>`) never install — the layer keeps
   only genuinely-new packages (github refs, non-conda deps); the lock
   records `satisfied_by_conda` with both versions. So the FAST recipe
   for R envs stands: put everything you can in `deps.conda`
   (conda-forge binaries), keep `deps.cran` for github refs and
-  CRAN-only packages — the closure around them costs nothing extra now.
+  CRAN-only packages — the closure around them costs nothing extra.
   PPM binary trees serve realize-time installs where the site's distro
   is whitelisted, with a per-package load-check that rebuilds broken-
   ABI binaries from source (EVERY cran install lane: solver realize,
   overlay, and session rlib — session `cran_repos`/site config PPM
   URLs platformize too); site policy `ppm_binaries: false` forces
   plain source everywhere (the conda-R-vs-distro-binary posture).
-  Realization narrates (`realize.prefix`/`realize.layer`/
+  Source-build parallelism is capped min(nproc, 8) in every build
+  lane; site policy `max_build_cores` is the lever (login nodes are
+  shared). Realization narrates (`realize.prefix`/`realize.layer`/
   `realize.progress` events) — poll events during env_realize instead
   of assuming a silent call hung. Version-pinned interpreters
   ("r-base=4.4") pass the cross-layer check.
@@ -154,7 +162,8 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
 - **ensure_available** — the one-verb install path:
   `ensure_available({"session": sid}, {"pypi": [...], "cran": [...]})`
   (tagged; `{"session_id"}`/`{"env_id"}` are accepted target-key
-  aliases) or `ensure_available({"session": sid}, ["Name"],
+  aliases, and `{"kernel": kid}` resolves to the kernel's session when
+  it has one, else its env) or `ensure_available({"session": sid}, ["Name"],
   lanes=["conda", "cran"])` (ranked — YOUR lane order; the substrate
   speaks each lane's dialect: an R-namespace bare name on conda tries
   `r-<lowercase>` then `bioconductor-<lowercase>` on a not-found miss
@@ -184,7 +193,8 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   "missing_system_lib"` (+ `missing_system` header/library name):
   the remedy is an isolated env with a full solve, NOT a session
   retry.
-- **Sessions (interactive):** `session_start(spec_or_env_id, site)` → a
+- **Sessions (interactive):** `session_start(env_id, site)` — the
+  `env_id` param takes an EnvID or an inline spec — → a
   scratch env, cloned LAZILY: start attaches to the base realization in
   place (including an adopted read-only squashfs pack — no per-session
   prefix, which matters enormously on BeeGFS/Lustre); the writable
@@ -273,17 +283,16 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     refusal lists the same fields). Crash leftovers (record active,
     directory gone) are retired by `gc_orphans`; the OPT-IN site policy
     `session_idle_days` lets the sweep stop kernel-less idle sessions.
-  mutable scratch clone (one call: it realizes the base for you);
-  `session_exec`, `session_install(conda=[...])`,
-  `session_run_installer(cmd, note=...)`; when it stabilizes,
-  `session_snapshot(notes=[...])` → a real EnvID carrying whatever you did.
-  `session_freezable(id)` answers "can this still freeze?" WITHOUT the
-  mint (dry-run solve; honest: seconds, and a statement about NOW).
-  `fast=False` now solves at ADD TIME on the cran lane too (it silently
-  didn't before); R add failures carry `solver_message`, and R adds
-  report `shadows_base` — rlib packages MASKING same-named base-library
-  packages via .libPaths() order.
-  Iterate freely here — that's what it's for. See "Adaptive moves" below.
+  - The verb set: `session_exec`, `session_install(conda=/pypi=/
+    cran=[...])`, `session_run_installer(cmd, note=...)`; when it
+    stabilizes, `session_snapshot(notes=[...])` → a real EnvID carrying
+    whatever you did. `session_freezable(id)` answers "can this still
+    freeze?" WITHOUT the mint (dry-run solve; honest: seconds, and a
+    statement about NOW). `fast=False` solves at ADD TIME on every
+    lane; R add failures carry `solver_message`, and R adds report
+    `shadows_base` — rlib packages MASKING same-named base-library
+    packages via .libPaths() order. Iterate freely here — that's what
+    it's for. See "Adaptive moves" below.
 - **Reuse:** identical resolutions share EnvIDs; realizations re-adopt
   across workspaces from the site marker; `env_status(env_id)` shows the
   per-site realization matrix (your memory of what is installed where).
@@ -319,9 +328,8 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   the source tree as an input; downstream tasks run the binary via
   site-side chaining. Invoke compilers by NAME from the activated
   PATH (`g++`, `gcc`, `cc`) or as `"${CXX:-g++}"` — conda-forge's
-  compiler metapackages 2.0 (2026) no longer export `CC`/`CXX` at
-  activation (the activate.d wrappers were dropped upstream), so
-  `${CXX}` alone is empty on any FRESH solve.
+  compiler metapackages do not export `CC`/`CXX` at activation, so
+  bare `${CXX}` is empty.
 
 ## Julia (and the solver registry generally)
 
@@ -369,8 +377,8 @@ worse than an error.
 if a fresh solve reproduces the same identity, the stale lock is re-derived
 (nothing changes); if the world genuinely moved, you get a **new** EnvID
 plus a package-level diff — the old one is never silently redefined. Sites
-can do this automatically with policy `on_drift: "revise"`; the default is
-still to fail with a cause.
+can do this automatically with policy `on_drift: "revise"`; the default
+fails with a cause.
 
 **Warm near-matches.** `env_find_near(spec, site="hpc")` lists already-
 realized envs close to what you want, with their distance, missing

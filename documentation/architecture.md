@@ -1,9 +1,10 @@
 # Weft — Architecture
 
-*Implementation documentation. The design intent lives in `docs/` (design
-codename "Fabric"); this file describes what is actually built, where it
-deviates, and why. Package and CLI name: **weft** — the thread woven across
-the warp; "fabric" collides with the Python SSH library (docs/06 §5).*
+*Implementation documentation: what is actually built and why. Where the
+build deviated from the original (internal) design notes, the deviation and
+its rationale are recorded here — see the decisions log at the bottom.
+Package and CLI name: **weft** — the thread woven across the warp ("fabric"
+collides with the Python SSH library).*
 
 ## System shape
 
@@ -29,24 +30,39 @@ Module map (`src/weft/`):
 | module | role |
 |---|---|
 | `ids.py` | canonical JSON, sha256 file/tree/chunk hashing, ID schemes |
-| `errors.py` | the structured error taxonomy (doc 05 §3) |
-| `spec.py` | EnvSpec model + composition algebra (`extends`, merge rules) |
-| `lock.py` | pixi-driven solve, lockfile canonicalization, EnvID |
-| `envman.py` | spec/EnvID cache pipeline (re-solve only on request) |
+| `errors.py` | the structured error taxonomy + CODES registry |
+| `spec.py` | EnvSpec model, composition algebra (`extends`), shared grammars (cran refs, direct-URL pins, lane dialects) |
+| `lock.py` | pixi-driven solve, lockfile canonicalization, EnvID, solve-failure classification |
+| `envman.py` | spec/EnvID cache pipeline (re-solve only on request), extends merge, URL-pin carriage |
+| `solvers.py` | non-conda layer solvers (CRAN/GitHub, Julia): dated-snapshot resolution, layer realize/overlay/pack |
+| `overlay.py` | parent/child delta classification (overlay eligibility) |
+| `toolchain.py` | weft-owned build toolchain (site-side, on PATH for builds only) + compile cache keys |
 | `cas.py` | workspace CAS (hardlink blobs, tree manifests, staging math) |
-| `data.py` | staging plans, sandbox materialization, output collection |
-| `store.py` | SQLite: sites, envs, realizations, locations, jobs, events, audit |
+| `data.py` | staging plans, sandbox materialization, output collection, range reads |
+| `store.py` | SQLite: sites, envs, realizations, locations, jobs, sessions, events, audit |
 | `capability.py` | probe normalization + resource-fit checks |
 | `strategy.py` | pure realization-strategy decision table |
-| `realize.py` | prefix realizer (pixi install --frozen; marker-fenced) |
+| `realize.py` | realizers (prefix/packed/squashfs/overlay; marker-fenced), post_install, URL-pin install |
+| `publish.py` | institutional publish/adopt/unpublish over squashfs + catalogs |
 | `task.py` | Task model, validation, content hash (memoization key) |
-| `runner.py` | job lifecycle: PENDING→…→DONE/FAILED/CANCELLED, reconcile |
+| `runner.py` | job lifecycle: PENDING→…→DONE/FAILED/CANCELLED, deferral, reconcile |
+| `poller.py` | per-site batched polling, outage machinery, re-drive gating |
 | `placement.py` | site:"auto" filter + ranked scoring with reasons |
+| `session.py` | scratch sessions: lazy clone, pylib/rlib lanes, install verify, snapshot, ensure_available |
+| `kernel.py`, `kernels/` | persistent interpreters (python/R/julia drivers, file protocol) |
+| `service.py` | endpoint-publishing processes + tunnels |
+| `retain.py`, `evict.py`, `gc.py` | run retention (keeps, pins, TTL), footprint control, guarded sweeps |
+| `verify.py`, `probe.py` | postcondition oracles; per-lane availability probes |
+| `evidence.py` | persisted-log runner, error-region extraction, build-failure classifiers |
+| `remedies.py` | the remedy registry (gated advice, one owner per suggestion) |
+| `policy.py`, `grade.py`, `gpu.py` | per-site user policy; reproducibility grading; GPU/CUDA hints |
 | `preview.py`, `classify.py` | output previews; log signature extraction |
-| `adapters/` | `base.py` protocol, `local.py` (reference oracle) |
-| `transfer/` | `base.py` protocol, `local_link.py` |
+| `bundle.py`, `sources.py` | provenance-closure export/import; installer source capture |
+| `site_tools.py`, `cachedir.py`, `fileio.py` | pinned site binaries; cache-dir resolution; atomic file IO |
+| `adapters/` | `base.py` protocol; `local.py` (reference oracle), `ssh.py` (mux, jump chains), `slurm.py`, `cloud.py` |
+| `transfer/` | `base.py` protocol; `local_link.py`, `rsync_ssh.py`, `ssh_pipe.py` |
 | `shim/weft-shim` | POSIX sh site-side helper (no daemon, no python needed) |
-| `api.py` | the agent tool surface |
+| `api.py`, `mcp_server.py` | the agent tool surface (typed boundary, coercion, aliases); stdio MCP host |
 
 ## Identity model (what makes reuse work)
 
@@ -54,18 +70,17 @@ Module map (`src/weft/`):
 - `env:v1:<sha256>` — canonical *lock* document: per-platform sorted
   package records **plus an `extras` block** (modules, post_install,
   container_base, env_vars). Extras alter what a realization does, so they
-  alter identity — a deviation from the strict "hash of lockfile only"
-  wording in docs/03, chosen so two specs differing only in modules can
-  never share a realization record.
+  alter identity — a deliberate widening of the strict "hash of lockfile
+  only" design wording, so two specs differing only in modules can never
+  share a realization record.
 - `dref:<sha256>` — file blob, or canonical tree manifest, or Merkle root
   for files ≥ 64 MiB (chunk list kept for future delta transfer).
 - `task:v1:<sha256>` — env + inputs + code + command + outputs + array +
   env_vars. Site and resources are excluded: the same computation on a
   different site or with a bigger ask memoizes to the same result.
 
-The EnvID scheme is versioned (`env:v1:`), resolving docs/06's open
-question: future canonicalization changes bump the version rather than
-orphaning caches.
+The EnvID scheme is versioned (`env:v1:`): future canonicalization
+changes bump the version rather than orphaning caches.
 
 ## The shim contract
 
@@ -81,7 +96,7 @@ BSD `time -l` with byte→KB rss conversion; `/proc` → `sysctl`/`vm_stat`;
 so a group interrupt still lets the runner write its exit record). No
 remote daemon, no remote Python.
 
-**Deviation from docs/04 §5:** previews are not generated by a site-side
+**Deviation from the original design:** previews are not generated by a site-side
 preview library. The controller fetches each output's first 32 KiB via
 `shim head` and renders previews locally (`preview.py`). Same token
 economy, no Python-on-site requirement. Site-side generation can slot in
@@ -146,7 +161,7 @@ idempotent. Jobs whose process vanished without an exit record fail as
 6. **Audit log** — every submission, cancel, and diagnostic command with
    its rationale; `audit_tail()` renders the activity feed.
 
-## Phase 1: SSH sites
+## SSH sites
 
 `SSHAdapter` invokes the system `ssh` (BatchMode, ControlMaster multiplexing
 under `/tmp/weft-ssh-<uid>/`), so the user's aliases/ProxyJump/MFA all work
@@ -176,14 +191,19 @@ setsid wrapper pid can exit immediately; "lost" verdicts are double-checked
 site-side (1s grace for the exit-code rename) and require two consecutive
 polls controller-side before `sched.node_failure` is raised.
 
-Session environments (`session.py`): scratch clone of a realized env's
-project (fresh hardlink install from the shared package cache), mutable via
-`pixi add`, exec'd through `pixi shell-hook`; `snapshot()` synthesizes the
-minimal spec delta (`extends` the base spec hash + accumulated additions)
-and re-solves properly into a citable EnvID. Sessions refuse to start on
-sites without index access — the error points at packed realization instead.
+Session environments (`session.py`): mutable scratch over a realized
+base. Start is LAZY (no clone; execution attaches to the base realization
+in place); the first mutation picks a lane by write-need — pypi adds lay a
+`pylib` overlay (PYTHONPATH-composed, no clone), cran adds an `rlib` layer
+(R_LIBS-composed), conda adds clone the prefix (`pixi add` against the
+clone; CoW where the volume supports it, refused with levers on cold
+adopted bases). `snapshot()` synthesizes the delta spec over `extends_env`
+(the base that RAN is the base that freezes — resolvable even on
+adopt-only workspaces) and re-solves into a citable EnvID. A clone on a
+site without index access refuses at the first mutation, naming the
+delta lanes that still work there.
 
-## Phase 2: Slurm sites
+## Slurm sites
 
 `SlurmAdapter` extends `SSHAdapter` — a login node is an SSH-reachable
 POSIX machine; only the scheduler verbs differ. It adds: partition
@@ -197,17 +217,17 @@ map onto the taxonomy: TIMEOUT → `job.walltime_exceeded`, OUT_OF_MEMORY →
 `job.oom`, NODE_FAIL → `sched.node_failure`, CANCELLED (external) →
 CANCELLED.
 
-Arrays are currently fan-out (N submissions with `WEFT_ARRAY_INDEX` in the
-env; distinct memoization per element). Native `sbatch --array` with one
-submission per group is a planned optimization for login-node politeness —
-the fan-out semantics (per-element manifests) are already the contract.
+Arrays on Slurm are native: ONE `sbatch --array=0..N-1` submission per
+group (login-node politeness), with the fan-out semantics — per-element
+manifests, distinct memoization via `WEFT_ARRAY_INDEX` — as the contract.
+Local/ssh sites fan out into element jobs with identical semantics.
 
 **Modules** (scenario S4): a spec's `modules` list is loaded in the
 activation prelude, which sources the standard module init scripts first
 (non-interactive shells don't get `/etc/profile`) and applies the site's
 `modules_init` config snippet (e.g. `export MODULEPATH=...`) — site quirks
 stay in site config, not code. `module_check(site, names)` answers
-availability lazily and caches per site (doc 02 §3); a failed load aborts
+availability lazily and caches per site; a failed load aborts
 activation with exit 90 and the module name in the log.
 
 **Packed realization** (air-gapped compute): `pixi-pack` runs on the
@@ -285,13 +305,13 @@ every sandbox as `WEFT_STORAGE_LARGE` / `WEFT_STORAGE_SCRATCH` /
 `WEFT_STORAGE_NODE_TMP` so agent-written commands can target the right
 filesystem tier.
 
-## Phase 3: Cloud sites
+## Cloud sites
 
 `CloudAdapter` owns an ephemeral SSH site behind a `CloudProvisioner` seam
 (`launch/describe/teardown/rate_usd_per_hour`) — the SkyPilot-shaped
 boundary. Registration is free: capabilities are synthesized from the
 resource ask; nothing is provisioned until the first control-plane touch.
-Money is a hard constraint (doc 05 §6): pre-launch, rate × `max_hours`
+Money is a hard constraint: pre-launch, rate × `max_hours`
 must fit `budget.max_usd` or the launch is refused with `budget.exceeded`
 and *nothing exists to pay for*; while running, every poll re-checks
 accrued spend and the runaway watchdog cancels, tears down, then raises —
@@ -379,7 +399,8 @@ memory build); plans carry method + time estimates before any bytes move.
 (`solvers.default_solvers()` — one class + one entry to add an ecosystem)
 resolves each non-conda section into a *layer* of the canonical lock:
 records (name, version, source, hashes) plus a realization recipe. The
-conda+pypi pair stays one pixi-solved layer and realizes as before; later
+conda+pypi pair stays one pixi-solved layer with the standard prefix
+realization; later
 layers install into subdirectories of the same env and append activation
 lines. Identity: conda-only specs keep their exact v1 hashes (cache
 continuity was a hard requirement); envs with extra layers get `env:v2:`.
@@ -392,11 +413,15 @@ metadata against a **dated Posit Package Manager snapshot** — the date
 (pin via `system_requirements.cran_snapshot`, else captured at first
 solve) freezes the answer forever. GitHub refs `owner/repo@ref` resolve
 to exact commit SHAs (recorded, with tarball URLs) and their DESCRIPTION
-deps join the closure. Realization installs against the same snapshot
-(PPM serves Linux binaries via the UserAgent convention) then GitHub
-tarballs by SHA; needs network at the install point in v1 — the failure
-hint says so and points at conda-forge `r-*` or build-as-task for
-air-gapped sites. (pak was the original plan; its bundled binaries need
+deps join the closure. Realization installs against the same snapshot —
+PPM serves Linux binaries via the per-site `__linux__/<codename>` URL
+segment (detected from a live os-release read; site policy
+`ppm_binaries: false` forces source) plus R's UserAgent convention, and
+every binary-capable lane carries a loadNamespace check that rebuilds
+ABI-broken binaries from source — then GitHub tarballs by SHA. Air-gapped
+sites get packed delivery: the controller downloads the locked closure,
+ships it as one CAS blob, and the site installs offline from source in
+dependency order. (pak was the original plan; its bundled binaries need
 glibc ≥2.32, which the snapshot design both avoids and improves on.)
 
 Operability: per-layer solve summaries (`layers` in the ensure result,
@@ -414,7 +439,7 @@ blocks against persistent interpreter state, through a file protocol
 statefulness with no sockets, working over any control channel and
 surviving disconnects.
 
-**File-protocol invariant (bug2): any file a concurrent reader consumes
+**File-protocol invariant: any file a concurrent reader consumes
 on first sight MUST be published atomically** — write a tmp sibling,
 rename into place; existence == completeness. Both directions honor it:
 the drivers publish `.rc` via rename (all three languages), and the
@@ -422,9 +447,9 @@ controller's `adapter.write_file` stages + verifies + renames (`.code`
 is consume-once: the driver reads it the instant it exists and never
 re-reads). Readers that RETRY until content parses (job `exit_code`,
 pid probes) are self-healing and merely benefit; consume-once readers
-are correctness-critical. The classification of every polled file lives
-in misc/polled_files_audit.md; the conformance suite pins the writer
-side per adapter. Async-first: `kernel_exec(wait=False)` →
+are correctness-critical. Every polled file is classified in an
+internal audit ledger; the conformance suite pins the writer side per
+adapter. Async-first: `kernel_exec(wait=False)` →
 `kernel_poll`; long blocks are watchable. The site poller watches kernel
 jobs with kernel semantics: death (native crash, OOM) emits `kernel.died`
 naming the **killing block** with the log tail; `kernel_restart(replay=
@@ -445,7 +470,7 @@ producing jobs down to user-registered data. All links were already in
 the store; this API is the one-call join an agent or a methods appendix
 needs.
 
-## Cluster readiness (rounds A–G)
+## Cluster operations
 
 **Discovery** is decision-grade: `capabilities:v2` records partitions with
 GRES/features/limits + scontrol detail; `site_associations` returns the
@@ -493,7 +518,7 @@ surfaced in `sites_describe`.
 
 | decision | rationale |
 |---|---|
-| Package renamed `weft` | docs/06 open question; "fabric" collides on PyPI |
+| Package renamed `weft` | "fabric" collides on PyPI |
 | Extras hashed into EnvID | modules/post_install/env_vars change behavior |
 | Marker-fenced builds, not rename | pixi prefixes are not relocatable |
 | Controller-side previews from `head` bytes | no Python requirement on sites |
@@ -501,5 +526,5 @@ surfaced in `sites_describe`.
 | `env: null` tasks (bare site env) | fast tests; system-tool tasks; not in docs |
 | Executables copied, not hardlinked, into sandboxes | chmod would mutate CAS inode |
 | Workspace pseudo-site `@workspace` in location table | site named "local" must not collide with the workspace CAS |
-| Array = fan-out into element jobs (local/ssh) | per-element manifests for free; real scheduler arrays come with the slurm adapter |
+| Array = fan-out into element jobs (local/ssh); native `--array` on Slurm | per-element manifests either way; one submission where the scheduler supports it |
 | Controller-side walltime on non-scheduler sites | uniform `job.walltime_exceeded` semantics |

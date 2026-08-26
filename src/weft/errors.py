@@ -17,7 +17,7 @@ CODES = {
     "env.layer_conflict": "one dependency layer's requirements contradict another's; hints name both sides and the fix",
     "env.solve_failed": "solver infrastructure failure (network, index); retryable",
     "env.realize_failed": "environment build/unpack failed on site",
-    "env.not_realized": "environment exists but is not realized on this site yet; realize it (run a task with it) first",
+    "env.not_realized": "environment exists but is not realized on this site yet; env_realize(env_id, site) is the direct lever (never a placebo task — memoization returns the recorded manifest and nothing rebuilds)",
     "env.unsatisfiable_on_site": "spec needs something this site lacks; hints list alternative sites",
     "env.platform_mismatch": "environment locked for platforms that do not include this site's; hints name both and the spec fix",
     "env.evict_blocked": "overlay environments stack on this prefix; hints name them and the cascade lever",
