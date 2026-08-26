@@ -117,6 +117,16 @@ _SCAFFOLD_EXACT = {
 def is_scaffold(path: str) -> bool:
     if path in _SCAFFOLD_EXACT:
         return True
+    # Atomic-write intermediates classify like their TARGET: every weft
+    # writer lands a scaffold file X via X.tmp (shim exit_code, slurm
+    # epilog) or X.tmp.<rand> (local/ssh write_file). Transient by
+    # design — but a writer crashing in the window orphans the file
+    # DURABLY, and then it must not render as a user file (the drift-
+    # catcher caught exit_code.tmp live, mid-rename). results.tmp
+    # stays a user file: its base is not scaffold.
+    base, sep, rest = path.partition(".tmp")
+    if sep and (rest == "" or rest.startswith(".")) and is_scaffold(base):
+        return True
     if path.startswith("blocks/"):
         # top-level protocol files only; anything nested (NNNN.artifacts/)
         # is the block's saved output — the user's

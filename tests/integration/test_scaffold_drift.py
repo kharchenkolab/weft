@@ -63,3 +63,15 @@ def test_kernel_jobdir_is_fully_classified(w, tmp_path):
              if ".artifacts/" not in f]      # block artifacts = user files
     assert not stray, (
         f"weft-written kernel files the scaffold contract misses: {stray}")
+
+
+def test_atomic_intermediates_classify_like_their_target():
+    """A writer crashing between write and rename orphans X.tmp
+    durably (the drift-catcher caught exit_code.tmp LIVE, mid-rename,
+    in the round-end lane): the intermediate inherits the target's
+    classification, and a user's own *.tmp file stays the user's."""
+    assert is_scaffold("exit_code.tmp")            # shim / slurm epilog
+    assert is_scaffold("cmd.sh.tmp.a1b2c3d4")      # write_file rand-suffix
+    assert is_scaffold("blocks/0001.rc.tmp")       # kernel driver rc write
+    assert not is_scaffold("results.tmp")          # user base = user file
+    assert not is_scaffold("data.tmp.gz")          # user base = user file
