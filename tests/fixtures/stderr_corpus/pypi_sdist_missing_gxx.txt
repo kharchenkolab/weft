@@ -1,3 +1,7 @@
+# expect: compile_signature
+# bug5 A1 (cbe-next prj_77a8beea, 2026-08-26): pypi session install of an
+# sdist on a site with no compiler — the retry-with-toolchain gate must
+# fire on this shape (and never on solve/network shapes).
   × Failed to build `annoy==1.17.3`
   ├─▶ The build backend returned an error
   ╰─▶ Call to `setuptools.build_meta:__legacy__.build_wheel` failed (exit status: 1)

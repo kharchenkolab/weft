@@ -1,15 +1,22 @@
-"""The solver-stderr classifier's conformance CORPUS: real captured
+"""The tool-stderr classifiers' conformance CORPUS: real captured
 output, one file per shape (author-written fixtures could not express
 the overlapping-marker theft that misrouted aba2's missing-package
 error into internal.error 'do not edit pins' — ask 31). Format: line 1
-`# expect: <code>`, leading `#` lines are provenance, the rest is the
-verbatim stderr. RULE: every future misclassification incident appends
+`# expect: <verdict>`, leading `#` lines are provenance, the rest is
+the verbatim stderr. `<verdict>` names the classifier's answer:
+an error code drives the SOLVE classifier (_classify_solve_failure);
+`compile_signature` asserts the build-retry gate fires
+(evidence.compile_signature — bug5's classifier; its negatives ride
+test_pypi_toolchain_lane). ONE corpus for every stderr classifier —
+a second corpus directory would be the two-implementations bug for
+growth rules. RULE: every future misclassification incident appends
 its stderr here as a new file — the corpus only grows."""
 
 from pathlib import Path
 
 import pytest
 
+from weft.evidence import compile_signature
 from weft.lock import _classify_solve_failure
 from weft.spec import EnvSpec
 
@@ -32,6 +39,10 @@ def _cases():
 @pytest.mark.parametrize("stderr,expect", list(_cases()))
 def test_corpus_classifies(stderr, expect):
     err = stderr.strip()
+    if expect == "compile_signature":
+        assert compile_signature(err), \
+            "the build-retry gate must fire on this captured shape"
+        return
     tail = "\n".join(err.splitlines()[-30:])
     e = _classify_solve_failure(err, tail, err.lower(), SPEC,
                                 cache_dir=None, cache_why="default")

@@ -20,7 +20,11 @@ from weft.adapters.base import ShimResult
 
 CORPUS = Path(__file__).parent.parent / "fixtures" / "stderr_corpus"
 
-GXX_TAIL = (CORPUS / "pypi_sdist_missing_gxx.txt").read_text()
+# same load rule as test_stderr_corpus: leading '#' lines are the
+# corpus header (expect + provenance), the rest is the verbatim stderr
+GXX_TAIL = "\n".join(
+    ln for ln in (CORPUS / "pypi_sdist_missing_gxx.txt")
+    .read_text().splitlines() if not ln.startswith("#"))
 NET_TAIL = ("WARNING: Retrying... Could not fetch URL "
             "https://pypi.org/simple/statpack/: "
             "NewConnectionError('connection refused')\n")
