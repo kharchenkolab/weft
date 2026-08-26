@@ -436,6 +436,7 @@ class SSHAdapter(SiteAdapter):
             )
 
     def shim(self, argv: list[str], *, timeout: float = 60.0) -> ShimResult:
+        self.ensure_bootstrap_once()
         cmd = self._env_prefix() + shlex.join(
             [self.path("bin/weft-shim"), *argv]
         )

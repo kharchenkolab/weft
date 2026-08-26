@@ -121,3 +121,47 @@ def test_dict_params_carry_schema_hints():
         f"dict params with no MCP schema hint: {missing} — add a "
         f"SCHEMA_HINTS entry (the shape belongs in the schema, not "
         f"only the docstring)")
+
+
+def test_ensure_available_accepts_a_kernel_target(w, monkeypatch):
+    """aba2 ask: the kernel is where the agent IS — a kernel target
+    resolves to the kernel's session (or env) instead of refusing."""
+    monkeypatch.setattr(w.store, "get_kernel",
+                        lambda kid: {"kernel_id": kid,
+                                     "session_id": "sess_abc",
+                                     "env_id": None})
+    seen = {}
+
+    def spy(sid, adapter, request, **kw):
+        seen["sid"] = sid
+        return {"satisfied": True}
+    monkeypatch.setattr(w.sessions, "ensure_available", spy)
+    monkeypatch.setattr(w, "_session_adapter", lambda sid: "adapter")
+    got = w.ensure_available({"kernel": "kr_1"}, {"pypi": ["toolpkg"]})
+    assert "error" not in got, got
+    assert seen["sid"] == "sess_abc"
+
+
+def test_ensure_available_unknown_kernel_refuses_typed(w):
+    got = w.ensure_available({"kernel_id": "kr_nope"}, {"pypi": ["x"]})
+    assert got["error"] == "task.invalid"
+    assert "kernel" in got["detail"]
+
+
+def test_run_input_on_nonterminal_run_names_the_real_cause(w,
+                                                           monkeypatch):
+    """aba2 slurm-array journey: a dependent submit referencing a
+    QUEUED run got 'the sandbox may be swept' + existed:True — the
+    hint must say the run has not landed."""
+    monkeypatch.setattr(
+        w.store, "get_job",
+        lambda jid: {"job_id": jid, "state": "QUEUED", "site": "local",
+                     "sched_handle": None, "task": {}})
+    monkeypatch.setattr(w.retains, "_stat_one", lambda c: None)
+    monkeypatch.setattr(w.retains, "_sandbox_path",
+                        lambda t, r: (None, None, None))
+    got = w.data_register(run="jb_pending", rel="results/out.txt")
+    assert got["error"] == "data.missing"
+    assert "QUEUED" in got["detail"]
+    assert "AFTER the run lands" in got["hints"]["suggestion"]
+    assert "swept" not in str(got["hints"])

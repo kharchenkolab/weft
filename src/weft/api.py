@@ -553,7 +553,7 @@ class Weft:
         # hosts (bootstrap push, probe, tool fetch, route probes)
         self.store.emit("bootstrap.step", site=name, step="bootstrap",
                         note="creating the root tree, pushing the shim")
-        adapter.ensure_bootstrap()
+        adapter.ensure_bootstrap_once()
         self.store.emit("bootstrap.step", site=name, step="probe",
                         note="measuring the site (hardware, scheduler, "
                              "runtimes, network)")
@@ -1275,6 +1275,28 @@ class Weft:
                 live = c
                 break
         if live is None:
+            # discriminate BEFORE assembling the hint (aba2 slurm-array
+            # journey: a dependent submit referencing a QUEUED run got
+            # "the sandbox may be swept" + existed:True — a hint
+            # assembled from the wrong world-state): a NONTERMINAL run
+            # has produced nothing to consume yet, and sweep/keep talk
+            # points away from the real cause
+            _src = self.store.get_job(run) or self.store.get_kernel(run)
+            _state = (_src or {}).get("state")
+            if _src and _state not in ("DONE", "FAILED", "CANCELLED",
+                                       "stopped", "dead"):
+                raise WeftError(
+                    "data.missing",
+                    f"run {run} is {_state} — its outputs cannot be "
+                    f"consumed at submit time",
+                    stage="staging",
+                    hints={"run": run, "state": _state, "rel": rel,
+                           "suggestion": "run-inputs resolve at submit "
+                                         "(the task hash keys on "
+                                         "content): submit this stage "
+                                         "AFTER the run lands — "
+                                         "memoization makes the "
+                                         "resubmit free"})
             raise WeftError(
                 "data.missing",
                 f"({run}, {rel}) resolves to no existing file",
@@ -1957,15 +1979,32 @@ class Weft:
             # and the first live call used exactly that inside the dict
             # (aba2 th594060f7 item 2b) — accept both, one spelling
             # internally
-            target = {{"env_id": "env", "session_id": "session"}
+            target = {{"env_id": "env", "session_id": "session",
+                       "kernel_id": "kernel"}
                       .get(k, k): v for k, v in target.items()}
+            if "kernel" in target:
+                # the kernel is where the agent IS (aba2 ask): resolve
+                # to what the kernel runs on — its session when it has
+                # one, else its env
+                krow = self.store.get_kernel(target.pop("kernel"))
+                if not krow:
+                    raise WeftError(
+                        "task.invalid", "unknown kernel in target",
+                        stage="realize",
+                        hints={"suggestion": "list_kernels shows live "
+                                             "kernels"})
+                if krow.get("session_id"):
+                    target["session"] = krow["session_id"]
+                else:
+                    target["env"] = krow["env_id"]
         if not isinstance(target, dict) or not target or \
                 set(target) - {"session", "env"}:
             raise WeftError(
                 "task.invalid",
-                'target must be {"session": <session_id>} or '
-                '{"env": <env_id>} (env_id/session_id are accepted '
-                'aliases)', stage="realize")
+                'target must be {"session": <session_id>}, '
+                '{"env": <env_id>} or {"kernel": <kernel_id>} '
+                '(_id-suffixed keys are accepted aliases)',
+                stage="realize")
         if probe:
             # observation, never choice, never mutation — no claim, no
             # session state touched; the SAME dialect function the

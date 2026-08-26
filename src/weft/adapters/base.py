@@ -43,6 +43,21 @@ class SiteAdapter(ABC):
     def root(self) -> str:
         """Absolute weft_root path on the site."""
 
+    def ensure_bootstrap_once(self) -> None:
+        """Bootstrap (marker + shim sha check, push on mismatch) at
+        FIRST REAL USE. The register-only bootstrap left every RESTORED
+        estate on its old shim forever — "the shim propagates by hash"
+        held only for sites registered after a bump (aba2 lived on v10
+        across two workspaces until a by-hand re-register; the v13
+        probe fix would have propagated to nobody). One marker+sha
+        round-trip on the first shim call of a restored adapter; a
+        current site pays no push. The flag is set BEFORE the call so
+        bootstrap's own commands cannot recurse."""
+        if getattr(self, "_bootstrap_checked", False):
+            return
+        self._bootstrap_checked = True
+        self.ensure_bootstrap()
+
     @abstractmethod
     def ensure_bootstrap(self) -> None:
         """Make the site usable: shim + pixi under root/bin (idempotent)."""

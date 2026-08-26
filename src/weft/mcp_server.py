@@ -79,9 +79,11 @@ SCHEMA_HINTS: dict[str, dict] = {
     "ensure_available": {
         "target": {
             "type": "object",
-            "description": ('{"session": <session_id>} or '
-                            '{"env": <EnvID>} (env_id/session_id '
-                            'accepted as aliases)'),
+            "description": ('{"session": <session_id>}, '
+                            '{"env": <EnvID>}, or {"kernel": '
+                            '<kernel_id>} (resolves to the kernel\'s '
+                            'session/env — "here"); _id-suffixed keys '
+                            'accepted as aliases'),
         },
         "request": {
             "description": ('Tagged mode: eco-tagged delta {"conda": '
