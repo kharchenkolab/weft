@@ -246,4 +246,27 @@ remotes, removable in one command.
   broke file://-channel envs and air-gapped sites; five call sites,
   none frozen, found in one R1 sweep). A new hook call site copies
   the flag or breaks the chaos lane.
+- A refusal NAMES ITS SUBJECT: when the discriminating subject
+  (package, file, site, ref, key) is in scope at the raise, it goes
+  in detail or hints — and distinct inputs must produce
+  DISTINGUISHABLE payloads. 124 distinct wrong cran names produced
+  124 byte-identical refusals and a three-hypothesis misdiagnosis
+  (aba2 ask 32) while the R resolver was already printing the
+  missing set to stderr; the subject sweep (misc/subject_sweep) found
+  ~80 sibling sites. Tests assert the subject appears in the payload,
+  not merely the error code.
+- Solver/tool stderr classification runs on a CAPTURED CORPUS
+  (tests/fixtures/stderr_corpus/): real output, one file per shape,
+  append the verbatim stderr of every misclassification incident.
+  Author-written classifier fixtures carry exactly one marker each
+  and cannot express overlapping-marker theft (ask 31: the parse arm
+  matched any pixi.toml:N:M span and stole resolve errors into
+  internal.error 'do not edit pins'); arm ORDER is load-bearing and
+  the corpus is what pins it.
+- Repeat-call semantics are a test SHAPE: any record that can be
+  written twice for one key gets a second-call test asserting
+  accumulate-vs-replace explicitly (retained selections accumulated
+  in the keep dir but the row REPLACED — and discard then deleted
+  the first retain's promised-safe files; one retain per test was
+  the only shape ever exercised).
 - No biological examples in specs, tests, or docs.

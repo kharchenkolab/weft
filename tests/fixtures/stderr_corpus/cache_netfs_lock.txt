@@ -1,0 +1,3 @@
+# expect: env.solve_failed
+# constructed from the cbe.next netfs incident (marker verbatim from _CACHE_MARKERS)
+Error: cache error: failed to fetch repodata — file still doesn't exist after rename on the shared cache

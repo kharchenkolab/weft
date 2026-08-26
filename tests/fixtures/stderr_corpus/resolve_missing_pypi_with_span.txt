@@ -1,0 +1,9 @@
+# expect: env.solve_conflict
+# CONSTRUCTED from ask 31's incident: the same resolve failure WITH a manifest span appended, the shape some pixi/uv versions emit — the old classifier's parse arm ran FIRST and stole this into internal.error ('do not edit pins') for a spelling problem
+Error:   [31m×[0m failed to solve the pypi requirements of environment '[35mdefault[0m' for
+  [31m│[0m platform '[33mosx-arm64[0m'
+[31m  ├─▶ [0mfailed to resolve pypi dependencies
+[31m  ╰─▶ [0mBecause milopy was not found in the package registry and you require
+[31m      [0mmilopy, we can conclude that your requirements are unsatisfiable.
+
+      at pixi.toml:9:14

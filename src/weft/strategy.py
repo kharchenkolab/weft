@@ -34,6 +34,7 @@ def select_strategy(
     modules: list[str] | None = None,
     container_base: str | None = None,
     prefer: str | None = None,
+    site: str | None = None,
 ) -> str:
     view = compute_view(caps)
     internet = bool(view.get("internet"))
@@ -45,7 +46,7 @@ def select_strategy(
         if prefer not in KNOWN:
             raise WeftError(
                 "task.invalid", f"unknown strategy {prefer!r}", stage="realize",
-                hints={"known": list(KNOWN)},
+                hints={**({"site": site} if site else {}), "known": list(KNOWN)},
             )
         base = prefer.split("+")[-1]
         if base == "container" and not (apptainer or docker):
@@ -53,14 +54,14 @@ def select_strategy(
                 "env.unsatisfiable_on_site",
                 "container strategy requested but no container runtime on site",
                 stage="realize",
-                hints={"runtimes": view.get("runtimes", {})},
+                hints={**({"site": site} if site else {}), "runtimes": view.get("runtimes", {})},
             )
         if base == "prefix" and not internet:
             raise WeftError(
                 "env.unsatisfiable_on_site",
                 "prefix strategy needs index access from the install point",
                 stage="realize",
-                hints={"alternatives": ["packed", "container"]},
+                hints={**({"site": site} if site else {}), "alternatives": ["packed", "container"]},
             )
         if base == "squashfs" and squashfs_mode(caps) is None:
             raise WeftError(
@@ -68,7 +69,7 @@ def select_strategy(
                 "squashfs strategy requested but the site cannot mount or "
                 "build images",
                 stage="realize",
-                hints={"squashfs": view.get("squashfs") or {},
+                hints={**({"site": site} if site else {}), "squashfs": view.get("squashfs") or {},
                        "needs": "fuse device + squashfuse + mksquashfs, and "
                                 "userns or a root fs fusermount may mount "
                                 "over (not a parallel FS)",
@@ -90,7 +91,7 @@ def select_strategy(
                 "env.unsatisfiable_on_site",
                 "spec sets container_base but site has no container runtime",
                 stage="realize",
-                hints={"runtimes": view.get("runtimes", {})},
+                hints={**({"site": site} if site else {}), "runtimes": view.get("runtimes", {})},
             )
         return "container"
 

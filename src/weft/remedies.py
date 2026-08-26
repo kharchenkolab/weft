@@ -124,6 +124,23 @@ def solve_conflict(solver_message: str,
             "the conflicting pin named in solver_message.")
 
 
+def cran_no_candidates(names: list[str], snapshot: str | None) -> str:
+    """The cran solve's missing-package refusal, NAMING its subject
+    (aba2 ask 32): 124 distinct wrong names produced 124 identical
+    'unsatisfiable against the repository set' refusals and a 3-round
+    misdiagnosis — a refusal that names the packages converts that to
+    a 10-second fix."""
+    shown = ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
+    return (
+        f"no candidates for: {shown} — CRAN names are case-sensitive "
+        f"(check exact spelling on cran.r-project.org); a package "
+        f"younger than the snapshot"
+        + (f" ({snapshot})" if snapshot else "")
+        + " is invisible to it (raise cran_snapshot); conda-forge may "
+          "carry it as r-<name> in deps.conda; github sources spell "
+          "owner/repo@ref.")
+
+
 # --------------------------------------------------------- realize lanes
 
 def cran_realize_note(regions: list[dict] | None, text: str) -> str:

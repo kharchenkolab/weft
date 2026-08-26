@@ -471,3 +471,44 @@ def test_no_candidates_suggestion_never_says_soften(tmp_path, pixi_bin):
     sug = got["hints"]["suggestion"]
     assert "does not exist" in sug
     assert 'relax="soft"' not in sug
+
+
+def test_cran_missing_refusal_names_its_subject(tmp_path, pixi_bin,
+                                                monkeypatch):
+    """aba2 ask 32, replayed at the seam: 124 distinct wrong names got
+    124 IDENTICAL 'unsatisfiable against the repository set' refusals —
+    the R resolver was ALREADY writing 'MISSING: <names>' to stderr and
+    the raise never parsed it. Distinct inputs now produce
+    DISTINGUISHABLE refusals naming their subjects."""
+    import subprocess as sp
+
+    from weft.solvers import CranSolver
+    solver = CranSolver(pixi_bin)
+
+    def fake_rscript(code, timeout=900):
+        return sp.CompletedProcess(
+            [], 3, stdout="", stderr="MISSING: WrongName,OtherPkg\n")
+    monkeypatch.setattr(solver, "_rscript", fake_rscript)
+
+    from weft.spec import EnvSpec
+    spec = EnvSpec.from_dict({"name": "c", "platforms": ["linux-64"],
+                              "deps": {"conda": ["r-base"],
+                                       "cran": ["WrongName", "OtherPkg"]}})
+    with pytest.raises(WeftError) as ei:
+        solver.solve(["WrongName", "OtherPkg"], spec, tmp_path / "wd")
+    e = ei.value
+    assert e.code == "env.solve_conflict"
+    assert "WrongName" in e.detail and "OtherPkg" in e.detail
+    assert e.hints["missing"] == ["WrongName", "OtherPkg"]
+    assert "case-sensitive" in e.hints["suggestion"]
+
+    def fake_rscript2(code, timeout=900):
+        return sp.CompletedProcess(
+            [], 3, stdout="", stderr="MISSING: EntirelyDifferent\n")
+    monkeypatch.setattr(solver, "_rscript", fake_rscript2)
+    with pytest.raises(WeftError) as ei2:
+        solver.solve(["EntirelyDifferent"], spec, tmp_path / "wd2")
+    # the 124-identical property is dead: distinct inputs, distinct
+    # payloads
+    assert ei2.value.detail != e.detail
+    assert "EntirelyDifferent" in ei2.value.detail

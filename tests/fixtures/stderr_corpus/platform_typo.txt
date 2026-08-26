@@ -1,0 +1,15 @@
+# expect: task.invalid
+# real capture: pixi 0.72.2, unknown platform in spec
+Error:   [31m×[0m 'linux-999' is not a known platform. Valid platforms are 'noarch',
+  [31m│[0m 'unknown', 'linux-32', 'linux-64', 'linux-aarch64', 'linux-armv6l',
+  [31m│[0m 'linux-armv7l', 'linux-loongarch64', 'linux-ppc64le', 'linux-ppc64',
+  [31m│[0m 'linux-ppc', 'linux-s390x', 'linux-riscv32', 'linux-riscv64', 'freebsd-
+  [31m│[0m 32', 'freebsd-64', 'freebsd-arm64', 'osx-64', 'osx-arm64', 'win-32', 'win-
+  [31m│[0m 64', 'win-arm64', 'emscripten-wasm32', 'wasi-wasm32', 'zos-z'
+   ╭─[[36;1;4m/Users/peter.kharchenko/.claude/jobs/5830d10f/tmp/corpus/pixi.toml:4:15[0m]
+ [2m3[0m │ [38;2;137;180;250mchannels[0m [38;2;148;226;213m=[0m [38;2;147;153;178m[[38;2;166;227;161m"conda-forge"[38;2;147;153;178m][0m
+ [2m4[0m │ [38;2;137;180;250mplatforms[0m [38;2;148;226;213m=[0m [38;2;147;153;178m[[38;2;166;227;161m"linux-999"[38;2;147;153;178m][0m
+   · [35;1m              ─────────[0m
+ [2m5[0m │ 
+   ╰────
+

@@ -169,6 +169,7 @@ def ensure_realization(
     modules = extras.get("modules") or []
     strategy = select_strategy(
         caps or {"internet": True, "runtimes": {}},
+        site=adapter.name,
         modules=modules,
         container_base=extras.get("container_base"),
         prefer=prefer,

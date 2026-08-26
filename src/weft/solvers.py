@@ -578,6 +578,28 @@ class CranSolver:
                                              "r_repositories at a "
                                              "reachable mirror"},
                     )
+                # the resolver already NAMES the missing set (the R code
+                # writes "MISSING: a,b" and exits 3) — the refusal just
+                # never parsed it: 124 distinct wrong names produced 124
+                # identical refusals (aba2 ask 32)
+                import re as _re
+                mm = _re.search(r"MISSING:\s*([^\n]+)",
+                                (r.stderr or "") + (r.stdout or ""))
+                missing = ([n.strip() for n in mm.group(1).split(",")
+                            if n.strip()] if mm else [])
+                if missing:
+                    raise WeftError(
+                        "env.solve_conflict",
+                        f"cran packages not found on the repository set: "
+                        f"{', '.join(missing[:8])}"
+                        f"{' …' if len(missing) > 8 else ''}",
+                        stage="solve",
+                        hints={"ecosystem": "cran", "missing": missing,
+                               "user_pins": deps, "snapshot": snapshot,
+                               "repos": repos, "solver_message": msg,
+                               "suggestion": _remedies.cran_no_candidates(
+                                   missing, snapshot)},
+                    )
                 raise WeftError(
                     "env.solve_conflict",
                     "cran layer is unsatisfiable against the repository set",
@@ -585,9 +607,10 @@ class CranSolver:
                     hints={"ecosystem": "cran", "user_pins": deps,
                            "snapshot": snapshot, "repos": repos,
                            "solver_message": msg,
-                           "suggestion": "package name typo, not in any "
-                                         "configured repo (add it via "
-                                         "r_repositories / r_release_repos) "
+                           "suggestion": "constraint conflict or metadata "
+                                         "gap (the names all EXIST — see "
+                                         "solver_message); extra repos via "
+                                         "r_repositories / r_release_repos "
                                          "— or owner/repo@ref for github"},
                 )
             rows = [l.split("\t") for l in out.read_text().splitlines() if l]
@@ -1140,11 +1163,19 @@ def _julia_solve_error(msg: str, deps: list) -> WeftError:
     prefix (no julia conda build for this controller's platform to
     probe — recorded in tool_honesty.md)."""
     if "Unsatisfiable requirements detected" in msg:
+        # NAME the subject (subject sweep 2026-08-25): Pkg's verdict
+        # line is "Unsatisfiable requirements detected for package X"
+        import re as _re
+        m = _re.search(r"Unsatisfiable requirements detected for "
+                       r"package (\S+)", msg)
+        subj = m.group(1).strip(":") if m else None
         return WeftError(
             "env.solve_conflict",
-            "julia layer is unsatisfiable as pinned",
+            "julia layer is unsatisfiable as pinned"
+            + (f" — the resolver names {subj}" if subj else ""),
             stage="solve",
             hints={"ecosystem": "julia", "user_pins": deps,
+                   **({"package": subj} if subj else {}),
                    "solver_message": msg})
     return WeftError(
         "env.solve_failed",

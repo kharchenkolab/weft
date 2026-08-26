@@ -1,0 +1,3 @@
+# expect: env.solve_failed
+# constructed: offline controller shape
+Error: failed to fetch repodata from https://conda.anaconda.org/conda-forge: Connection timed out (os error 110)

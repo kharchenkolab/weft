@@ -113,3 +113,44 @@ def test_snapshot_advice_needs_unportable_paths():
     assert got and "session_run_installer" in got
     assert snapshot_verify_failed([]) is None
     assert snapshot_verify_failed(None) is None
+
+
+def test_cran_no_candidates_names_and_truncates():
+    from weft.remedies import cran_no_candidates
+    got = cran_no_candidates(["WrongName"], "2026-01-01")
+    assert "WrongName" in got and "2026-01-01" in got
+    assert "case-sensitive" in got and "r-<name>" in got
+    many = cran_no_candidates([f"pkg{i}" for i in range(12)], None)
+    assert "pkg7" in many and "pkg9" not in many and "…" in many
+
+
+def test_strategy_refusals_name_the_site():
+    """Subject sweep: strategy refusals carried no site identity."""
+    import pytest as _pt
+
+    from weft.errors import WeftError
+    from weft.strategy import select_strategy
+    with _pt.raises(WeftError) as ei:
+        select_strategy({"internet": False, "runtimes": {}},
+                        prefer="squashfs", site="beam")
+    assert ei.value.hints.get("site") == "beam"
+
+
+def test_julia_conflict_names_the_package():
+    from weft.solvers import _julia_solve_error
+    e = _julia_solve_error(
+        "Unsatisfiable requirements detected for package DataFrames",
+        ["DataFrames"])
+    assert e.hints.get("package") == "DataFrames"
+    assert "DataFrames" in e.detail
+
+
+def test_ranked_namespace_ambiguity_names_the_names():
+    import pytest as _pt
+
+    from weft.errors import WeftError
+    from weft.spec import ranked_namespace
+    with _pt.raises(WeftError) as ei:
+        ranked_namespace([("somepkg", {})], ["cran", "pypi"])
+    assert ei.value.hints.get("ambiguous") == ["somepkg"]
+    assert "somepkg" in ei.value.detail

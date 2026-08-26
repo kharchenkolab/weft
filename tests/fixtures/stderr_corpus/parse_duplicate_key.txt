@@ -1,0 +1,13 @@
+# expect: internal.error
+# real capture: pixi 0.72.2, duplicate key in a weft-shaped manifest
+Error:   [31m×[0m duplicate key: `python`
+   ╭─[[36;1;4m/Users/peter.kharchenko/.claude/jobs/5830d10f/tmp/corpus/pixi.toml:8:1[0m]
+ [2m6[0m │ [38;2;147;153;178m[[38;2;137;180;250mdependencies[38;2;147;153;178m][0m
+ [2m7[0m │ [38;2;137;180;250mpython[0m [38;2;148;226;213m=[0m [38;2;166;227;161m"*"[0m
+   · [35;1m───┬──[0m
+   ·    [35;1m╰── [35;1mfirst defined here[0m[0m
+ [2m8[0m │ [38;2;137;180;250mpython[0m [38;2;148;226;213m=[0m [38;2;166;227;161m"3.12"[0m
+   · [33;1m───┬──[0m
+   ·    [33;1m╰── [33;1mduplicate defined here[0m[0m
+   ╰────
+

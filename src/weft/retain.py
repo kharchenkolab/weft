@@ -798,9 +798,16 @@ class RetainManager:
         tar_out.wait(timeout=6 * 3600)
         tar_in.wait(timeout=60)
         if tar_out.returncode != 0 or tar_in.returncode != 0:
+            # subjects named (subject sweep: this was the tree's one
+            # BYTE-IDENTICAL refusal — every distinct failure looked
+            # the same)
             raise WeftError("data.transfer_failed",
-                            "tar-pipe transfer failed",
-                            stage="staging", retryable=True)
+                            f"tar-pipe transfer to {location} failed "
+                            f"(out rc={tar_out.returncode}, "
+                            f"in rc={tar_in.returncode})",
+                            stage="staging", retryable=True,
+                            hints={"site": adapter.name,
+                                   "location": location})
         missing = [e["path"] for e in selected
                    if not (Path(location) / e["path"]).exists()]
         if missing:

@@ -122,7 +122,8 @@ _ENV_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _PLATFORM_RE = re.compile(r"[a-z0-9]+(-[a-z0-9_]+)*")
 
 
-def request_namespace(lanes: list[str]) -> str:
+def request_namespace(lanes: list[str],
+                      bare: list[str] | None = None) -> str:
     """The namespace bare names are written in, derived from the
     RANKING itself: cran in lanes => R registry names (the conda lane
     derives its dialect); lanes within {conda, pypi} => passthrough
@@ -130,12 +131,15 @@ def request_namespace(lanes: list[str]) -> str:
     for a bare name — refusal, never a guess."""
     ls = set(lanes)
     if "cran" in ls and "pypi" in ls:
+        shown = ", ".join((bare or [])[:6])
         raise WeftError(
             "task.invalid",
             "bare names are ambiguous across cran+pypi lanes — say which "
-            "ecosystem's name you mean",
+            "ecosystem's name you mean"
+            + (f" (ambiguous here: {shown})" if shown else ""),
             stage="realize",
-            hints={"escape": 'per-lane spellings: {"name": "X", '
+            hints={**({"ambiguous": bare} if bare else {}),
+                   "escape": 'per-lane spellings: {"name": "X", '
                              '"pypi": "x", "cran": "X"}'})
     return "r" if "cran" in ls else "py"
 
@@ -148,7 +152,7 @@ def ranked_namespace(norm: list, lanes: list[str]) -> str:
             if "/" not in d.partition("@")[0]
             and not all(ov.get(ln) for ln in lanes)]
     if bare:
-        return request_namespace(lanes)
+        return request_namespace(lanes, bare)
     return "r" if "cran" in lanes else "py"
 
 
