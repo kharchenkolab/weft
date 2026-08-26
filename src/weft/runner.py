@@ -1270,9 +1270,18 @@ class JobRunner:
         # the last narration so the next occurrence self-diagnoses)
         state = (job or {}).get("state")
         try:
-            tail = [f"{e['kind']}#{e['seq']}" for e in
-                    self.store.events_since(0, limit=2000)
-                    if job_id in str(e)][-6:]
+            tail = []
+            for e in self.store.events_since(0, limit=2000):
+                if job_id not in str(e):
+                    continue
+                # deferral/redrive events carry the WHY — a name-only
+                # tail forced a full lane re-run to learn which stage
+                # was cut (R1b triage, twice)
+                extra = {k: e[k] for k in ("stage", "delivered", "note")
+                         if e.get(k)}
+                tail.append(f"{e['kind']}#{e['seq']}"
+                            + (f"{extra}" if extra else ""))
+            tail = tail[-6:]
         except Exception:   # noqa: BLE001 — evidence must not mask
             tail = []       # the timeout itself
         raise TimeoutError(

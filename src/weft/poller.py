@@ -385,9 +385,25 @@ class SitePoller:
         store = self.runner.store
         job = store.get_job(w.job_id)
         dfr = dict((job or {}).get("deferral") or {})
-        if not job or dfr.get("submit_attempted") \
-                or int(dfr.get("attempts") or 0) >= 1:
+        if not job or dfr.get("submit_attempted"):
             return False
+        if int(dfr.get("attempts") or 0) >= 1:
+            # the re-drive was ALSO cut pre-submit and the site still
+            # does not answer: land the honest terminal verdict NOW —
+            # parking again would mean the 3600s grace ("unknown" must
+            # never quietly become "unlimited"; the burst lane showed
+            # deferred -> redriven -> deferred -> hour-long park)
+            self._fail(w, WeftError(
+                "site.unreachable",
+                "submit never delivered and the re-drive was cut by an "
+                "outage as well",
+                stage="submit", retryable=True,
+                hints={"deferral": dfr,
+                       "unreachable_ticks": w.unreachable_strikes,
+                       "suggestion": "resubmit when the site is stable; "
+                                     "memoization makes the retry "
+                                     "cheap"}))
+            return True
         dfr["attempts"] = int(dfr.get("attempts") or 0) + 1
         store.set_job_deferral(w.job_id, dfr)
         store.emit("job.redriven", job_id=w.job_id, site=self.site,

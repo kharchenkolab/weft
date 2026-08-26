@@ -96,7 +96,13 @@ def test_no_redrive_when_submit_was_attempted(w, monkeypatch):
     assert "jb_probe000002" in p._watches, "the watch must stay parked"
 
 
-def test_no_second_redrive_after_attempts_guard(w, monkeypatch):
+def test_attempts_exhausted_lands_terminal_verdict_not_hour_park(
+        w, monkeypatch):
+    """After the ONE re-drive was also cut pre-submit, continued dead
+    transport must produce the honest FAILED verdict at strike-out —
+    the first fix version fell back to parking against the 3600s grace
+    (burst lane: deferred -> redriven -> deferred -> hour-long park
+    while the test timed out at 300s)."""
     p = w.runner.poller_for("local")
     _dead_transport(monkeypatch, p)
     driven = []
@@ -105,7 +111,13 @@ def test_no_second_redrive_after_attempts_guard(w, monkeypatch):
     p.register(watch)
     for _ in range(UNREACHABLE_REDRIVE_STRIKES + 2):
         p._tick([watch])
-    assert driven == [] and not _redriven(w)
+    assert driven == [] and not _redriven(w), "never a SECOND re-drive"
+    job = w.store.get_job("jb_probe000003")
+    assert job["state"] == "FAILED"
+    assert job["error"]["error"] == "site.unreachable"
+    assert "re-drive was cut" in job["error"]["detail"]
+    assert job["error"]["retryable"] is True
+    assert "jb_probe000003" not in p._watches
 
 
 def test_answered_tick_resets_the_strike_streak(w, monkeypatch):
