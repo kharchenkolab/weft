@@ -183,10 +183,20 @@ def render_pixi_manifest(spec: EnvSpec,
     lines += ["", "[dependencies]"]
     for dep in spec.conda:
         lines.append(_dep_line(dep))
-    if spec.pypi:
+    if any(" @ " in d for d in spec.pypi) and not any(
+            split_constraint(d)[0] == "pip" for d in spec.conda):
+        # direct-reference wheels install via the ENV's pip at
+        # realize; registry pypi deps make pixi pull pip in, but a
+        # pins-only spec would get a pipless python ("No module
+        # named pip" — caught by the acceptance test's evidence
+        # chain, first run). Deterministic + honest: the env
+        # genuinely contains pip, and it is part of the identity.
+        lines.append('"pip" = "*"')
+    registry_pypi = [d for d in spec.pypi if " @ " not in d]
+    if registry_pypi:
         lines.append("")
         lines.append("[pypi-dependencies]")
-        for dep in spec.pypi:
+        for dep in registry_pypi:
             name, constraint = split_constraint(dep)
             c = _normalize_constraint(constraint)
             lines.append(f"{_toml_str(name)} = {_toml_str('*' if c == '*' else c)}")
@@ -272,9 +282,17 @@ def canonicalize_lock(pixi_lock_text: str, spec: EnvSpec) -> dict:
             if (key := (r["kind"], r["name"], r["version"], r["build"])) not in seen
             and not seen.add(key)
         ]
+    from .spec import parse_direct_ref
+    url_pins = sorted(
+        ({"name": r["name"], "sha256": r["sha256"],
+          "filename": r["filename"]}
+         for r in (parse_direct_ref(d) for d in spec.pypi)
+         if r is not None),
+        key=lambda r: r["name"])
     return {
         "version": 1,
         "platforms": platforms,
+        **({"url_pins": url_pins} if url_pins else {}),
         "extras": {
             "modules": spec.modules,
             "post_install": spec.post_install,

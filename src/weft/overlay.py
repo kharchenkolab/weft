@@ -99,6 +99,20 @@ def classify_delta(parent_canonical: dict, child_canonical: dict) -> dict:
             "shared package cache is hardlinked). To get the O(delta) path, "
             "put pure-Python deltas in deps.pypi, or add these to the parent.")
         return out
+    p_pins = {(p["name"], p["sha256"])
+              for p in parent_canonical.get("url_pins") or []}
+    c_pins = {(p["name"], p["sha256"])
+              for p in child_canonical.get("url_pins") or []}
+    if p_pins != c_pins:
+        # widening-audit for the url_pins field: pins install into the
+        # PREFIX at build time (v1) — an overlay would silently skip a
+        # pin delta, shipping an env whose EnvID promises a wheel the
+        # prefix lacks
+        out["layerable"] = False
+        out["why"] = ("the child's url pins differ from the parent's — "
+                      "direct-reference wheels install into the prefix "
+                      "at build; a pin delta needs a full prefix")
+        return out
     if not (pypi_added or layers):
         out["layerable"] = False
         out["why"] = "the child adds nothing to the parent"

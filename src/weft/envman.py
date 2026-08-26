@@ -99,10 +99,11 @@ def diff_envs(old_canonical: dict, new_canonical: dict) -> dict:
 
 class EnvManager:
     def __init__(self, store: Store, solve_dir: Path, pixi_bin: str,
-                 solvers: dict | None = None):
+                 solvers: dict | None = None, cas=None):
         self.store = store
         self.solve_dir = Path(solve_dir)
         self.pixi_bin = pixi_bin
+        self.cas = cas   # workspace CAS: url-pin wheels carry here
         from .solvers import default_solvers
         self.solvers: dict = {**default_solvers(pixi_bin), **(solvers or {})}
 
@@ -601,6 +602,8 @@ class EnvManager:
                 "packages": len(layer.get("records", [])),
                 "from_source": layer.get("from_source", []),
             }
+        if canonical.get("url_pins"):
+            self._carry_url_pins(merged, canonical)
         from .ids import env_id as compute_env_id
         eid = compute_env_id(canonical)
 
@@ -651,6 +654,70 @@ class EnvManager:
                            "`relaxed`); the result is still fully pinned")
             self.store.emit("env.relaxed", env_id=eid, relaxed=relaxed)
         return out
+
+    def _carry_url_pins(self, spec, canonical: dict) -> None:
+        """CAS-carry the direct-reference wheels at ENSURE time: the
+        CONTROLLER is the only host with a guaranteed egress posture —
+        a site never fetches a URL (air-gapped nodes are the point of
+        the whole lane). Idempotent by content: a blob already in the
+        CAS under its sha is a no-op, so re-ensures and identical pins
+        across specs cost nothing. Fail-fast here beats a realize-time
+        surprise: a wrong URL or a drifted artifact refuses BEFORE an
+        EnvID is minted."""
+        import urllib.error
+        import urllib.request
+
+        from .ids import sha256_bytes
+        from .spec import parse_direct_ref
+        if self.cas is None:
+            raise WeftError(
+                "task.invalid",
+                "url pins need the workspace CAS and this EnvManager "
+                "was built without one", stage="solve",
+                hints={"pins": [p["name"]
+                                for p in canonical["url_pins"]]})
+        urls = {r["name"]: r["url"]
+                for d in spec.pypi
+                if (r := parse_direct_ref(d)) is not None}
+        for pin in canonical["url_pins"]:
+            if self.cas._blob_path(pin["sha256"]).exists():
+                continue
+            url = urls[pin["name"]]
+            try:
+                if url.startswith("file://"):
+                    data = Path(url[len("file://"):]).read_bytes()
+                else:
+                    req = urllib.request.Request(
+                        url, headers={"User-Agent": "weft"})
+                    with urllib.request.urlopen(req, timeout=120) as r:
+                        data = r.read(70 * 1024 * 1024)
+            except (OSError, urllib.error.URLError) as e:
+                raise WeftError(
+                    "data.transfer_failed",
+                    f"could not fetch url pin {pin['name']!r} from "
+                    f"{url}: {e}", stage="solve", retryable=True,
+                    hints={"package": pin["name"], "url": url}) from e
+            if len(data) >= 64 * 1024 * 1024:
+                raise WeftError(
+                    "task.invalid",
+                    f"url pin {pin['name']!r} is >=64MB — above the "
+                    "CAS plain-hash threshold; large-artifact pins "
+                    "are a v2 boundary (file an ask)",
+                    stage="solve", hints={"package": pin["name"]})
+            got = sha256_bytes(data)
+            if got != pin["sha256"]:
+                raise WeftError(
+                    "data.verify_failed",
+                    f"url pin {pin['name']!r}: fetched content does "
+                    f"not match the declared sha256",
+                    stage="solve",
+                    hints={"package": pin["name"], "url": url,
+                           "expected": pin["sha256"], "got": got,
+                           "suggestion": "wrong URL/version, or the "
+                                         "artifact changed under the "
+                                         "URL — recompute the digest "
+                                         "and update the pin"})
+            self.cas.put_bytes(data)
 
     def _summary(self, row: dict) -> dict:
         from .grade import grade_env

@@ -106,6 +106,30 @@ quick = w.env_ensure({"extends_env": base["env_id"],
 quick["delta"]["layerable"]   # True → overlay fast path; else why-not text
 ```
 
+**URL pins** (the release-asset wheel class): a package that exists
+only as a downloadable wheel (a GitHub release asset, a lab server)
+pins as a PEP 508 direct reference in `deps.pypi`:
+
+```python
+w.env_ensure({"name": "viewer", "deps": {
+    "conda": ["python =3.12"],
+    "pypi": ["pkgview @ https://github.com/lab/pkgview/releases/"
+             "download/v2.1/pkgview-2.1-py3-none-any.whl"
+             "#sha256=<hex64>"]}})
+```
+
+The `#sha256=` fragment is MANDATORY (identity is content — the URL is
+a display pointer and never enters the EnvID; the same bytes via two
+URLs are the same env). The CONTROLLER fetches once at ensure,
+verifies the digest (mismatch refuses before any EnvID mints), and
+CAS-carries the wheel; realize stages it through the transfer plane
+and installs from the LOCAL file with `--no-deps --no-index` — sites
+never fetch URLs, so air-gapped nodes work, and the wheel's dependency
+closure must ride the spec's normal lanes (a missing dep at import
+time means add it to `deps`). Wheels only (`.whl`); `file:///abs/...`
+URLs are controller-realm; pin deltas need a full prefix (they
+disqualify overlay eligibility).
+
 `extends` lets the base move (full re-solve); `extends_env` never moves it
 (a contradicting delta is `env.layer_conflict`, not a silent version
 change). Overlay vs full prefix is a realization detail: same EnvID, same

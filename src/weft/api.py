@@ -355,7 +355,8 @@ class Weft:
         self.pixi_pack = pixi_pack
         unpack_sibling = Path(self.pixi_bin).parent / "pixi-unpack"
         self.pixi_unpack = str(unpack_sibling) if unpack_sibling.exists() else None
-        self.envman = EnvManager(self.store, data_dir / "solve", self.pixi_bin)
+        self.envman = EnvManager(self.store, data_dir / "solve",
+                                 self.pixi_bin, cas=self.cas)
         self.dataman = DataManager(self.store, self.cas, self.workspace)
         self.adapters: dict[str, SiteAdapter] = {}
         from .transfer.rsync_ssh import RsyncSSH

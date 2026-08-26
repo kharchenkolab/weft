@@ -397,6 +397,8 @@ def ensure_realization(
                     _stage_post_install_inputs(env_row, adapter, rel,
                                                pack_tools or {})
                     _run_post_install(env_row, adapter, rel)
+                    _install_url_pins(env_row, adapter, rel,
+                                      pack_tools or {})
             # squashfs anywhere in the chain + userns available: the
             # spot-check mounts in a throwaway namespace (also the only
             # way when the mountpoint is admin-owned or on a parallel FS)
@@ -938,6 +940,76 @@ def _stage_post_install_inputs(env_row: dict, adapter: SiteAdapter, rel: str,
                                "mount_as": i["mount_as"]}
                               for i in inputs[:8]],
                    "detail": r.err[:300]})
+
+
+def _install_url_pins(env_row: dict, adapter: SiteAdapter, rel: str,
+                      pack_tools: dict) -> None:
+    """Direct-reference wheels (deps.pypi 'name @ url#sha256=…'): the
+    wheels were CAS-carried at ENSURE; realize stages them through the
+    transfer plane and installs from the LOCAL file with --no-deps
+    --no-index — the site never fetches a URL (air-gapped nodes are
+    the point of the lane), and the wheel's dependency closure must
+    ride the spec's normal lanes (a hidden registry resolve here would
+    be a network dependency wearing an offline costume). Runs in the
+    BUILD path only, which covers every consumer: pins are part of the
+    EnvID, so any same-EnvID prefix — published tree, RO adoption —
+    was built through this same hook."""
+    pins = env_row["canonical"].get("url_pins") or []
+    if not pins:
+        return
+    dataman = pack_tools.get("dataman")
+    transfers = pack_tools.get("transfers", {})
+    if dataman is None:
+        raise WeftError(
+            "env.realize_failed",
+            "url pins need the data plane (controller CAS + transfers) "
+            "and this realize was invoked without pack_tools",
+            stage="realize", hints={"pins": [p["name"] for p in pins]})
+    refs = ["dref:" + p["sha256"] for p in pins]
+    dataman.ensure_at(refs, adapter, transfers)
+    from .task import Task
+    t = Task.from_dict({
+        "command": "true",
+        "inputs": [{"ref": "dref:" + p["sha256"],
+                    "mount_as": f".weft-wheels/{p['filename']}"}
+                   for p in pins]})
+    plan = dataman.materialize_plan(t, site=adapter.name)
+    adapter.write_file(f"{rel}/urlpins.tsv", plan.encode())
+    endpoint = adapter.transfer_endpoint()
+    r = adapter.shim(
+        ["materialize", "--cas", endpoint["cas_root"],
+         "--dir", adapter.path(rel),
+         "--plan", adapter.path(f"{rel}/urlpins.tsv")], timeout=600)
+    if r.rc != 0:
+        raise WeftError(
+            "env.realize_failed",
+            f"could not stage url-pin wheels on {adapter.name}",
+            stage="realize",
+            hints={"site": adapter.name,
+                   "pins": [p["name"] for p in pins],
+                   "detail": r.err[:300]})
+    from .evidence import failure_evidence, run_logged
+    wheels = " ".join(
+        shlex.quote(f".weft-wheels/{p['filename']}") for p in pins)
+    log_rel = f"logs/{rel.rsplit('/', 1)[-1]}-urlpins.log"
+    r = run_logged(
+        adapter,
+        f"cd {shlex.quote(adapter.path(rel))} && . ./activate.sh && "
+        f"python -m pip install --no-deps --no-index --quiet {wheels}",
+        log_rel, timeout=900)
+    if r.rc != 0:
+        ev = failure_evidence(adapter, log_rel, r.out + r.err)
+        raise WeftError(
+            "env.realize_failed",
+            "url-pin wheel install failed for: "
+            + ", ".join(p["name"] for p in pins),
+            stage="realize",
+            hints={"pins": [p["name"] for p in pins],
+                   "site": adapter.name, **ev,
+                   "note": "wheels install --no-deps --no-index: the "
+                           "dependency closure must ride deps.conda/"
+                           "deps.pypi — a missing dep at import time "
+                           "means add it to the spec"})
 
 
 def _run_post_install(env_row: dict, adapter: SiteAdapter, rel: str) -> None:
@@ -1804,6 +1876,7 @@ def _build_squashfs(
                     build_jobs=8)
     _stage_post_install_inputs(env_row, build, inner, pack_tools)
     _run_post_install(env_row, build, inner)
+    _install_url_pins(env_row, build, inner, pack_tools)
     # post-link detection on the STAGING content, before it is squashed
     # immutable — AFTER post_install (removing the staged script is the
     # acknowledgment). This call was CLAIMED by a docstring and absent

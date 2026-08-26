@@ -22,6 +22,10 @@ w.env_ensure({
                                        # (else env.platform_mismatch names
                                        # the missing one)
   "deps": {"conda": ["python =3.12", "root >=6.32"], "pypi": ["zfit ==0.24.*"]},
+  # release-asset wheels pin as PEP 508 direct refs — #sha256= REQUIRED
+  # (controller fetches + CAS-carries; sites never fetch URLs; installs
+  # --no-deps --no-index, so the dep closure rides the normal lanes):
+  #   "pypi": ["pkgview @ https://…/pkgview-2.1-py3-none-any.whl#sha256=<hex64>"]
   "variants": {"linux-64": {"conda": ["cuda-version <=12.4", "cupy"]}},
   "modules": ["espresso/7.2"],         # site-provided software (check first:
                                        #   module_check(site, [...]))

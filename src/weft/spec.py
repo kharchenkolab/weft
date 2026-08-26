@@ -59,6 +59,78 @@ def is_soft(dep: str) -> bool:
     return dep.rstrip().endswith("?")
 
 
+_SHA256_FRAG = re.compile(r"#sha256=([0-9a-fA-F]{64})$")
+
+
+def parse_direct_ref(entry: str) -> dict | None:
+    """THE owner of the pypi direct-reference grammar (release-asset
+    wheel class, approved design 2026-08-25): 'name @ <url>#sha256=
+    <hex64>'. Returns {"name", "url", "sha256", "filename"} for a
+    direct ref, None for an ordinary registry entry; refuses TYPED
+    when the shape is a direct ref but breaks the contract. Identity
+    is content: the sha256 fragment is MANDATORY (a mutable URL
+    without a hash would let one EnvID realize different bytes on
+    different days), the URL itself is a display pointer and never
+    enters the canonical lock. Wheels only in v1 (an sdist build
+    drags the toolchain matrix in — build_deps is that lane);
+    file:// URLs are CONTROLLER-realm and must be absolute."""
+    if " @ " not in entry:
+        return None
+    name_part, _, target = entry.partition(" @ ")
+    name = name_part.strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+        raise WeftError(
+            "task.invalid",
+            f"direct reference has an invalid package name: {name!r}",
+            stage="solve",
+            hints={"entry": entry[:120],
+                   "syntax": 'deps.pypi: ["name @ https://…/pkg.whl'
+                             '#sha256=<hex64>"]'})
+    name = name.lower().replace("_", "-").replace(".", "-")
+    target = target.strip()
+    m = _SHA256_FRAG.search(target)
+    if not m:
+        raise WeftError(
+            "task.invalid",
+            f"direct reference for {name!r} is missing its mandatory "
+            "#sha256=<hex64> fragment — identity is content: a URL "
+            "without a hash would let this EnvID realize different "
+            "bytes on different days",
+            stage="solve",
+            hints={"package": name, "url": target[:200],
+                   "syntax": f'"{name} @ <url>#sha256=<hex64>"',
+                   "compute": "shasum -a 256 <file> (or curl -L <url> "
+                              "| shasum -a 256)"})
+    sha = m.group(1).lower()
+    url = target[:m.start()]
+    scheme = url.split(":", 1)[0].lower() if ":" in url else ""
+    if scheme not in ("https", "http", "file"):
+        raise WeftError(
+            "task.invalid",
+            f"direct reference for {name!r} has an unsupported URL "
+            f"scheme {scheme or '(none)'!r}",
+            stage="solve",
+            hints={"package": name, "supported": ["https", "http",
+                                                  "file"]})
+    if scheme == "file" and not url.startswith("file:///"):
+        raise WeftError(
+            "task.invalid",
+            f"direct reference for {name!r}: file:// URLs are "
+            "CONTROLLER-realm and must be absolute (file:///abs/path)",
+            stage="solve", hints={"package": name, "url": url[:200]})
+    filename = url.rsplit("/", 1)[-1]
+    if not filename.endswith(".whl"):
+        raise WeftError(
+            "task.invalid",
+            f"direct reference for {name!r} is not a wheel "
+            f"({filename!r}) — wheels only: an sdist build drags the "
+            "site toolchain matrix in; use deps.conda/build_deps for "
+            "compiled stacks",
+            stage="solve", hints={"package": name, "filename": filename})
+    return {"name": name, "url": url, "sha256": sha,
+            "filename": filename}
+
+
 def strip_soft(dep: str) -> str:
     return dep.rstrip()[:-1].rstrip() if is_soft(dep) else dep
 
@@ -181,6 +253,15 @@ def _dep_key(eco: str, dep: str) -> str:
     if eco == "conda":
         return split_constraint(dep)[0]
     if eco == "pypi":
+        if " @ " in dep:
+            # direct reference: parse (which REFUSES malformed
+            # ones typed — this call is the intake door, driven
+            # for deps and variants alike) and key by the
+            # normalized name so a direct ref and a registry
+            # entry for the same package collide
+            ref = parse_direct_ref(strip_soft(dep))
+            if ref:
+                return ref["name"]
         return re.sub(r"[-_.]+", "-", split_constraint(dep)[0])
     d = strip_soft(dep).strip()
     if "/" in d.partition("@")[0]:
