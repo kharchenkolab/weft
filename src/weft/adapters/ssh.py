@@ -149,6 +149,21 @@ class SSHAdapter(SiteAdapter):
             f"{user}@{host}:{port}:{','.join(self.jump)}".encode()
         ).hexdigest()[:16]
         self._control_path = str(sock_dir / tag)
+        # A NEW adapter means instance identity may have changed for
+        # this address (fresh registration, re-provisioned cloud node,
+        # recycled ephemeral port): any EXISTING master for the path is
+        # by definition suspect, and a master wired to a dead peer
+        # serves channel-refused shapes that the runtime mux verdict
+        # deliberately does NOT evict (#98) — a wedge that outlives
+        # ControlPersist (600s), longer than most wait windows (R1b:
+        # the deterministic in-lane STAGING hangs rode exactly this).
+        # Construction-time reset is identity-scoped, not
+        # failure-scoped, so #98's herd protection stands untouched.
+        if Path(self._control_path).exists():
+            subprocess.run(
+                ["ssh", "-o", f"ControlPath={self._control_path}",
+                 "-O", "exit", self.destination()],
+                capture_output=True, timeout=10)
 
     @property
     def root(self) -> str:
