@@ -600,16 +600,22 @@ class SessionManager:
         # presence, or a broken add would report success (R's trap)
         ref_installed: list[str] = []
         if refs and r.rc == 0:
-            # markers come from the PERSISTED log, not the tail window:
-            # a big compile after an early ref could scroll its
-            # WEFT-INSTALLED line past the tail and mint a false
-            # silent-compile-failure verdict
-            mk = adapter.run_cmd(
-                "grep '^WEFT-INSTALLED ' "
-                f"{shlex.quote(adapter.path(log_rel))} || true",
-                timeout=60)
-            marker_lines = [ln for ln in mk.out.splitlines()
+            marker_lines = [ln for ln in r.out.splitlines()
                             if ln.startswith("WEFT-INSTALLED ")]
+            if len(marker_lines) < len(refs):
+                # the tail window can scroll an EARLY ref's marker
+                # out (a big compile after it): before minting the
+                # silent-compile-failure verdict, RESCUE from the
+                # persisted log — the tail-first order keeps the
+                # happy path one round-trip
+                mk = adapter.run_cmd(
+                    "grep '^WEFT-INSTALLED ' "
+                    f"{shlex.quote(adapter.path(log_rel))} || true",
+                    timeout=60)
+                found = [ln for ln in mk.out.splitlines()
+                         if ln.startswith("WEFT-INSTALLED ")]
+                if len(found) > len(marker_lines):
+                    marker_lines = found
             for ln in marker_lines:
                 ref_installed += ln.split()[1:]
             if len(marker_lines) < len(refs):

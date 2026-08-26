@@ -31,6 +31,22 @@ def _realize(w, env_id, cmd="true"):
     return j
 
 
+def _overlay_strategy(w, env_id):
+    """Strategy assert that CARRIES the fallback reason: a bare
+    'prefix' == 'overlay' mismatch in a full lane forced a solo
+    re-run to learn WHY the overlay fell back (L2b round-end lane,
+    2026-08-26 — repro passed; the lane occurrence was a transient
+    build failure whose reason the assert discarded)."""
+    real = w.store.get_realization(env_id, "local")
+    if real["strategy"] != "overlay":
+        fb = [e for e in w.store.events_since(0, limit=900)
+              if e["kind"] == "realize.overlay_fallback"]
+        raise AssertionError(
+            f"expected overlay, got {real['strategy']!r}; "
+            f"fallback events: {fb}")
+    return real["strategy"]
+
+
 def test_pypi_overlay_reuses_the_parent_prefix(w):
     parent = w.env_ensure(PY_BASE)["env_id"]
     _realize(w, parent)
@@ -82,7 +98,7 @@ def test_overlay_and_full_prefix_are_indistinguishable(w):
             "env": child, "outputs": ["results/"], "site": "local"}
     j_overlay = w.runner.wait(w.task_submit(task, force=True)["job_id"], 2400)
     assert j_overlay["state"] == "DONE", j_overlay["error"]
-    assert w.store.get_realization(child, "local")["strategy"] == "overlay"
+    assert _overlay_strategy(w, child) == "overlay"
     ref_overlay = next(o["ref"] for o in j_overlay["manifest"]["outputs"]
                        if o["path"] == "results/o.json")
 
@@ -144,8 +160,7 @@ def test_cran_overlay_with_compile_cache(w):
     _realize(w, child["env_id"], "Rscript -e 'cat(glue::glue(\"ok-{1+1}\"))'")
     kinds = [e["kind"] for e in w.events_poll(0, 900, compact=False)["events"]]
     assert "overlay.compile_cache_hit" in kinds
-    assert w.store.get_realization(child["env_id"], "local")["strategy"] \
-        == "overlay"
+    assert _overlay_strategy(w, child["env_id"]) == "overlay"
 
 
 def test_github_source_delta_builds_with_the_weft_toolchain(w):
@@ -166,8 +181,7 @@ def test_github_source_delta_builds_with_the_weft_toolchain(w):
         "env": child["env_id"], "outputs": ["results/"], "site": "local"},
         force=True)["job_id"], 2400)
     assert j["state"] == "DONE", j["error"]
-    assert w.store.get_realization(child["env_id"], "local")["strategy"] \
-        == "overlay"
+    assert _overlay_strategy(w, child["env_id"]) == "overlay"
     out = next(o for o in j["manifest"]["outputs"]
                if o["path"] == "results/o.txt")
     assert out["preview"]["lines"] == ["gh-4"]
@@ -258,7 +272,7 @@ def test_evicting_a_parent_with_live_overlays_refuses_then_cascades(w):
     assert w.store.get_realization(parent, "local")["state"] == "ready"
     # and comes back as an overlay (the parent is still here)
     _realize(w, child, "python -c 'import emcee'")
-    assert w.store.get_realization(child, "local")["strategy"] == "overlay"
+    assert _overlay_strategy(w, child) == "overlay"
 
     r = w.env_evict(parent, "local", cascade=True)
     assert r["state"] == "evicted"
