@@ -178,10 +178,15 @@ def _meta_answer():
 class _MiniStore:
     """store double for _build_squashfs's now-REQUIRED store param
     (fail-closed after the publish-lane disarm): the post-link check
-    only consults .emit, and these fixtures stage no scripts."""
+    consults .emit, and the staging build's _build_jobs_cap consults
+    .get_site for the max_build_cores policy — no site row means the
+    default cap, same as a policy-less real site."""
 
     def __init__(self, emit):
         self.emit = emit
+
+    def get_site(self, site):
+        return None
 
 
 def test_staged_build_command_stream():
