@@ -159,3 +159,20 @@ def test_ranked_namespace_ambiguity_names_the_names():
         ranked_namespace([("somepkg", {})], ["cran", "pypi"])
     assert ei.value.hints.get("ambiguous") == ["somepkg"]
     assert "somepkg" in ei.value.detail
+
+
+def test_solve_conflict_uv_not_found_names_the_pypi_package():
+    """Ask 31's replay (milopy, captured verbatim): the uv not-found
+    shape must NAME the package and point at the pypi levers — the
+    same stderr rode the parse arm into internal.error 'do not edit
+    pins' before the corpus reorder."""
+    from weft.remedies import solve_conflict
+    msg = ("Because milopy was not found in the package registry and "
+           "you require milopy, we can conclude that your "
+           "requirements are unsatisfiable.")
+    got = solve_conflict(msg, ["milopy"])
+    assert "milopy" in got and "pypi.org" in got
+    assert "sha256" in got            # the URL-pin lane is the deep fix
+    other = solve_conflict(msg.replace("milopy", "wrongpkg"),
+                           ["wrongpkg"])
+    assert "wrongpkg" in other and other != got   # distinguishable

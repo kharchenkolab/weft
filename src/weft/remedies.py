@@ -120,6 +120,20 @@ def solve_conflict(solver_message: str,
             "(bioconductor-* lives on bioconda), or use the ecosystem "
             "lane that does (deps.cran / deps.pypi). Softening version "
             "pins cannot help here.")
+    # uv's pypi not-found shape (ask 31's replay, milopy: this same
+    # stderr rode the parse arm into internal.error "do not edit pins"
+    # pre-corpus; now it lands here and must NAME the package)
+    m = re.search(r"because\s+(\S+)\s+was not found in the package"
+                  r"\s+registry", low)
+    if m:
+        name = m.group(1).strip("'\"`")
+        return (
+            f"pypi package '{name}' was not found in the package "
+            "registry — check the exact spelling on pypi.org; a yanked "
+            "or metadata-broken release can also resolve as not-found. "
+            "conda-forge may carry it in deps.conda; a package that "
+            "ships only as a release-asset wheel needs the URL-pin "
+            f"lane (deps.pypi: '{name} @ https://…whl#sha256=<hex>').")
     return (_SOFT_LEVER + " Or relax/remove "
             "the conflicting pin named in solver_message.")
 
