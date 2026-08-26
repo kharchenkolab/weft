@@ -71,6 +71,13 @@ w.run_retain(target, include=["figs/**"], label="proj-9")
                                        # (scaffold stays out). LIVE run →
                                        # PIN: decision now, settled at
                                        # stop/death/completion.
+                                       # Includes match whole in-job
+                                       # paths: 'outdir/' collects the
+                                       # folder, '*name.csv' matches at
+                                       # any depth, a bare basename is
+                                       # top-level only — a zero-match
+                                       # refusal names the NEAR-MISS
+                                       # paths the run actually holds.
 w.run_retain(target, include=[...], settle="now")
                                        # "these are DONE, keep them, the
                                        # run keeps living": captures the

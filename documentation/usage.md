@@ -193,6 +193,14 @@ Read the code, use the hints:
 | `internal.error` | a weft bug, not a known failure mode — `hints.traceback_tail`; retry may not help, report it |
 | `tool.bad_arguments` | the call doesn't match the verb's signature — `hints.signature` is the live one; fix the call, retrying unchanged cannot succeed |
 
+Serialization artifacts are handled at the boundary: a STRING value
+that json-parses to the container a param is annotated for (a quoted
+JSON array on `include=`, a quoted spec object on `env_id=`) is
+coerced to the real container and the result echoes it
+(`coerced_params`); a bracket/brace-leading string that does not
+parse refuses once naming the shape. String-typed params are never
+touched — `command='[ -f x ] && …'` stays shell.
+
 Never resubmit an unchanged failing task more than once (doctrine, doc 05 §7).
 
 ### Retaining run outputs (retain marks; storage moves only when it must)

@@ -245,6 +245,28 @@ class RetainManager:
         return mark_scaffold(out)
 
     @staticmethod
+    def _near_misses(entries: list[dict], include,
+                     limit: int = 4) -> dict:
+        """{pattern: [closest real paths]} for a zero-match selection —
+        the scan already walked the tree, so the refusal can TEACH
+        (aba2 ask 34: a bare basename missed files in a subfolder and
+        the refusal echoed the selection with zero why; the agent
+        burned three calls). Basename hits at any depth first (the
+        field shape), then case-insensitive substring."""
+        paths = [e["path"] for e in entries if not e.get("scaffold")]
+        out = {}
+        for p in (include or []):
+            base = str(p).rstrip("/").rsplit("/", 1)[-1]
+            hits = [x for x in paths
+                    if fnmatch.fnmatch(x.rsplit("/", 1)[-1], base)]
+            if not hits and base:
+                low = base.lower().strip("*")
+                hits = [x for x in paths if low and low in x.lower()]
+            if hits:
+                out[str(p)] = sorted(hits)[:limit]
+        return out
+
+    @staticmethod
     def _select(entries: list[dict], include, exclude) -> list[dict]:
         # with no explicit include, "retain everything" means everything
         # the RUN produced — weft's own plumbing (scaffold) stays out.
@@ -365,8 +387,8 @@ class RetainManager:
                          "dest": dest, "max_gb": max_gb,
                          "headroom_gb": headroom_gb, "layout": layout,
                          **({"settle": "now"} if snapshot else {})}
-            selected = self._select(self._scan(adapter, jobdir_rel),
-                                    include, exclude)
+            entries = self._scan(adapter, jobdir_rel)
+            selected = self._select(entries, include, exclude)
 
             if not self._is_finished(kind, row) and not snapshot:
                 # LIVE target. Completed-block-only selections settle now
@@ -420,12 +442,26 @@ class RetainManager:
 
             live = not self._is_finished(kind, row)
             if not selected:
+                # the refusal NAMES ITS SUBJECT: the tree was walked,
+                # so a miss teaches WHY — the closest real paths and
+                # the two grammar facts callers actually trip on
+                nm = self._near_misses(entries, include)
+                real = [e["path"] for e in entries
+                        if not e.get("scaffold")]
                 raise WeftError(
                     "data.missing",
                     f"selection matched no files in {target}",
                     stage="staging",
                     hints={"target": target,
                            "include": include, "exclude": exclude,
+                           "files_in_run": len(real),
+                           **({"near_misses": nm} if nm
+                              else {"sample_paths": sorted(real)[:6]}),
+                           "grammar": "includes match whole in-job "
+                                      "paths: 'outdir/' collects that "
+                                      "folder, '*name.csv' matches at "
+                                      "any depth, a bare basename "
+                                      "matches only top-level files",
                            **({"note": "settle='now' captures only bytes "
                                        "that exist now; the default "
                                        "retain pins for capture at run "

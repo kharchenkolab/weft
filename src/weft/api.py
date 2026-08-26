@@ -83,16 +83,42 @@ def tool(fn):
     reads)."""
     import functools
     import inspect
+    import json as _json
 
     sig = inspect.signature(fn)
     # agent-facing spelling: drop `self`
     public_params = list(sig.parameters.values())[1:]
     public_sig = f"{fn.__name__}({', '.join(str(p) for p in public_params)})"
+    # container-ANNOTATED params, computed once: the coercion door for
+    # JSON-stringified arrays/objects (aba2 ask 33, third verb hit, in
+    # the worst variant — run_retain(include='["*name.csv", ...]') hit
+    # fnmatch where '[...]' is a CHARACTER CLASS: garbage selection,
+    # "successful" retain). A string that json-parses to the annotated
+    # container is unambiguous — no legitimate scalar value of a
+    # list/dict param is a serialized container — so it coerces, and
+    # the result ECHOES the coercion; a bracket/brace-leading string
+    # that does NOT parse refuses ONCE naming the SHAPE (the per-item
+    # parser must never see a serialization artifact). str-annotated
+    # params are untouched by construction: command='[ -f x ] && …'
+    # is legitimate shell, and only the annotation says which is which.
+    _containers: dict[str, tuple] = {}
+    for _pname, _param in sig.parameters.items():
+        _ann = _param.annotation
+        # annotations are strings here (module-wide future import),
+        # but str() the type form too so the door cannot silently
+        # disarm if that import ever moves
+        _ann_s = _ann if isinstance(_ann, str) else \
+            ("" if _ann is inspect.Parameter.empty else str(_ann))
+        _kinds = tuple(k for k, w in ((list, "list"), (dict, "dict"))
+                       if w in _ann_s)
+        if _kinds:
+            _containers[_pname] = _kinds
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        coerced: dict[str, str] = {}
         try:
-            sig.bind(*args, **kwargs)
+            ba = sig.bind(*args, **kwargs)
         except TypeError as te:
             result = WeftError(
                 "tool.bad_arguments",
@@ -104,8 +130,40 @@ def tool(fn):
                        .split("\n\n")[0]},
             ).to_dict()
         else:
+            shape_err = None
+            for pname, val in list(ba.arguments.items()):
+                kinds = _containers.get(pname)
+                if not kinds or not isinstance(val, str):
+                    continue
+                head = val.lstrip()[:1]
+                want = list if head == "[" else \
+                    dict if head == "{" else None
+                if want is None or want not in kinds:
+                    continue
+                shape = "array" if want is list else "object"
+                try:
+                    ba.arguments[pname] = _json.loads(val)
+                    coerced[pname] = (f"a JSON-quoted {shape} was "
+                                      f"coerced to a real {shape}")
+                except ValueError:
+                    shape_err = WeftError(
+                        "tool.bad_arguments",
+                        f"{fn.__name__}: {pname} looks like a "
+                        f"JSON-quoted {shape} but does not parse — "
+                        f"pass a real {shape}, not its string "
+                        f"serialization",
+                        stage="infra",
+                        hints={"verb": fn.__name__, "param": pname,
+                               "got": val[:120],
+                               "expected": f"a JSON {shape} value"})
+                    break
+            if shape_err is not None:
+                return _seal(fn.__name__, shape_err.to_dict())
             try:
-                result = fn(*args, **kwargs)
+                result = fn(*ba.args, **ba.kwargs)
+                if coerced and isinstance(result, dict) \
+                        and "error" not in result:
+                    result = {**result, "coerced_params": coerced}
             except WeftError as e:
                 result = e.to_dict()
             except Exception:
@@ -449,6 +507,36 @@ class Weft:
                            "suggestion": "register_site(name, kind, "
                                          "config) again with the same "
                                          "config"})
+        # intake, not KeyError: a consumer guessing a NESTED shape —
+        # config={"ssh": {"host": ...}} — got an internal.error
+        # traceback (aba2 note, 2026-08-26) instead of a typed door.
+        # Required keys per kind; the nested guess is detected and
+        # named, because "ssh sites need host" alone would not tell a
+        # caller who PROVIDED host (one level down) what was wrong.
+        # cloud deliberately absent: its provisioner factory owns the
+        # config shape (no root — the adapter provisions its own)
+        _need = {"local": ("root",), "ssh": ("host", "root"),
+                 "slurm": ("root",)}.get(kind, ())
+        _missing = [k for k in _need if not config.get(k)]
+        if _missing:
+            _nested = {k: f"config['{grp}']['{k}']"
+                       for grp, v in config.items()
+                       if isinstance(v, dict)
+                       for k in _missing if v.get(k)}
+            raise WeftError(
+                "task.invalid",
+                f"{kind} sites need top-level "
+                f"{', '.join(_missing)} in config",
+                stage="infra",
+                hints={"required": list(_need),
+                       **({"found_nested": _nested,
+                           "suggestion": "these keys belong at the TOP "
+                                         "level of config, not inside "
+                                         "a nested object"}
+                          if _nested else {}),
+                       "example": ({"host": "login.example.org",
+                                    "root": "~/weft"} if kind == "ssh"
+                                   else {"root": "~/weft"})})
         if kind == "local":
             adapter = LocalAdapter(
                 name, Path(config["root"]), pixi_source=config.get("pixi_source"),
@@ -1006,7 +1094,7 @@ class Weft:
 
     # -- environments ---------------------------------------------------------
 
-    def env_ensure(self, spec_or_id, update: bool = False,
+    def env_ensure(self, spec_or_id: str | dict, update: bool = False,
                    dry_run: bool = False, relax: str = "none") -> dict:
         """Resolve a spec (or return a known EnvID). Mark a constraint SOFT
         with a trailing '?' ("scipy ==1.14.1?") and pass relax="soft" to get
@@ -1945,7 +2033,7 @@ class Weft:
 
     # -- session environments (doc 03 §7) --------------------------------------
 
-    def session_start(self, env_id, site: str) -> dict:
+    def session_start(self, env_id: str | dict, site: str) -> dict:
         """Start a mutable scratch environment for iteration. Accepts an
         EnvID *or an inline spec* — and realizes the base itself if needed,
         so exploration costs one call, not three.
@@ -2054,8 +2142,8 @@ class Weft:
             session_id, self._session_adapter(session_id), cmd, note, source,
             full_clone=full_clone, writes_to=writes_to, verify=verify)
 
-    def ensure_available(self, target: dict, request: dict,
-                         lanes=None, verify=True,
+    def ensure_available(self, target: dict, request: dict | list,
+                         lanes: list[str] | None = None, verify=True,
                          probe: bool = False,
                          cran_repos: list[str] | None = None,
                          site: str | None = None,
@@ -2349,7 +2437,7 @@ class Weft:
     # -- kernels (persistent interactive interpreters) --------------------------
 
     def kernel_start(self, site: str, lang: str = "python",
-                     env_id: str | None = None,
+                     env_id: str | dict | None = None,
                      walltime: str = "08:00:00",
                      resources: dict | None = None,
                      label: str = "",
