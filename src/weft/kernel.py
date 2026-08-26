@@ -225,12 +225,12 @@ class KernelManager:
         adapter.write_file(f"{jobdir_rel}/{driver_file}", driver_src)
         adapter.write_file(
             f"{jobdir_rel}/activate.sh",
-            # hermetic interpreters (same umbrella as the runner): a
-            # version-matched ~/.local build must not shadow the kernel's
+            # hermetic interpreters (the one umbrella; R_LIBS_USER
+            # needs WEFT_PREFIX, so the lines go AFTER activation)
             (self.runner.site_prelude(site)
-             + "export PYTHONNOUSERSITE=1\n"
-             + activate + "\n").encode())
-        from .runner_util import activation_guard_lines
+             + activate + "\n"
+             + "\n".join(_hermetic_lines()) + "\n").encode())
+        from .runner_util import hermetic_interpreter_lines as _hermetic_lines, activation_guard_lines
         guard = "\n".join(activation_guard_lines(env_id or ns_env_id))
         adapter.write_file(
             f"{jobdir_rel}/cmd.sh",

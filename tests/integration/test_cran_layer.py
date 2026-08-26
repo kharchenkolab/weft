@@ -104,3 +104,39 @@ def test_subdir_ref_resolves_live():
     assert got["name"] == "xgboost"
     assert got["subdir"] == "R-package"
     assert got["sha"]
+
+
+@pytest.mark.docker
+def test_user_r_library_never_enters_libpaths(sshd_site, tmp_path,
+                                              pixi_bin, linux_platforms):
+    """Hostile-ambient battery, the R direction (aba2 casualty 1): a
+    user-level R library on the site must NOT appear on .libPaths —
+    pre-umbrella it sat FIRST, and a mismatched-libR binary there
+    segfaulted the env deterministically while reading as a package
+    bug."""
+    from weft.api import Weft
+    w = Weft(tmp_path / "ws-rlib", pixi_bin=pixi_bin)
+    w.register_site("beam", "ssh", {
+        "host": sshd_site["host"], "port": sshd_site["port"],
+        "user": sshd_site["user"], "ssh_opts": sshd_site["ssh_opts"],
+        "root": sshd_site["root"], "pixi_source": pixi_bin})
+    w.runner.poll_interval = 0.3
+    env = w.env_ensure({"name": "r-herm", "platforms": linux_platforms,
+                        "deps": {"conda": ["r-base"]}})
+    assert "env_id" in env, env
+    # forge the hostile ambient state: a user library with a marker
+    adapter = w._adapter("beam")
+    adapter.run_cmd("mkdir -p ~/R/library/forgedpkg && "
+                    "echo x > ~/R/library/forgedpkg/DESCRIPTION")
+    r = w.task_submit({
+        "command": "Rscript -e 'cat(paste(.libPaths(), collapse=\"\\n\"))'"
+                   " > results/libpaths.txt",
+        "env": env["env_id"], "outputs": ["results/"], "site": "beam"})
+    job = w.runner.wait(r["job_id"], 600)
+    assert job["state"] == "DONE", job.get("error")
+    out = next(o for o in job["manifest"]["outputs"]
+               if o["path"] == "results/libpaths.txt")
+    text = "\n".join(out["preview"]["lines"])
+    assert "/R/library" not in text.replace("lib/R/library", "")  # no ~lib
+    assert "weft-user-library" in text or ".pixi" in text
+    w.close()

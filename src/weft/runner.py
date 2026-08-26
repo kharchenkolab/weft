@@ -34,7 +34,8 @@ from .placement import rank_sites
 from .policy import enforce_policy, site_policy, storage_env_vars
 from .poller import SitePoller, Watch
 from .realize import ensure_realization
-from .runner_util import activation_guard_lines
+from .runner_util import (activation_guard_lines,
+                          hermetic_interpreter_lines)
 from .store import Store
 from .task import Task
 
@@ -353,13 +354,13 @@ class JobRunner:
             # LC_MESSAGES alone; task env_vars below can override both.
             "unset LC_ALL",
             "export LC_MESSAGES=C",
-            # hermetic interpreters: ~/.local site-packages must not
-            # leak into weft-launched python — neither the bare node
-            # interpreter (env=None) nor a managed env whose python
-            # version happens to match (a broken user-site build
-            # aborted an import with an opaque SystemError; aba note).
-            # task env_vars below can override (set to "" to opt out).
-            "export PYTHONNOUSERSITE=1",
+            # hermetic interpreters — ONE owner, all ecosystems
+            # (runner_util.hermetic_interpreter_lines: python user-site,
+            # R user library, pip user config); task env_vars below can
+            # override any of them (set to "" to opt out). cmd.sh runs
+            # as a child of the shell that sourced activate.sh, so
+            # WEFT_PREFIX is live here.
+            *hermetic_interpreter_lines(),
             f"export WEFT_JOB_ID={job_id_expr}",
             f"export WEFT_CPUS={task.resources.cpus}",
             f"export WEFT_MEM_GB={task.resources.mem_gb}",

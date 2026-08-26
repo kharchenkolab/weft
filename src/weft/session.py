@@ -1448,9 +1448,11 @@ class SessionManager:
         else verifies a different world than user code sees."""
         main, ns = self._stack_activation(s, adapter)
         overlay = adapter.path(f"{s['location']}/overlay.sh")
-        # hermetic interpreters: ~/.local site-packages must not leak
-        # into the composed runtime (same umbrella as the runner)
-        return (f"export PYTHONNOUSERSITE=1 && {main} && "
+        # hermetic interpreters (the one umbrella; after activation so
+        # R_LIBS_USER sees WEFT_PREFIX)
+        from .runner_util import hermetic_interpreter_lines
+        herm = " && ".join(hermetic_interpreter_lines())
+        return (f"{main} && {herm} && "
                 f"{{ [ -f {shlex.quote(overlay)} ] && "
                 f". {shlex.quote(overlay)}; true; }}"), ns
 

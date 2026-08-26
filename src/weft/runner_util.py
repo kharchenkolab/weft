@@ -80,3 +80,36 @@ def du_apparent_bytes_cmd(path_quoted: str) -> str:
     GNU-absent empty output into a failure so the fallback fires."""
     return (f"du -sb {path_quoted} 2>/dev/null | cut -f1 | grep . || "
             f"du -A -sk {path_quoted} 2>/dev/null | awk '{{print $1 * 1024}}'")
+
+
+def hermetic_interpreter_lines() -> list[str]:
+    """ONE owner for the interpreter-hermeticity umbrella (the aba2
+    R_LIBS_USER ask found PYTHONNOUSERSITE pasted at three sites with
+    no R analog — two live casualties, both directions):
+
+    interpreter | ambient surface        | vector           | verdict
+    python      | ~/.local site-packages | PYTHONNOUSERSITE | =1
+    R           | ~/R or ~/Library/R lib | R_LIBS_USER      | inside
+                |                        |                  | the env
+    pip         | ~/.pip/pip.conf        | PIP_CONFIG_FILE  | devnull
+                | (index-url override!)  |                  |
+    julia       | ~/.julia depot         | JULIA_DEPOT_PATH | set by
+                |                        |                  | the layer
+    R residual: ~/.Rprofile (R_PROFILE_USER) can still run at start —
+    documented, overridable via task env_vars; not defaulted off
+    because options(repos=…) profiles are load-bearing for some users.
+
+    R_LIBS_USER points INSIDE the env (${WEFT_PREFIX}, exported by
+    activation — these lines belong AFTER activation) so a user lib
+    with a mismatched libR can never enter .libPaths (the SIGSEGV
+    casualty: two libR images in one process, exit 139 on the first
+    heavy native call), and any in-env "user install" lands in a path
+    that dies with the env instead of breaking ~ (the dangling-libzstd
+    casualty). env=None jobs fall back to the sandbox ($PWD): equally
+    hermetic, dies with the run."""
+    return [
+        "export PYTHONNOUSERSITE=1",
+        'export R_LIBS_USER="${WEFT_PREFIX:-$PWD}/lib/R/'
+        'weft-user-library"',
+        "export PIP_CONFIG_FILE=/dev/null",
+    ]
