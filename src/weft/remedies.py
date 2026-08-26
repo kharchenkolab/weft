@@ -129,16 +129,20 @@ def cran_no_candidates(names: list[str], snapshot: str | None) -> str:
     (aba2 ask 32): 124 distinct wrong names produced 124 identical
     'unsatisfiable against the repository set' refusals and a 3-round
     misdiagnosis — a refusal that names the packages converts that to
-    a 10-second fix."""
+    a 10-second fix. FOUR applicability paths, each with a lever: the
+    first version shipped only three, and the solver lane's extra-repo
+    scenario (right name, undeclared repo) lost its r_repositories
+    steer for a day."""
     shown = ", ".join(names[:8]) + (" …" if len(names) > 8 else "")
     return (
         f"no candidates for: {shown} — CRAN names are case-sensitive "
         f"(check exact spelling on cran.r-project.org); a package "
         f"younger than the snapshot"
         + (f" ({snapshot})" if snapshot else "")
-        + " is invisible to it (raise cran_snapshot); conda-forge may "
-          "carry it as r-<name> in deps.conda; github sources spell "
-          "owner/repo@ref.")
+        + " is invisible to it (raise cran_snapshot); a package from a "
+          "lab/Posit/drat repo needs that repo declared in "
+          "r_repositories; conda-forge may carry it as r-<name> in "
+          "deps.conda; github sources spell owner/repo@ref.")
 
 
 # --------------------------------------------------------- realize lanes

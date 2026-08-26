@@ -120,6 +120,11 @@ def test_cran_no_candidates_names_and_truncates():
     got = cran_no_candidates(["WrongName"], "2026-01-01")
     assert "WrongName" in got and "2026-01-01" in got
     assert "case-sensitive" in got and "r-<name>" in got
+    # the FOURTH applicability path (right name, undeclared extra
+    # repo): the first version dropped this lever and the solver
+    # lane's extra-repo scenario lost its steer — four paths, four
+    # levers, all in one message
+    assert "r_repositories" in got
     many = cran_no_candidates([f"pkg{i}" for i in range(12)], None)
     assert "pkg7" in many and "pkg9" not in many and "…" in many
 
