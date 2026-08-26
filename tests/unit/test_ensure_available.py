@@ -286,14 +286,15 @@ def test_crash_mid_chain_releases_claim_and_converges(tmp_path, pixi_bin,
 
 def test_dialect_spelling_rides_the_chain(tmp_path, pixi_bin,
                                           monkeypatch):
-    """An R-namespace bare name derives conda's r-<lowercase> spelling;
-    the attempt records the spelling ACTUALLY used."""
+    """An R-namespace bare name derives BOTH conda spellings in rank
+    order — r-<lowercase>, then bioconductor-<lowercase> on a
+    not-found miss (bug5: guessing only the first sent every
+    Bioconductor ask through a guaranteed conda miss into the
+    source-only cran lane) — and every attempt records the spelling
+    ACTUALLY used."""
     w, sid = cold_session(tmp_path, pixi_bin)
     no_toolchain(monkeypatch)
     fail = WeftError("env.solve_conflict", "no conda build", stage="solve")
-    calls = _ranked_rig(monkeypatch, {
-        ("RNetCDF", "conda"): fail,          # keyed by DISPLAY name
-        ("RNetCDF", "cran"): "installed"})
     from weft.session import SessionManager
     spellings = []
 
@@ -310,14 +311,89 @@ def test_dialect_spelling_rides_the_chain(tmp_path, pixi_bin,
                 "session_id": session_id}
 
     monkeypatch.setattr(SessionManager, "install", keyed)
+    monkeypatch.setattr(
+        SessionManager, "_verify_exec_fn",
+        lambda self, s, ad: lambda sc, t: ShimResult(0, "", ""))
     out = w.ensure_available({"session": sid}, ["RNetCDF"],
                              lanes=["conda", "cran"])
     assert out["satisfied"] is True
-    assert ("conda", "r-rnetcdf") in spellings       # dialect derived
-    assert ("cran", "RNetCDF") in spellings          # registry name kept
-    atts = {a["lane"]: a for a in out["attempts"]}
-    assert atts["conda"]["spelling"] == "r-rnetcdf"
-    assert atts["cran"]["spelling"] == "RNetCDF"
+    assert spellings == [("conda", "r-rnetcdf"),
+                         ("conda", "bioconductor-rnetcdf"),
+                         ("cran", "RNetCDF")]
+    conda_atts = [a for a in out["attempts"] if a["lane"] == "conda"]
+    assert [a["spelling"] for a in conda_atts] == \
+        ["r-rnetcdf", "bioconductor-rnetcdf"]
+
+
+def test_dialect_autotry_stops_on_non_conflict(tmp_path, pixi_bin,
+                                               monkeypatch):
+    """Only a not-found-shaped miss (env.solve_conflict) advances to
+    the bioconductor candidate: a BUILD failure means the r-* spelling
+    exists and failed for a reason a respelling cannot fix — retrying
+    a different name would install a DIFFERENT package on the back of
+    a broken build."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    from weft.session import SessionManager
+    spellings = []
+
+    def keyed(self, session_id, adapter, conda=None, pypi=None,
+              cran=None, verify=None, **kw):
+        lane = "conda" if conda else ("pypi" if pypi else "cran")
+        spelling = (conda or pypi or cran)[0]
+        spellings.append((lane, spelling))
+        if lane == "conda":
+            raise WeftError("env.realize_failed", "broken build",
+                            stage="realize")
+        return {"installed": {lane: [spelling]},
+                "verified": {"RNetCDF": {"status": "passed",
+                                         "check": "loads"}},
+                "session_id": session_id}
+
+    monkeypatch.setattr(SessionManager, "install", keyed)
+    monkeypatch.setattr(
+        SessionManager, "_verify_exec_fn",
+        lambda self, s, ad: lambda sc, t: ShimResult(0, "", ""))
+    out = w.ensure_available({"session": sid}, ["RNetCDF"],
+                             lanes=["conda", "cran"])
+    assert out["satisfied"] is True
+    assert spellings == [("conda", "r-rnetcdf"), ("cran", "RNetCDF")], \
+        "realize failure must NOT advance to bioconductor-*"
+
+
+def test_explicit_spelling_never_expands(tmp_path, pixi_bin,
+                                         monkeypatch):
+    """A caller's per-lane spelling is law — the auto-try applies only
+    to weft's own derivation."""
+    w, sid = cold_session(tmp_path, pixi_bin)
+    no_toolchain(monkeypatch)
+    from weft.session import SessionManager
+    spellings = []
+
+    def keyed(self, session_id, adapter, conda=None, pypi=None,
+              cran=None, verify=None, **kw):
+        lane = "conda" if conda else ("pypi" if pypi else "cran")
+        spelling = (conda or pypi or cran)[0]
+        spellings.append((lane, spelling))
+        if lane == "conda":
+            raise WeftError("env.solve_conflict", "not here",
+                            stage="solve")
+        return {"installed": {lane: [spelling]},
+                "verified": {"RNetCDF": {"status": "passed",
+                                         "check": "loads"}},
+                "session_id": session_id}
+
+    monkeypatch.setattr(SessionManager, "install", keyed)
+    monkeypatch.setattr(
+        SessionManager, "_verify_exec_fn",
+        lambda self, s, ad: lambda sc, t: ShimResult(0, "", ""))
+    out = w.ensure_available(
+        {"session": sid},
+        [{"name": "RNetCDF", "conda": "r-rnetcdf", "cran": "RNetCDF"}],
+        lanes=["conda", "cran"])
+    assert out["satisfied"] is True
+    assert spellings == [("conda", "r-rnetcdf"), ("cran", "RNetCDF")], \
+        "explicit spellings must not grow an auto-try candidate"
 
 
 def test_dialect_requires_effective_verify(tmp_path, pixi_bin,
@@ -412,6 +488,63 @@ def test_probe_uses_the_one_dialect_function(tmp_path, pixi_bin,
                        lanes=["conda", "cran"], probe=True)
     assert ("conda", "r-rnetcdf") in asked      # the dialect, in probe
     assert ("cran", "RNetCDF") in asked
+
+
+def test_probe_tries_bioconductor_on_bioconda(monkeypatch):
+    """Probe/chain parity for the two-candidate dialect: the r-* miss
+    advances to bioconductor-<lower>, and THAT spelling is asked of
+    the bioconda channel — bioconductor builds live there; asking
+    conda-forge would 404 every real one."""
+    from weft import probe as probe_mod
+    calls = []
+
+    def fake_conda(name, channel="conda-forge"):
+        calls.append((name, channel))
+        if name.startswith("bioconductor-"):
+            return {"available": True, "spelling": name}
+        return {"available": False, "spelling": name}
+
+    monkeypatch.setattr(probe_mod, "probe_conda", fake_conda)
+    monkeypatch.setitem(probe_mod._BACKENDS, "conda", fake_conda)
+    f = probe_mod._probe_candidates(
+        "conda", ["r-dataidx.alpha", "bioconductor-dataidx.alpha"])
+    assert f["available"] is True
+    assert f["spelling"] == "bioconductor-dataidx.alpha"
+    assert calls == [("r-dataidx.alpha", "conda-forge"),
+                     ("bioconductor-dataidx.alpha", "bioconda")]
+
+
+def test_probe_candidate_miss_names_the_search(monkeypatch):
+    from weft import probe as probe_mod
+
+    def fake_conda(name, channel="conda-forge"):
+        return {"available": False, "spelling": name}
+
+    monkeypatch.setattr(probe_mod, "probe_conda", fake_conda)
+    monkeypatch.setitem(probe_mod._BACKENDS, "conda", fake_conda)
+    f = probe_mod._probe_candidates("conda", ["r-x", "bioconductor-x"])
+    assert f["available"] is False
+    assert f["tried"] == ["r-x", "bioconductor-x"], \
+        "a miss must name every spelling it tried (the fact IS the advice)"
+
+
+def test_probe_candidate_unknown_never_false(monkeypatch):
+    """Honesty across candidates: if any candidate answered UNKNOWN,
+    the combined fact is unknown — a false built on an unanswered
+    query is a lie an agent would rank on."""
+    from weft import probe as probe_mod
+
+    def fake_conda(name, channel="conda-forge"):
+        if name.startswith("r-"):
+            return {"available": "unknown", "spelling": name,
+                    "reason": "api http 503"}
+        return {"available": False, "spelling": name}
+
+    monkeypatch.setattr(probe_mod, "probe_conda", fake_conda)
+    monkeypatch.setitem(probe_mod._BACKENDS, "conda", fake_conda)
+    f = probe_mod._probe_candidates("conda", ["r-x", "bioconductor-x"])
+    assert f["available"] == "unknown"
+    assert f["tried"] == ["r-x", "bioconductor-x"]
 
 
 # ── aba check-in: ranked cran_repos + env-target site= verify-now ──────────

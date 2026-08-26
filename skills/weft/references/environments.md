@@ -119,9 +119,10 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   CRAN-only packages — the closure around them costs nothing extra now.
   PPM binary trees serve realize-time installs where the site's distro
   is whitelisted, with a per-package load-check that rebuilds broken-
-  ABI binaries from source (BOTH cran lanes); site policy
-  `ppm_binaries: false` forces plain source everywhere (the
-  conda-R-vs-distro-binary posture).
+  ABI binaries from source (EVERY cran install lane: solver realize,
+  overlay, and session rlib — session `cran_repos`/site config PPM
+  URLs platformize too); site policy `ppm_binaries: false` forces
+  plain source everywhere (the conda-R-vs-distro-binary posture).
   Realization narrates (`realize.prefix`/`realize.layer`/
   `realize.progress` events) — poll events during env_realize instead
   of assuming a silent call hung. Version-pinned interpreters
@@ -155,9 +156,13 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   (tagged; `{"session_id"}`/`{"env_id"}` are accepted target-key
   aliases) or `ensure_available({"session": sid}, ["Name"],
   lanes=["conda", "cran"])` (ranked — YOUR lane order; the substrate
-  speaks each lane's dialect and records the spelling; a lane succeeds
-  only if its postcondition passes; outages HALT; exhaustion is
-  `env.unavailable_in_lanes` and each attempt carries its own levers).
+  speaks each lane's dialect: an R-namespace bare name on conda tries
+  `r-<lowercase>` then `bioconductor-<lowercase>` on a not-found miss
+  (probe asks bioconda for the second; explicit per-lane spellings
+  never expand) and every attempt records the spelling; a lane
+  succeeds only if its postcondition passes; outages HALT; exhaustion
+  is `env.unavailable_in_lanes` and each attempt carries its own
+  levers).
   `fast=False` pulls the snapshot's conflict check to ADD TIME
   (typed env.solve_conflict, nothing installed/recorded — route the
   leaf to an isolated env or relax the pin); default stays fast with
@@ -214,7 +219,12 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     ["xz"])` — a deps-extended build toolchain serves the headers/libs
     (base untouched; rpath'd so the compiled .so resolves at runtime);
     the snapshot folds build_deps into deps.conda (runtime linkage).
-    The missing_system_lib hint names this lever.
+    The missing_system_lib hint names this lever. Compilers themselves
+    need no lever anywhere: the cran lane brings weft's toolchain
+    eagerly, and every pypi install lane (and env realize) retries a
+    compile-signature failure once with it on PATH
+    (`session.toolchain_retry` / `realize.toolchain_retry`),
+    build_deps included.
   - Clone honesty: sessions dir and base on different devices ⇒ CoW
     can't apply, clone = full copy — `cross_device_note` on the result
     + `session.cross_device` event. `capabilities.storage.reflink`
@@ -384,7 +394,10 @@ full-prefix realizations to byte-identical task outputs.
   headers/libs; artifacts are cached by (source SHA, parent EnvID,
   platform, resolved toolchain lock) — an `env_repair` + rebuild, or a
   colleague on the same site, pays an untar, not a compile
-  (`overlay.compile_cache_hit`).
+  (`overlay.compile_cache_hit`). Full-prefix realizes get the same
+  toolchain lazily: a `pixi install` death wearing a compile signature
+  is retried once with it on PATH (`realize.toolchain_retry`) — never
+  put compilers in `deps.conda` to work around a site.
 - **Verification gate:** after composing, every delta package is loaded
   (R: `library()`; python: metadata visibility by distribution name) plus
   a sample of the parent's — shadowing or ABI trouble triggers

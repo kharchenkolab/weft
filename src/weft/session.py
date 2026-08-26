@@ -474,6 +474,52 @@ class SessionManager:
         if line not in current:
             adapter.write_file(rel, (current + line + "\n").encode())
 
+    def _session_toolchain_prelude(self, s: dict,
+                                   adapter: SiteAdapter) -> str:
+        """Weft's toolchain as an INLINE shell prelude for session-layer
+        source builds — ONE owner for every session lane (cran eager,
+        pypi lazy): compilers + pkg-config on PATH, the session's
+        build_deps extending the toolchain prefix, '' when the site
+        cannot provision (callers degrade to the toolchain-less build
+        and its typed failure). Inline because every consumer splices
+        it AFTER activation — the shell-hook's baked PATH would
+        silently drop a prelude sourced before it."""
+        try:
+            from .realize import _site_platform
+            from .toolchain import build_env_prelude, ensure_toolchain
+            tc = ensure_toolchain(
+                adapter, adapter.pixi_bin,
+                _site_platform((self.store.get_site(adapter.name) or {})
+                               .get("capabilities") or {}),
+                extra_deps=tuple(s.get("build_deps") or ()),
+                emit=self.store.emit)
+            if not tc:
+                return ""
+            return build_env_prelude(
+                adapter, tc, adapter.path(s["location"])
+            ).replace("\n", "; ").rstrip("; ")
+        except WeftError:
+            return ""
+
+    def _pypi_build_retry_prelude(self, s: dict, adapter: SiteAdapter,
+                                  code: str, tail: str) -> str:
+        """THE gate for the lazy pypi-toolchain arm (bug5 A1: every
+        pypi session lane ran bare pip/uv while the cran lane carried
+        the toolchain — an sdist needing g++ died identically in all
+        four). A pypi install that died BUILDING — env.realize_failed
+        verdict AND a compile signature in the tail — earns ONE retry
+        with the toolchain prelude; solve and network verdicts never
+        pay for a toolchain build. Returns the inline prelude, or ''
+        (no retry: wrong verdict, no signature, or unprovisionable)."""
+        from .evidence import compile_signature
+        if code != "env.realize_failed" or not compile_signature(tail):
+            return ""
+        p = self._session_toolchain_prelude(s, adapter)
+        if p:
+            self.store.emit("session.toolchain_retry",
+                            session=s["session_id"], lane="pypi")
+        return p
+
     def _materialize_rlib(self, s: dict, adapter: SiteAdapter,
                           cran: list[str],
                           extra_repos: list[str] | None = None) -> dict:
@@ -492,8 +538,16 @@ class SessionManager:
         site_row = self.store.get_site(adapter.name) or {}
         default_repo = (site_row.get("config") or {}).get(
             "cran_repos", "https://cloud.r-project.org")
+        # PPM URLs get the site's binary segment HERE too (bug5 A3):
+        # the solver lanes have platformized through site_ppm_url since
+        # aba 1.2, while this lane served source-only from the SAME
+        # configured URL — 11/11 "installing *source* package" on a
+        # binary-capable site. One owner: non-PPM URLs and the
+        # ppm_binaries:false policy pass through untouched.
+        from .solvers import site_ppm_url
         repo_urls = list(dict.fromkeys(
-            list(extra_repos or []) + [default_repo]))
+            site_ppm_url(u, adapter)
+            for u in list(extra_repos or []) + [default_repo]))
         # every caller string entering R code goes through json.dumps —
         # the same parity solvers.py keeps; a bare quote in a name/url/
         # ref would otherwise break OUT of the R string (injection sweep)
@@ -524,26 +578,21 @@ class SessionManager:
         vec = ", ".join(_json.dumps(n) for n in plain)
         # CRAN routinely compiles: bring weft's toolchain like the
         # overlay build does (best-effort — pure-R needs none)
-        prelude = ""
-        try:
-            from .realize import _site_platform
-            from .toolchain import build_env_prelude, ensure_toolchain
-            tc = ensure_toolchain(
-                adapter, adapter.pixi_bin,
-                _site_platform((self.store.get_site(adapter.name) or {})
-                               .get("capabilities") or {}),
-                extra_deps=tuple(s.get("build_deps") or ()),
-                emit=self.store.emit)
-            if tc:
-                prelude = build_env_prelude(adapter, tc, sdir)
-        except WeftError:
-            pass
+        prelude_inline = self._session_toolchain_prelude(s, adapter)
         parts = ['options(Ncpus=max(1L, as.integer(Sys.getenv('
                  '"WEFT_BUILD_JOBS", "2"))))',
                  f"repos <- c({repos_vec})"]
         if plain:
             parts.append(
                 f"install.packages(c({vec}), lib=\"{rlib}\", repos=repos)")
+            # binaries a PPM repo served that fail to LOAD under conda's
+            # R rebuild from source — the same one-owner arm the solver
+            # lanes run (serving binaries without it would ratify
+            # broken installs; the presence check below only proves the
+            # directory exists)
+            from .solvers import _r_loadcheck
+            parts.append(_r_loadcheck(
+                f"c({vec})", _json.dumps(rlib), "repos").rstrip(";"))
         if refs:
             # remotes bootstraps itself into the session layer once;
             # install_github RAISES on failure (unlike install.packages,
@@ -572,7 +621,6 @@ class SessionManager:
         # system compilers on Ubuntu sites; a bare RHEL10 VM finally
         # showed configure finding no pkg-config while the deps prefix
         # sat fully provisioned (eight-asks D reality catch).
-        prelude_inline = prelude.replace("\n", "; ").rstrip("; ")
         script = (act + " && "
                   + (prelude_inline + " && " if prelude_inline else "")
                   + f"{_build_jobs_prefix(None)}"
@@ -1046,7 +1094,7 @@ class SessionManager:
         and NO synthesized suggestion — the attempts are the advice."""
         import time as _t
         from .verify import run_grouped, default_checks, usable_want
-        from .spec import lane_spelling, request_namespace, \
+        from .spec import lane_spellings, request_namespace, \
             split_constraint
         norm: list[tuple[str, dict]] = []
         for e in packages:
@@ -1126,9 +1174,9 @@ class SessionManager:
                                     session=session_id, lane=lane,
                                     outcome="skipped", code=None)
                     continue
-                spelling = (overrides.get(pkg, {}).get(lane)
-                            or lane_spelling(pkg, lane, ns))
-                if lane != "cran" and "/" in spelling.partition("@")[0]:
+                ov = overrides.get(pkg, {}).get(lane)
+                cands = [ov] if ov else lane_spellings(pkg, lane, ns)
+                if lane != "cran" and "/" in cands[0].partition("@")[0]:
                     # this lane's grammar cannot speak the spec — a
                     # skipped lane, not a burned typed failure
                     attempts.append({"lane": lane, "package": pkg,
@@ -1138,45 +1186,58 @@ class SessionManager:
                                     session=session_id, lane=lane,
                                     outcome="skipped", code=None)
                     continue
-                t0 = _t.monotonic()
-                try:
-                    out = self.install(session_id, adapter,
-                                       **{lane: [spelling]},
-                                       verify=(verify if eff is not None
-                                               else None),
-                                       fast=fast,
-                                       cran_repos=(cran_repos
-                                                   if lane == "cran"
-                                                   else None))
-                    a = {"lane": lane, "package": pkg,
-                         "spelling": spelling,
-                         "outcome": ("installed" if eff is not None
-                                     else "installed_unverified"),
-                         "seconds": round(_t.monotonic() - t0, 2)}
-                    if lane == "cran" and cran_repos:
-                        a["repositories"] = list(cran_repos)
-                    if out.get("shadows_base"):
-                        a["shadows_base"] = out["shadows_base"]
-                    verified.update(out.get("verified") or {})
-                    success = True
-                    installed_count += 1
-                except WeftError as e:
-                    a = {"lane": lane, "package": pkg,
-                         "spelling": spelling,
-                         "outcome": ("refused"
-                                     if e.code == "session.cold_base"
-                                     else "failed"),
-                         "error": e.to_dict(),
-                         "seconds": round(_t.monotonic() - t0, 2)}
-                    verified.update((e.hints or {}).get("verified") or {})
-                    if e.code in ("internal.error", "site.unreachable",
-                                  "sched.timeout"):
-                        halting = e
-                attempts.append(a)
-                self.store.emit("session.ensure_attempt",
-                                session=session_id, lane=lane,
-                                outcome=a["outcome"],
-                                code=(a.get("error") or {}).get("error"))
+                for spelling in cands:
+                    t0 = _t.monotonic()
+                    try:
+                        out = self.install(session_id, adapter,
+                                           **{lane: [spelling]},
+                                           verify=(verify
+                                                   if eff is not None
+                                                   else None),
+                                           fast=fast,
+                                           cran_repos=(cran_repos
+                                                       if lane == "cran"
+                                                       else None))
+                        a = {"lane": lane, "package": pkg,
+                             "spelling": spelling,
+                             "outcome": ("installed" if eff is not None
+                                         else "installed_unverified"),
+                             "seconds": round(_t.monotonic() - t0, 2)}
+                        if lane == "cran" and cran_repos:
+                            a["repositories"] = list(cran_repos)
+                        if out.get("shadows_base"):
+                            a["shadows_base"] = out["shadows_base"]
+                        verified.update(out.get("verified") or {})
+                        success = True
+                        installed_count += 1
+                    except WeftError as e:
+                        a = {"lane": lane, "package": pkg,
+                             "spelling": spelling,
+                             "outcome": ("refused"
+                                         if e.code == "session.cold_base"
+                                         else "failed"),
+                             "error": e.to_dict(),
+                             "seconds": round(_t.monotonic() - t0, 2)}
+                        verified.update((e.hints or {})
+                                        .get("verified") or {})
+                        if e.code in ("internal.error", "site.unreachable",
+                                      "sched.timeout"):
+                            halting = e
+                    attempts.append(a)
+                    self.store.emit(
+                        "session.ensure_attempt",
+                        session=session_id, lane=lane,
+                        outcome=a["outcome"],
+                        code=(a.get("error") or {}).get("error"))
+                    if success or halting is not None:
+                        break
+                    if (a.get("error") or {}).get("error") \
+                            != "env.solve_conflict":
+                        # only a not-found-shaped miss advances to the
+                        # NEXT dialect candidate — any other verdict
+                        # means the spelling exists and failed for a
+                        # reason a respelling cannot fix
+                        break
                 if success:
                     break
             (satisfied_pkgs if success else unsatisfied).append(pkg)
@@ -1237,13 +1298,24 @@ class SessionManager:
                 from .evidence import failure_evidence, run_logged
                 log_rel = (f"logs/{s['session_id']}"
                            "-clone-replay.log")
-                r = run_logged(
-                    adapter,
+                replay_cmd = (
                     f"{shlex.quote(adapter.pixi_bin)} add --pypi "
                     f"--manifest-path {shlex.quote(manifest)} "
                     + " ".join(shlex.quote(_pixi_spec(x))
-                               for x in pypi_rec),
-                    log_rel, timeout=900)
+                               for x in pypi_rec))
+                r = run_logged(adapter, replay_cmd, log_rel, timeout=900)
+                if r.rc != 0:
+                    # the replay REBUILDS any sdists — an install that
+                    # only ever succeeded with the toolchain (bug5 A1)
+                    # would die here without the same arm
+                    tail = (r.err or r.out)[-1500:]
+                    pl = self._pypi_build_retry_prelude(
+                        s, adapter, _pixi_add_failure(tail)[0], tail)
+                    if pl:
+                        log_rel = (f"logs/{s['session_id']}"
+                                   "-clone-replay-tc.log")
+                        r = run_logged(adapter, pl + " && " + replay_cmd,
+                                       log_rel, timeout=900)
                 if r.rc != 0:
                     raise WeftError(
                         "env.realize_failed",
@@ -1367,14 +1439,29 @@ class SessionManager:
                            or "unrecognized arguments" in (ra.err + ra.out)):
             from .evidence import failure_evidence, run_logged
             lg = f"logs/{s['session_id']}-pypi-target.log"
-            r = run_logged(adapter, wrap(
-                f"{act} && mkdir -p {shlex.quote(pylib)} && "
-                f"python -m pip install --no-input --quiet "
-                f"--target {shlex.quote(pylib)} {specs}"),
-                lg, timeout=1800, runner=adapter.run_activated)
+
+            def _target_cmd(pl: str = "") -> str:
+                return (f"{act} && " + (f"{pl} && " if pl else "")
+                        + f"mkdir -p {shlex.quote(pylib)} && "
+                        f"python -m pip install --no-input --quiet "
+                        f"--target {shlex.quote(pylib)} {specs}")
+
+            r = run_logged(adapter, wrap(_target_cmd()), lg,
+                           timeout=1800, runner=adapter.run_activated)
             if r.rc != 0:
                 tail = (r.err or r.out)[-1500:]
                 code, retryable = _pip_failure(tail)
+                pl = self._pypi_build_retry_prelude(s, adapter, code,
+                                                    tail)
+                if pl:
+                    lg = f"logs/{s['session_id']}-pypi-target-tc.log"
+                    r = run_logged(adapter, wrap(_target_cmd(pl)), lg,
+                                   timeout=1800,
+                                   runner=adapter.run_activated)
+                    if r.rc != 0:
+                        tail = (r.err or r.out)[-1500:]
+                        code, retryable = _pip_failure(tail)
+            if r.rc != 0:
                 hints = {"requested": list(pypi),
                          **failure_evidence(adapter, lg, r.out)}
                 if code == "env.realize_failed":
@@ -1408,20 +1495,25 @@ class SessionManager:
                 # phase B is --no-deps at exact pins: uv (when the site
                 # has it) is much faster at wheel fetch/extract; pip is
                 # the always-there fallback — the marker says which ran
-                fetch_cmd = (
-                    f"{act} && mkdir -p {shlex.quote(pylib)} && "
-                    f"if command -v uv >/dev/null 2>&1 && "
-                    f"uv pip install --no-deps --target {shlex.quote(pylib)} "
-                    f"--python \"$(command -v python)\" {pins} "
-                    f">/dev/null 2>&1; then echo '#fetch uv'; "
-                    f"else python -m pip install --no-deps --no-input "
-                    f"--quiet --target {shlex.quote(pylib)} {pins} "
-                    f"&& echo '#fetch pip'; fi")
+
+                def _fetch_cmd(pl: str = "") -> str:
+                    return (
+                        f"{act} && " + (f"{pl} && " if pl else "")
+                        + f"mkdir -p {shlex.quote(pylib)} && "
+                        f"if command -v uv >/dev/null 2>&1 && "
+                        f"uv pip install --no-deps "
+                        f"--target {shlex.quote(pylib)} "
+                        f"--python \"$(command -v python)\" {pins} "
+                        f">/dev/null 2>&1; then echo '#fetch uv'; "
+                        f"else python -m pip install --no-deps --no-input "
+                        f"--quiet --target {shlex.quote(pylib)} {pins} "
+                        f"&& echo '#fetch pip'; fi")
+
                 t1 = _t.monotonic()
                 from .evidence import failure_evidence, run_logged
                 lgb = f"logs/{s['session_id']}-pypi-fetch.log"
                 try:
-                    rb = run_logged(adapter, wrap(fetch_cmd), lgb,
+                    rb = run_logged(adapter, wrap(_fetch_cmd()), lgb,
                                     timeout=1800,
                                     runner=adapter.run_activated)
                 except WeftError as e:
@@ -1434,6 +1526,23 @@ class SessionManager:
                     # was always the wrong verdict for this raise
                     tail = (rb.err or rb.out)[-1500:]
                     code, retryable = _pip_failure(tail)
+                    pl = self._pypi_build_retry_prelude(s, adapter,
+                                                        code, tail)
+                    if pl:
+                        lgb = f"logs/{s['session_id']}-pypi-fetch-tc.log"
+                        try:
+                            rb = run_logged(adapter, wrap(_fetch_cmd(pl)),
+                                            lgb, timeout=1800,
+                                            runner=adapter.run_activated)
+                        except WeftError as e:
+                            raise _keep_transport_code(
+                                e, "the pypi toolchain retry stalled "
+                                   "or timed out",
+                                missing=missing) from e
+                        if rb.rc != 0:
+                            tail = (rb.err or rb.out)[-1500:]
+                            code, retryable = _pip_failure(tail)
+                if rb.rc != 0:
                     hints = {"missing": missing,
                              **failure_evidence(adapter, lgb,
                                                 rb.out)}
@@ -1772,10 +1881,22 @@ class SessionManager:
             )
         _t_add = time.monotonic()
         r = adapter.run_cmd(" && ".join(parts), timeout=900)
-        _add_s = round(time.monotonic() - _t_add, 2)
         if r.rc != 0:
             tail = (r.err or r.out)[-1500:]
             code, retryable, why, stg = _pixi_add_failure(tail)
+            # the lazy pypi-toolchain arm (bug5 A1) covers this lane
+            # too: pixi add builds sdists through uv with whatever PATH
+            # holds — conda-only adds never compile, so pypi gates it
+            pl = (self._pypi_build_retry_prelude(s, adapter, code, tail)
+                  if pypi else "")
+            if pl:
+                r = adapter.run_cmd(pl + " && " + " && ".join(parts),
+                                    timeout=900)
+                if r.rc != 0:
+                    tail = (r.err or r.out)[-1500:]
+                    code, retryable, why, stg = _pixi_add_failure(tail)
+        _add_s = round(time.monotonic() - _t_add, 2)
+        if r.rc != 0:
             hints = {"log_tail": tail, "requested": conda + pypi}
             if code == "env.realize_failed":
                 hints.update(_syslib_hints(tail) or {})

@@ -57,6 +57,40 @@ _SYSLIB_PATTERNS: tuple[tuple[str | None, re.Pattern], ...] = (
 )
 
 
+# The broader COMPILE-STAGE signature (bug5 A1): superset of the
+# syslib class — a missing compiler, a dead sdist/wheel build, a
+# setup.py subprocess failure. Gates the lazy retry-with-toolchain in
+# the realize and session pypi lanes: a network or solve failure must
+# never pay a toolchain build plus a full re-install, while every
+# build-shaped death deserves one retry with weft's compilers on PATH.
+# Marker families ride the stderr corpus lane
+# (tests/fixtures/stderr_corpus/) — append the verbatim output of any
+# misclassification incident there.
+_COMPILE_PATTERNS: tuple[re.Pattern, ...] = (
+    # setuptools/distutils spawning a missing tool:
+    #   error: [Errno 2] No such file or directory: 'g++'
+    #   unable to execute 'gcc': No such file or directory
+    re.compile(r"No such file or directory: "
+               r"'(?:cc|c\+\+|gcc|g\+\+|clang|clang\+\+|gfortran|"
+               r"make|cmake|ninja|pkg-config)'"),
+    re.compile(r"unable to execute '[^']+'"),
+    # generic build-backend subprocess death:
+    #   error: command '/usr/bin/g++' failed with exit code 1
+    re.compile(r"error: command '[^']+' failed"),
+    # pip / uv build-stage verdicts (absent from solve/network output)
+    re.compile(r"Failed building wheel for \S+"),
+    re.compile(r"Failed to build `?[\w.-]+"),
+)
+
+
+def compile_signature(text: str) -> bool:
+    """Does this log show a COMPILE-stage failure? One owner for the
+    retry-with-toolchain gates (realize prefix, session pypi lanes)."""
+    if _syslib_hints(text) is not None:
+        return True
+    return any(rx.search(text) for rx in _COMPILE_PATTERNS)
+
+
 def _syslib_hints(text: str) -> dict | None:
     """Scan a BUILD-failure log for the missing-system-library shape.
     Returns hint keys to merge (failure_class + captured names +

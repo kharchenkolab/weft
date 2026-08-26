@@ -121,6 +121,33 @@ def site_ppm_url(url: str, adapter) -> str:
     return ppm_platform_url(url, cached[0], cached[1])
 
 
+def _r_loadcheck(pkgs: str, lib: str, repos: str) -> str:
+    """THE PPM-binary load-check + per-package source rebuild — one
+    owner for every cran install lane (solver realize, solver overlay,
+    session rlib). PPM linux binaries target the distro's system R:
+    under conda's R they can install yet fail to LOAD, and a presence
+    check ratifies the broken install (aba2 ABI note). Detect by
+    loadNamespace, rebuild the failures from the plain-source repo
+    (the __linux__ segment stripped). bug5 A3 made the session lane
+    the third consumer — a third inline copy of this R fragment is
+    the two-implementations bug, hence the function. Arguments are R
+    EXPRESSIONS (already quoted, valid R)."""
+    return (
+        f'chk <- intersect({pkgs}, '
+        f'rownames(installed.packages(lib.loc={lib})));'
+        'bad <- Filter(function(x) inherits(tryCatch('
+        f'loadNamespace(x, lib.loc={lib}), error=function(e) e), '
+        '"error"), chk);'
+        'if (length(bad)) {'
+        ' write(paste("binary load failed, rebuilding from source:",'
+        ' paste(bad, collapse=",")), stderr());'
+        f' srcrepo <- sub("__linux__/[^/]+/", "", {repos});'
+        f' remove.packages(bad, lib={lib});'
+        f' install.packages(bad, lib={lib}, repos=srcrepo, '
+        'type="source") };'
+    )
+
+
 def _build_jobs_prefix(build_jobs: int | None) -> str:
     """Shell prefix exporting the source-build parallelism pair: R reads
     WEFT_BUILD_JOBS into options(Ncpus) (across packages), make reads
@@ -730,17 +757,9 @@ class CranSolver:
             'rownames(installed.packages(lib.loc=l))));'
             'p <- c({pkgs}); p <- setdiff(p, c(have, ""));'
             'if (length(p)) install.packages(p, lib=lib);'
-            # PPM linux binaries assume distro glibc; on older hosts they
-            # install but fail to *load* — detect and rebuild those from source
-            'chk <- intersect(c({pkgs}), rownames(installed.packages(lib.loc=lib)));'
-            'bad <- Filter(function(x) inherits(tryCatch('
-            'loadNamespace(x, lib.loc=lib), error=function(e) e), "error"), chk);'
-            'if (length(bad)) {{'
-            ' write(paste("binary load failed, rebuilding from source:",'
-            ' paste(bad, collapse=",")), stderr());'
-            ' srcrepo <- sub("__linux__/[^/]+/", "", getOption("repos"));'
-            ' remove.packages(bad, lib=lib);'
-            ' install.packages(bad, lib=lib, repos=srcrepo, type="source") }};'
+            # PPM binaries can install yet fail to load — the one-owner
+            # arm (_r_loadcheck) detects and rebuilds from source
+            '{loadcheck}'
             '{ghinstall}'
             'need <- c({top});'
             # presence across ALL activated libraries — a top-level ask
@@ -752,7 +771,10 @@ class CranSolver:
         ).format(repovec=", ".join(
                      f"R{i}={_json.dumps(u)}" for i, u in enumerate(repos)),
                  lib=_json.dumps(rlib),
-                 pkgs=", ".join(_json.dumps(x) for x in cran_names) or '""',
+                 pkgs=(pkgs_r := ", ".join(_json.dumps(x)
+                                           for x in cran_names) or '""'),
+                 loadcheck=_r_loadcheck(f"c({pkgs_r})", "lib",
+                                        'getOption("repos")'),
                  ghinstall=_r_gh_install(layer["records"]),
                  top=", ".join(_json.dumps(x) for x in top) or 'character(0)')
         # converge, don't flinch: the R code is incremental (installed
@@ -889,19 +911,9 @@ class CranSolver:
             'rownames(installed.packages(lib.loc=l))));'
             'p <- setdiff(c({pkgs}), c(have, ""));'
             'if (length(p)) install.packages(p, lib=lib);'
-            # PPM binary load-check + per-package source rebuild — the
-            # SAME arm realize_layer carries (aba2 ABI note: distro-built
-            # binaries under conda R fail at LOAD, not install; presence
-            # checks ratified broken installs on this lane)
-            'chk <- intersect(c({pkgs}), rownames(installed.packages(lib.loc=lib)));'
-            'bad <- Filter(function(x) inherits(tryCatch('
-            'loadNamespace(x, lib.loc=lib), error=function(e) e), "error"), chk);'
-            'if (length(bad)) {{'
-            ' write(paste("binary load failed, rebuilding from source:",'
-            ' paste(bad, collapse=",")), stderr());'
-            ' srcrepo <- sub("__linux__/[^/]+/", "", getOption("repos"));'
-            ' remove.packages(bad, lib=lib);'
-            ' install.packages(bad, lib=lib, repos=srcrepo, type="source") }};'
+            # PPM binaries can install yet fail to load — the one-owner
+            # arm (_r_loadcheck) detects and rebuilds from source
+            '{loadcheck}'
             '{ghinstall}'
             'need <- c({need});'
             'have2 <- unlist(lapply(.libPaths(), function(l) '
@@ -913,7 +925,11 @@ class CranSolver:
                          [site_ppm_url(u, adapter) for u in
                           (layer.get("repos") or [layer["snapshot"]])])),
                  lib=_json.dumps(rlib), plib=_json.dumps(parent_rlib),
-                 pkgs=", ".join(_json.dumps(x) for x in cran_names) or 'character(0)',
+                 pkgs=(opkgs_r := ", ".join(_json.dumps(x)
+                                            for x in cran_names)
+                       or 'character(0)'),
+                 loadcheck=_r_loadcheck(f"c({opkgs_r})", "lib",
+                                        'getOption("repos")'),
                  ghinstall=_r_gh_install(recs),
                  need=", ".join(_json.dumps(x) for x in added) or 'character(0)')
         _w = pack_tools.get("wrap_cmd") or (lambda s: s)

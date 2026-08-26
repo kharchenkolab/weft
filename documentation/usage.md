@@ -625,12 +625,15 @@ Ranked mode: `ensure_available(target, ["RNetCDF"], lanes=["conda",
 a lane succeeds only if its postcondition passes (verify-in-loop; a
 failed lane's record is retracted and the chain continues), outages
 HALT, exhaustion is `env.unavailable_in_lanes` with every attempt.
-The substrate speaks each lane's DIALECT (an R-namespace bare name is
-`r-<lowercase>` on conda — one documented derivation, used by probe
-too; attempts record the `spelling` used); dialect requires an
-effective postcondition, and a bare name across cran+pypi is refused
-as ambiguous (per-lane spellings `{"name": "X", "pypi": "x"}` are the
-escape). `fast=False` pulls the snapshot's conflict check FORWARD:
+The substrate speaks each lane's DIALECT (an R-namespace bare name on
+conda tries `r-<lowercase>` and then, on a not-found miss,
+`bioconductor-<lowercase>` — one documented derivation, used by probe
+too, which asks bioconda for the bioconductor spelling; every attempt
+records the `spelling` actually used, and a probe miss carries
+`tried` naming each candidate); dialect requires an effective
+postcondition, and a bare name across cran+pypi is refused as
+ambiguous (per-lane spellings `{"name": "X", "pypi": "x"}` are the
+escape — explicit spellings are law and never expand). `fast=False` pulls the snapshot's conflict check FORWARD:
 pypi adds solve the full manifest at add time — a base-contradicting
 leaf fails there as a typed `env.solve_conflict` (solver message,
 `at: add-time`), and nothing is installed or recorded; the overlay
@@ -666,6 +669,20 @@ shapes: `hints.failure_class`, `hints.missing_system`
 naming the real lever — an isolated env with a full solve, never a
 session-lane retry.
 
+Compiles never depend on site compilers: every install lane that can
+hit a source build brings weft's own toolchain — the cran session
+lane eagerly (R routinely compiles), the pypi session lanes and env
+realizes lazily (wheels dominate, so a failure wearing a compile
+signature is retried ONCE with the toolchain on PATH;
+`session.toolchain_retry` / `realize.toolchain_retry` narrates, and
+the retry persists its own log beside the first attempt's). Compilers
+therefore never belong in a spec's deps. `deps.conda` IS the right
+home for libraries a compiled artifact LINKS (the xz/hdf5 class:
+headers at build time and shared objects at runtime — those bytes are
+the runtime truth, not inflation); in session scratch,
+`build_deps=[...]` serves the same headers pre-snapshot and rides the
+pypi retry exactly as it rides the cran lane.
+
 `session_install(..., verify=...)` runs a POSTCONDITION in the
 composed runtime after the install — `verify=True` proves presence (and
 any `==`/`>=` pins) with per-ecosystem defaults; an explicit dict
@@ -682,7 +699,14 @@ It speaks the spec's whole vocabulary — plain names, `"name ==X.Y.Z"`,
 and `"owner/repo@ref"` github sources (routed via a self-bootstrapped
 `remotes`; the snapshot's solve SHA-pins the ref); `cran_repos=[url]`
 names extra CRAN-like repositories, recorded and emitted as the spec's
-`r_repositories`. For installers no vocabulary covers,
+`r_repositories`. Repositories route through the same PPM
+platformizer the solver lanes use: a packagemanager.posit.co URL —
+site `cran_repos` config or the argument — gains the site's
+`__linux__/<codename>` binary segment where the distro supports it
+(site policy `ppm_binaries: false` forces plain source), and every
+plain install passes the load-check: a binary that installs but fails
+to load under conda's R is rebuilt from source automatically, never
+ratified by presence. For installers no vocabulary covers,
 `session_run_installer(cmd, writes_to="rlib"|"pylib")` declares the
 write target as the session layer and runs over the read-only base
 (recorded as a post_install step — which realizes FULL, not overlay:

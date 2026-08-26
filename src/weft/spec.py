@@ -124,8 +124,9 @@ def parse_direct_ref(entry: str) -> dict | None:
             "task.invalid",
             f"direct reference for {name!r} is not a wheel "
             f"({filename!r}) — wheels only: an sdist build drags the "
-            "site toolchain matrix in; use deps.conda/build_deps for "
-            "compiled stacks",
+            "site toolchain matrix in; for compiled stacks put the "
+            "package in deps.pypi/deps.conda (realize brings weft's "
+            "own compilers when a build needs them)",
             stage="solve", hints={"package": name, "filename": filename})
     return {"name": name, "url": url, "sha256": sha,
             "filename": filename}
@@ -228,20 +229,27 @@ def ranked_namespace(norm: list, lanes: list[str]) -> str:
     return "r" if "cran" in lanes else "py"
 
 
-def lane_spelling(name: str, lane: str, namespace: str) -> str:
+def lane_spellings(name: str, lane: str, namespace: str) -> list[str]:
     """THE dialect function — one derivation used by the chain AND
     probe (a second implementation would be a split-brain on day one).
     Deterministic, documented: an R-namespace bare name on the conda
-    lane follows conda's r-<lowercase> convention; everything else
-    passes through. Only safe under an effective postcondition
+    lane yields conda's TWO conventions in rank order — r-<lowercase>
+    (the CRAN mirror) then bioconductor-<lowercase> (the Bioconductor
+    builds). A bare name cannot say which registry it lives in, and
+    guessing only the first sent every Bioconductor ask through a
+    guaranteed conda miss into the source-only cran lane (bug5, live
+    on cbe-next: the agent needed three hypotheses to find the
+    spelling weft could have tried itself). Everything else passes
+    through as a singleton. Only safe under an effective postcondition
     (verify-in-loop bounds a dialect miss) — callers enforce that."""
     if namespace == "r" and lane == "conda" and "/" not in name:
         parts = name.strip().split(None, 1)
         base, tail = parts[0], (f" {parts[1]}" if len(parts) > 1 else "")
-        if not base.lower().startswith("r-"):
-            base = f"r-{base.lower()}"
-        return base + tail
-    return name
+        low = base.lower()
+        if low.startswith(("r-", "bioconductor-")):
+            return [base + tail]
+        return [f"r-{low}{tail}", f"bioconductor-{low}{tail}"]
+    return [name]
 
 
 def _dep_key(eco: str, dep: str) -> str:

@@ -60,7 +60,10 @@ def test_non_wheel_refused_naming_the_boundary():
     with pytest.raises(WeftError) as ei:
         _spec([f"demo @ https://x.example/demo-1.0.tar.gz#sha256={HEX}"])
     assert "wheels only" in ei.value.detail
-    assert "build_deps" in ei.value.detail
+    # the refusal must steer at levers a SPEC can reach — the old text
+    # named build_deps, a session-only lever (bug5 A2's misdirection)
+    assert "deps.pypi/deps.conda" in ei.value.detail
+    assert "build_deps" not in ei.value.detail
 
 
 def test_relative_file_url_refused_controller_realm():

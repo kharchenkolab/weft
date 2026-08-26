@@ -382,7 +382,9 @@ def ensure_realization(
                                   modules_init, caps, pack_tools or {})
                 else:
                     _build_prefix(env_id, env_row, adapter, rel, modules,
-                                  modules_init, emit=store.emit)
+                                  modules_init, emit=store.emit,
+                                  site_platform=(pack_tools or {})
+                                  .get("site_platform"))
                 if not strategy.endswith("squashfs"):
                     _realize_layers(env_id, env_row, adapter, rel,
                                     (pack_tools or {}).get("solvers") or {},
@@ -742,7 +744,7 @@ class _prefix_progress:
 def _build_prefix(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str = "", fresh: bool = True,
-    emit=None,
+    emit=None, site_platform: str | None = None,
 ) -> None:
     # fresh=False: the caller already made the wipe-or-resume decision
     # (squashfs resume preserves partial content — this rm was silently
@@ -776,6 +778,36 @@ def _build_prefix(
                             # with CUDA stacks; login nodes are often
                             # small VMs
         )
+    if build.rc != 0 and site_platform:
+        # bug5 A1's observed case rode THIS path: pixi install builds
+        # pypi sdists through uv with whatever PATH holds, and the
+        # full-prefix lane never summoned weft's toolchain — consumers
+        # worked around it by shipping compilers in deps.conda, the
+        # exact shape toolchain.py exists to prevent. ONE retry, gated
+        # on a compile signature (a network or solve death must not pay
+        # a toolchain build), prelude pointed at the env's own prefix:
+        # by the time uv builds sdists, pixi has placed the conda
+        # packages the build links against.
+        from .evidence import compile_signature
+        if compile_signature(build.out or ""):
+            from .toolchain import build_env_prelude, ensure_toolchain
+            tc = ensure_toolchain(adapter, adapter.pixi_bin,
+                                  site_platform, emit=emit)
+            if tc:
+                if emit is not None:
+                    emit("realize.toolchain_retry", env_id=env_id,
+                         site=adapter.name)
+                prelude = build_env_prelude(adapter, tc,
+                                            adapter.path(rel))
+                log_rel = f"logs/{rel.rsplit('/', 1)[-1]}-prefix-tc.log"
+                with _prefix_progress(adapter, rel, emit, env_id, t0):
+                    build = run_logged(
+                        adapter,
+                        prelude + overrides +
+                        f"{shlex.quote(adapter.pixi_bin)} install "
+                        f"--frozen --manifest-path "
+                        f"{shlex.quote(manifest_path)} 2>&1",
+                        log_rel, timeout=5400)
     if emit is not None and build.rc == 0:
         emit("realize.prefix.done", env_id=env_id, site=adapter.name,
              elapsed_s=round(_t.time() - t0, 1))
@@ -1882,7 +1914,8 @@ def _build_squashfs(
     # state, run before activation — the outer script carries them)
     if internet:
         _build_prefix(env_id, env_row, build, inner, [], modules_init,
-                      fresh=False, emit=emit)
+                      fresh=False, emit=emit,
+                      site_platform=pack_tools.get("site_platform"))
     else:
         _build_packed(env_id, env_row, build, inner, [], modules_init,
                       caps, pack_tools, fresh=False)

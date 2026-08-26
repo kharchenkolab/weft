@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 
 from .errors import WeftError
-from .spec import lane_spelling, split_constraint
+from .spec import lane_spellings, split_constraint
 
 
 def _get_json(url: str, timeout: float = 15.0):
@@ -77,6 +77,36 @@ def probe_cran(name: str) -> dict:
 _BACKENDS = {"pypi": probe_pypi, "conda": probe_conda, "cran": probe_cran}
 
 
+def _probe_candidates(lane: str, cands: list[str]) -> dict:
+    """One fact from a RANKED candidate list (the dialect function may
+    yield several spellings — r-x, then bioconductor-x): the first
+    spelling the index KNOWS answers; a miss carries every spelling
+    tried, so the fact names its own search. Honesty rule preserved
+    across candidates: if any candidate answered UNKNOWN, the fact is
+    unknown, never false. bioconductor-* spellings query the bioconda
+    channel — that is where those builds live; asking conda-forge
+    would 404 every real one."""
+    tried: list[str] = []
+    facts: list[dict] = []
+    for sp in cands:
+        n = split_constraint(sp)[0]
+        tried.append(n)
+        if lane == "conda" and n.startswith("bioconductor-"):
+            f = probe_conda(n, channel="bioconda")
+        else:
+            f = _BACKENDS[lane](n)
+        facts.append(f)
+        if f["available"] is True:
+            break
+    out = facts[-1]
+    unknown = next((f for f in facts if f["available"] == "unknown"), None)
+    if out["available"] is not True and unknown is not None:
+        out = unknown
+    if out["available"] is not True and len(tried) > 1:
+        out = {**out, "tried": tried}
+    return out
+
+
 def probe_lanes(packages: list, lanes: list[str],
                 namespace: str,
                 cran_repos: list | None = None) -> dict:
@@ -111,14 +141,15 @@ def probe_lanes(packages: list, lanes: list[str],
                                         reason="lane grammar cannot speak "
                                                "github refs")
                 continue
-            sp = spellings.get(lane) or lane_spelling(display, lane,
-                                                      namespace)
+            ov = spellings.get(lane)
+            cands = [ov] if ov else lane_spellings(display, lane,
+                                                   namespace)
             if lane == "cran":
                 # ONE parser for the cran grammar: the old sp.split()[0]
                 # passed "Matrix==1.6" (no space) whole to crandb -> 404
                 # -> FALSE for a package that exists
                 from .spec import parse_cran_dep
-                cran_name = parse_cran_dep(sp)["name"]
+                cran_name = parse_cran_dep(cands[0])["name"]
                 if cran_repos:
                     facts[lane] = _fact(
                         "unknown", cran_name,
@@ -128,6 +159,6 @@ def probe_lanes(packages: list, lanes: list[str],
                     continue
                 facts[lane] = _BACKENDS[lane](cran_name)
                 continue
-            facts[lane] = _BACKENDS[lane](split_constraint(sp)[0])
+            facts[lane] = _probe_candidates(lane, cands)
         out[display] = facts
     return out
