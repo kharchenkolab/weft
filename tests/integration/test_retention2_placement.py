@@ -258,3 +258,42 @@ def test_ttl_exempts_marked_keeps(tmp_path, pixi_bin):
     w.gc_sweep("local", confirm=True)
     assert (tmp_path / "site" / "jobs" / kept / "k.txt").exists()
     assert not (tmp_path / "site" / "jobs" / junk).exists()
+
+
+def test_repeat_retains_accumulate_and_discard_keeps_all(wA, tmp_path):
+    """The upsert-sweep escalation (2026-08-25): the retained row was
+    INSERT OR REPLACE, so a SECOND mark-mode retain's selection
+    clobbered the first's — and discard's keep-set, computed from the
+    latest recipe alone, rm -f'd the FIRST retain's promised-safe
+    files. Captures now accumulate; discard protects the union of
+    every capture's RECORDED entries."""
+    jid = _run(wA, "mkdir -p figs logs && echo f > figs/a.svg && "
+                   "echo l > logs/run.txt && echo junk > scratch.tmp")
+    wA.run_retain(jid, include=["figs/**"], background=False)
+    wA.run_retain(jid, include=["logs/*.txt"], background=False)
+
+    row = wA.store.get_retained(jid)
+    assert row["files"] == 2                       # UNION, not last-call
+    caps = json.loads(row["selection"])["captures"]
+    assert len(caps) == 2
+    sidecar = json.loads((tmp_path / "site" / "jobs" / jid /
+                          ".weft-run.json").read_text())
+    assert {f["path"] for f in sidecar["files"]} >= \
+        {"figs/a.svg", "logs/run.txt"}             # the run-level ledger
+
+    out = wA.run_discard(jid)
+    assert out["selective"] is True
+    jobdir = tmp_path / "site" / "jobs" / jid
+    assert (jobdir / "figs" / "a.svg").read_text() == "f\n"    # capture 1
+    assert (jobdir / "logs" / "run.txt").read_text() == "l\n"  # capture 2
+    assert not (jobdir / "scratch.tmp").exists()               # junk gone
+
+
+def test_forget_receipt_reports_union_bytes(wA, tmp_path):
+    jid = _run(wA, "echo aaaa > one.dat && echo bbbbbbbb > two.dat")
+    wA.run_retain(jid, include=["one.dat"], background=False)
+    wA.run_retain(jid, include=["two.dat"], background=False)
+    row = wA.store.get_retained(jid)
+    assert row["bytes"] == 14                      # 5 + 9, the union
+    fr = wA.run_forget(target=jid)
+    assert fr["forgotten"], fr

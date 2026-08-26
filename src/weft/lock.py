@@ -322,6 +322,97 @@ _CACHE_MARKERS = ("cache error", "file still doesn't exist",
                   "conda-pypi mapping")
 
 
+def _classify_solve_failure(err: str, tail: str, low: str, spec,
+                            cache_dir, cache_why) -> WeftError:
+    """ONE owner for solver-stderr classification; arm ORDER is load-
+    bearing (aba2 ask 31): the parse arm used to run FIRST and matched
+    any `pixi.toml:N:M` span — but uv/pixi RESOLVE diagnostics can
+    carry manifest spans too, so a genuinely-missing package was
+    misclassified as "weft rendered an unparseable manifest ... do not
+    edit pins" (inverted advice for a spelling problem). Resolve-shaped
+    evidence now wins; the parse arm needs parse evidence AND the
+    absence of resolve evidence. Conformance: every arm is pinned by
+    the stderr CORPUS (tests/fixtures/stderr_corpus/, REAL captured
+    output — author-written fixtures could not express the
+    overlapping-marker theft; append the verbatim stderr of every
+    future misclassification as a new corpus file)."""
+    if "is not a known platform" in err:
+        # caller's platform typo — intake's shape check is
+        # deliberately loose (future subdirs must not need a weft
+        # release); pixi's verdict is authoritative and even lists
+        # the valid set (probed verbatim)
+        return WeftError(
+            "task.invalid",
+            f"spec '{spec.name}' names a platform pixi does not know",
+            stage="solve",
+            hints={"stderr_tail": tail,
+                   "platforms": list(spec.platforms)},
+        )
+    if any(m in low for m in _CACHE_MARKERS):
+        return WeftError(
+            "env.solve_failed",
+            "solver cache unusable — deterministic local failure, "
+            "not index reachability",
+            stage="solve",
+            hints={"stderr_tail": tail,
+                   "cache_dir": cache_dir or "pixi default",
+                   "cache_resolution": cache_why,
+                   "suggestion": "point PIXI_CACHE_DIR at node-local "
+                                 "storage ($XDG_RUNTIME_DIR, "
+                                 "/dev/shm/weft-<uid>); network "
+                                 "filesystems break rattler's cache "
+                                 "locking"},
+            retryable=False,
+        )
+    resolve_shaped = any(m.lower() in low for m in _CONFLICT_MARKERS) \
+        or "failed to solve" in low or "failed to resolve" in low
+    if any(m in low for m in _NETWORK_MARKERS) and not resolve_shaped:
+        return WeftError(
+            "env.solve_failed",
+            "solver could not reach package indexes",
+            stage="solve",
+            hints={"stderr_tail": tail},
+            retryable=True,
+        )
+    if not resolve_shaped and (
+            "duplicate key" in low or "error parsing" in low
+            or "failed to parse" in low or "toml parse" in low
+            or _PARSE_RE.search(err)):
+        # after intake validation, a manifest pixi cannot parse is
+        # weft's own renderer bug — not a statement about the
+        # dependency graph, and the caller's pins are NOT implicated
+        return WeftError(
+            "internal.error",
+            f"weft rendered a manifest pixi could not parse for "
+            f"spec '{spec.name}' — a weft bug, not a spec conflict",
+            stage="solve",
+            hints={"stderr_tail": tail,
+                   "suggestion": "nothing was solved; do not edit "
+                                 "pins — report this with the spec"},
+        )
+    return WeftError(
+        "env.solve_conflict",
+        f"spec '{spec.name}' is unsatisfiable as pinned",
+        stage="solve",
+        hints={
+            "solver_message": tail,
+            "user_pins": spec.conda + spec.pypi,
+            # labeled separately: on the extends_env path these are
+            # MACHINE-written parent pins (one map per platform) —
+            # folding them into user_pins would bury the authored
+            # constraints under hundreds of entries
+            **({"variant_pins": {
+                p: (v.get("conda") or []) + (v.get("pypi") or [])
+                for p, v in sorted(spec.variants.items())}}
+               if spec.variants else {}),
+            # weft's own one-call answer to this exact error — agents read
+            # hints under pressure, not the reference docs (eval finding)
+            "suggestion": _remedy_solve_conflict(
+                tail, spec.conda + spec.pypi),
+        },
+    )
+
+
 def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi",
           extra_channels: list[str] | None = None) -> LockResult:
     """Solve a (fully merged) spec into a lockfile. Requires index access.
@@ -371,82 +462,8 @@ def solve(spec: EnvSpec, workdir: Path, pixi_bin: str = "pixi",
             (workdir / "solve.err").write_text(err + "\n")
         except OSError:
             pass                       # forensics must never mask the verdict
-        if "is not a known platform" in err:
-            # caller's platform typo — intake's shape check is
-            # deliberately loose (future subdirs must not need a weft
-            # release); pixi's verdict is authoritative and even lists
-            # the valid set (probed verbatim)
-            raise WeftError(
-                "task.invalid",
-                f"spec '{spec.name}' names a platform pixi does not know",
-                stage="solve",
-                hints={"stderr_tail": tail,
-                       "platforms": list(spec.platforms)},
-            )
-        if "duplicate key" in low or _PARSE_RE.search(err):
-            # after intake validation, a manifest pixi cannot parse is
-            # weft's own renderer bug — not a statement about the
-            # dependency graph, and the caller's pins are NOT implicated
-            raise WeftError(
-                "internal.error",
-                f"weft rendered a manifest pixi could not parse for "
-                f"spec '{spec.name}' — a weft bug, not a spec conflict",
-                stage="solve",
-                hints={"stderr_tail": tail,
-                       "suggestion": "nothing was solved; do not edit "
-                                     "pins — report this with the spec"},
-            )
-        if any(m in low for m in _CACHE_MARKERS):
-            raise WeftError(
-                "env.solve_failed",
-                "solver cache unusable — deterministic local failure, "
-                "not index reachability",
-                stage="solve",
-                hints={"stderr_tail": tail,
-                       "cache_dir": cache_dir or "pixi default",
-                       "cache_resolution": cache_why,
-                       "suggestion": "point PIXI_CACHE_DIR at node-local "
-                                     "storage ($XDG_RUNTIME_DIR, "
-                                     "/dev/shm/weft-<uid>); network "
-                                     "filesystems break rattler's cache "
-                                     "locking"},
-                retryable=False,
-            )
-        if any(m in low for m in _NETWORK_MARKERS) and not any(
-            m.lower() in low for m in _CONFLICT_MARKERS
-        ):
-            raise WeftError(
-                "env.solve_failed",
-                "solver could not reach package indexes",
-                stage="solve",
-                hints={"stderr_tail": tail},
-                retryable=True,
-            )
-        raise WeftError(
-            "env.solve_conflict",
-            f"spec '{spec.name}' is unsatisfiable as pinned",
-            stage="solve",
-            hints={
-                "solver_message": tail,
-                "user_pins": spec.conda + spec.pypi,
-                # gated: "no candidates" = the name/version does not
-                # EXIST — softening pins cannot conjure it (remedy
-                # census; the r-signac agent got relax-advice for a
-                # package conda-forge does not carry)
-                # labeled separately: on the extends_env path these are
-                # MACHINE-written parent pins (one map per platform) —
-                # folding them into user_pins would bury the authored
-                # constraints under hundreds of entries
-                **({"variant_pins": {
-                    p: (v.get("conda") or []) + (v.get("pypi") or [])
-                    for p, v in sorted(spec.variants.items())}}
-                   if spec.variants else {}),
-                # weft's own one-call answer to this exact error — agents read
-                # hints under pressure, not the reference docs (eval finding)
-                "suggestion": _remedy_solve_conflict(
-                    tail, spec.conda + spec.pypi),
-            },
-        )
+        raise _classify_solve_failure(err, tail, low, spec,
+                                       cache_dir, cache_why)
     native = lockfile.read_text()
     canonical = canonicalize_lock(native, spec)
     return LockResult(

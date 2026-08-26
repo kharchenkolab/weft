@@ -435,7 +435,7 @@ class RetainManager:
                                         len(selected), total,
                                         state="done", selection=selection,
                                         moved=False)
-                self.store.update_retained(target, method="mark")
+                self.store.retained_capture_done(target, "mark", selected)
                 extras = {}
                 if snapshot:
                     extras = self._snapshot_finalize(
@@ -665,9 +665,7 @@ class RetainManager:
             self._sidecar(kind, row, target, site, label, selected,
                           location, in_place, method, adapter,
                           snapshot=snapshot)
-            self.store.update_retained(target, state="done",
-                                       method=method, files=len(selected),
-                                       nbytes=total)
+            self.store.retained_capture_done(target, method, selected)
             self._link_keeps(target, kind, row, site, selected,
                              location, in_place, True)
             self.store.emit("retain.done", target=target, site=site,
@@ -727,11 +725,8 @@ class RetainManager:
             if prow.get("moved") == 0:
                 # mark-mode pin (durable root): settle = validate + pin,
                 # no capture — the files already sit where they'll stay
-                total = sum(e["bytes"] for e in selected)
-                self.store.update_retained(target, state="done",
-                                           method="mark",
-                                           files=len(selected),
-                                           nbytes=total)
+                self.store.retained_capture_done(target, "mark",
+                                                 selected)
                 self._sidecar_into(adapter, jobdir_rel, target,
                                    row["site"], selected)
                 self.store.emit("retain.marked", target=target,
@@ -1080,8 +1075,16 @@ class RetainManager:
             # the junk goes, the keeps (and sidecar) stay, the pin holds
             sel = json.loads(kept.get("selection") or "{}")
             entries = self._scan(adapter, jobdir_rel)
-            keep_paths = {e["path"] for e in self._select(
-                entries, sel.get("include"), sel.get("exclude"))}
+            # the RECORDED entries of every capture are the promise —
+            # the latest recipe alone deleted an earlier retain's keeps
+            # (upsert sweep 2026-08-25: two mark retains + discard
+            # rm -f'd the first retain's files); recipe re-match stays
+            # only as the fallback for legacy rows without captures
+            keep_paths = {e["path"] for cap in sel.get("captures") or []
+                          for e in cap.get("entries") or []}
+            if not keep_paths:
+                keep_paths = {e["path"] for e in self._select(
+                    entries, sel.get("include"), sel.get("exclude"))}
             keep_paths.add(".weft-run.json")
             doomed = [e["path"] for e in entries
                       if e["path"] not in keep_paths]
@@ -1299,6 +1302,24 @@ class RetainManager:
                           if e.get("changed_during_capture") else {})}
                       for e in selected],
         }
+        # the sidecar is the run-level LEDGER: it lists everything ever
+        # retained for this target, not the last call (the aba2 sidecar
+        # ask: two settle-now retains, keep held 6 files, sidecar
+        # listed 4 — digest coverage silently missed the first two)
+        prior = self.store.get_retained(target)
+        if prior and prior.get("selection"):
+            try:
+                caps = json.loads(prior["selection"]).get("captures") or []
+            except (TypeError, ValueError):
+                caps = []
+            here = {f["path"] for f in doc["files"]}
+            for cap in caps:
+                for e in cap.get("entries") or []:
+                    if e["path"] not in here:
+                        here.add(e["path"])
+                        doc["files"].append({
+                            **e,
+                            "retained_at": cap.get("retained_at")})
         body = json.dumps(doc, indent=1).encode()
         if in_place:
             q = shlex.quote(body.decode())

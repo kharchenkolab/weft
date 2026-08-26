@@ -1049,11 +1049,38 @@ class Store:
             "SELECT * FROM kernel_blocks WHERE kernel_id=? ORDER BY block",
             (kernel_id,))]
 
+    @staticmethod
+    def _capture_union(sel: dict) -> tuple[int, int]:
+        """(files, bytes) as the BY-PATH union over every capture's
+        recorded entries (latest wins per path). The row's counts must
+        describe everything retained for the target, not the last
+        call — the REPLACE row made a second retain's record forget
+        the first's files, and discard() then DELETED them (aba2
+        sidecar ask, escalated by the upsert sweep 2026-08-25)."""
+        by_path: dict[str, int] = {}
+        for cap in sel.get("captures") or []:
+            for e in cap.get("entries") or []:
+                by_path[e["path"]] = int(e.get("bytes") or 0)
+        return len(by_path), sum(by_path.values())
+
     def put_retained(self, target: str, site: str, label: str | None,
                      location: str, in_place: bool, files: int,
                      nbytes: int, state: str,
                      selection: dict | None = None,
                      moved: bool = True) -> None:
+        # ACCUMULATE, never replace: retains of one target compose —
+        # the selection JSON carries a `captures` history (one entry
+        # per completed capture, with its file entries), and the
+        # top-level include/exclude stay the LATEST recipe (what a
+        # pending pin settles with)
+        sel = dict(selection or {})
+        prev = self.get_retained(target)
+        if prev and prev.get("selection"):
+            try:
+                prev_sel = json.loads(prev["selection"])
+                sel["captures"] = list(prev_sel.get("captures") or [])
+            except (TypeError, ValueError):
+                pass
         self._write(
             "INSERT OR REPLACE INTO retained_runs(target, site, label,"
             " location, in_place, files, bytes, method, state, error,"
@@ -1061,8 +1088,36 @@ class Store:
             " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (target, site, label, location, int(in_place), files, nbytes,
              None, state, None, time.time(),
-             json.dumps(selection) if selection else None, int(moved)),
+             json.dumps(sel) if sel else None, int(moved)),
         )
+
+    def retained_capture_done(self, target: str, method: str | None,
+                              entries: list[dict]) -> None:
+        """Seal ONE capture into the row's history and recompute the
+        union counts. `entries`: [{path, bytes, sha256?}] — what this
+        capture actually matched (paths are the truth; recipes are only
+        re-match instructions and re-matching a live tree can catch
+        junk the capture never promised)."""
+        row = self.get_retained(target)
+        if not row:
+            return
+        try:
+            sel = json.loads(row.get("selection") or "{}")
+        except (TypeError, ValueError):
+            sel = {}
+        caps = list(sel.get("captures") or [])
+        caps.append({
+            "include": sel.get("include"), "exclude": sel.get("exclude"),
+            "retained_at": time.time(),
+            "entries": [{k: e[k] for k in ("path", "bytes", "sha256")
+                         if k in e} for e in entries],
+        })
+        sel["captures"] = caps
+        files, nbytes = self._capture_union(sel)
+        self._write(
+            "UPDATE retained_runs SET state='done', method=COALESCE(?,"
+            " method), files=?, bytes=?, selection=? WHERE target=?",
+            (method, files, nbytes, json.dumps(sel), target))
 
     def update_retained(self, target: str, *, state: str | None = None,
                         method: str | None = None,
