@@ -96,6 +96,13 @@ def _p(rel):
 
 def main():
     os.makedirs(_p("blocks"), exist_ok=True)
+    # driver.ready: activation is DONE and the block loop is live —
+    # the controller's poll distinguishes "driver still activating"
+    # (e.g. shell-hook waiting behind a concurrent session install)
+    # from "block executing". Atomic like every polled file.
+    with open(_p("driver.ready.tmp"), "w") as f:
+        f.write("1\n")
+    os.replace(_p("driver.ready.tmp"), _p("driver.ready"))
     globals_ns = {"__name__": "__main__"}
     n = 0
     while True:

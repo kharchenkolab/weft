@@ -116,6 +116,7 @@ class KernelManager:
 
         activate = "true"
         ns_env_id = None   # set by the pre-clone session lane (base env)
+        install_in_flight, install_since = False, None
         if env_id:
             # the RECORDED location: an adopted read-only realization
             # (institutional tree) lives OUTSIDE the writable root
@@ -166,6 +167,18 @@ class KernelManager:
                     f"session {session_id} lives on {s['site']!r}, "
                     f"not {site!r} — kernels attach where the session "
                     "prefix is", stage="infra")
+            # wait legibility: a kernel started while a session install
+            # is in flight activates against the LIVE manifest — on the
+            # clone lane the shell-hook waits behind pixi's project
+            # lock, so the FIRST block waits out the install (aba
+            # serialization report: a 93s "frozen" turn was exactly
+            # this). The wait is correct (a coherent manifest beats a
+            # mid-rewrite one); the silence was not — say it, in the
+            # result AND the feed.
+            claim = self.store.session_ensure_claim(session_id)
+            if claim and (time.time() - (claim.get("hb") or 0)) < 90:
+                install_in_flight = True
+                install_since = claim.get("since")
             s_mode = s.get("materialize_mode",
                            "clone" if s.get("materialized", True) else "none")
             if s_mode == "clone":
@@ -274,6 +287,12 @@ class KernelManager:
         self.store.emit("kernel.started", kernel=kernel_id, site=site,
                         lang=lang, env_id=env_id, resources=res,
                         **({"label": label} if label else {}))
+        if install_in_flight:
+            self.store.emit(
+                "kernel.waiting_on_install", kernel=kernel_id,
+                session=session_id,
+                **({"install_since": install_since}
+                   if install_since else {}))
         from .poller import Watch
         from .task import Task
         self.runner.poller_for(site).register(Watch(
@@ -283,6 +302,14 @@ class KernelManager:
             started_at=time.time(), scheduler=False, lease="kernel"))
         return {"kernel_id": kernel_id, "site": site, "lang": lang,
                 "env_id": env_id,
+                **({"install_note":
+                        "a session install is in flight — the driver "
+                        "activates against the live manifest, so the "
+                        "FIRST block waits for the install to finish "
+                        "(kernel_poll answers state 'starting' "
+                        "meanwhile; session.ensure_done marks the "
+                        "install's end)"}
+                   if install_in_flight else {}),
                 "note": "exploration only — assemble successful blocks into "
                         "a task for the citable record"}
 
@@ -334,6 +361,25 @@ class KernelManager:
             if time.time() >= deadline:
                 # not an error: the block may legitimately be long-running
                 self._assert_alive(self._get(kernel_id))
+                # HONESTY: "still executing" was a lie for a block the
+                # driver never picked up — the driver can sit in
+                # ACTIVATION for minutes (e.g. a clone-session kernel's
+                # shell-hook waiting behind a concurrent pixi add; aba
+                # serialization report). driver.ready is written at the
+                # driver's loop entry; the block's .out appears the
+                # moment execution starts — either proves the driver is
+                # up, their joint absence means it is still starting.
+                if not adapter.file_exists(f"{base}.out") and \
+                        not adapter.file_exists(
+                            f"{k['jobdir']}/driver.ready"):
+                    return {"kernel_id": kernel_id, "block": block,
+                            "state": "starting",
+                            "note": "the driver has not picked this "
+                                    "block up yet — it is still "
+                                    "starting (environment activation "
+                                    "can wait behind a concurrent "
+                                    "session install); kernel_poll to "
+                                    "keep waiting"}
                 return {"kernel_id": kernel_id, "block": block,
                         "state": "running",
                         "note": "still executing — kernel_poll to keep "

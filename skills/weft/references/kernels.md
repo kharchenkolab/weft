@@ -111,6 +111,16 @@ Interactive sessions want SHORT walltimes and a restart, not a day hold.
 
 - `kernel_start(env_id=...)` auto-realizes a SOLVED env (watch
   realize.* events on a cold site) — never pre-run a placebo task.
+- A kernel is NOT instantly executing: the driver first runs the
+  environment activation, which can legitimately wait (a clone-session
+  kernel's shell-hook waits behind a concurrent `pixi add`).
+  `kernel_poll` answers `state: "starting"` until the driver's loop is
+  live — that is "not picked up yet", distinct from `"running"` (a
+  block executing). Starting a kernel on a session whose install is in
+  flight returns an `install_note` and emits
+  `kernel.waiting_on_install` (with `install_since`): the FIRST block
+  waits for the install; a kernel started BEFORE the install is immune
+  (warm drivers execute in-process, no per-block activation).
 - `kernel_promote(k, blocks, label="phase 9")`: label the minted job
   (defaults to the kernel's label; never identity). Promoted jobs have
   a run_inventory receipt; fetch bytes via the manifest's refs.

@@ -155,12 +155,19 @@ realization the marker still wrongly claims.
 
 `env_realize(..., wait=False)` submits the build instead of blocking:
 the return says how to poll (`env_status(env_id)` renders the site's
-realization state; terminal is `ready`|`failed`, and a failed row
+realization state; a `building` row carries `building_since`, so a
+watcher can say "started Ts ago" without its own clock; terminal is
+`ready`|`failed`, and a failed row
 carries the error envelope — log_path, error_regions — as `log_tail`;
 `realize.*` events narrate, with `realize.async_done` /
 `realize.async_failed` closing the lane). Two sites build
 CONCURRENTLY with two submits, and a turn can end during a long build
-instead of dying at its cap. Honesty: the build is process-bound — it
+instead of dying at its cap. A SYNC realize arriving while another
+caller's build of the same (env, site) is in flight JOINS it — it
+waits until the holder finishes, then fast-paths (sync means
+wait-until-ready) — and the join is narrated: one `realize.waiting`
+event names the env, the site, and the in-flight build's start.
+Honesty: the build is process-bound — it
 runs in the controller process and dies with it (safely: the site
 lease goes stale and the next realize/task resumes). For a build that
 must outlive the controller, submit a real task:
@@ -624,8 +631,12 @@ first — already-proven entries short-circuit (`changed: false`,
 `attempts: []`) and are late-recorded; per-lane failures ride
 `hints.attempts` verbatim; a site outage HALTS remaining lanes and the
 verdict is the outage, never unavailability. One ensure per session at
-a time (`state.conflict`, retryable, heartbeat-stale claims are taken
-over).
+a time: a sibling ensure refuses IMMEDIATELY with `state.conflict`
+(retryable) carrying `held_since_s` (how long the install has run —
+narrate it) and `holder_beat_age_s` (the holder is alive);
+`session.ensure_done` in the feed marks the holder's finish — wait on
+that, never on a tight retry loop. Heartbeat-stale claims are taken
+over.
 
 Ranked mode: `ensure_available(target, ["RNetCDF"], lanes=["conda",
 "cran"])` — YOUR ranking (no default), per-package independent chains,

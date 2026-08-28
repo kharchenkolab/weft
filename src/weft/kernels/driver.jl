@@ -3,6 +3,9 @@
 # (session state) but cannot orphan the driver's protocol files
 const JOBDIR = pwd()
 jp(rel) = joinpath(JOBDIR, rel)
+# driver.ready: activation done, loop live (atomic; see driver.py)
+open(jp("driver.ready.tmp"), "w") do f; write(f, "1\n"); end
+mv(jp("driver.ready.tmp"), jp("driver.ready"); force=true)
 n = 0
 while true
     if isfile(jp("kernel.stop"))

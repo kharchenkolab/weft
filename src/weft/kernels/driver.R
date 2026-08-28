@@ -14,6 +14,9 @@ if (nzchar(rlib)) {
 jobdir <- getwd()
 jp <- function(rel) file.path(jobdir, rel)
 env <- new.env(parent = globalenv())
+# driver.ready: activation done, loop live (atomic; see driver.py)
+writeLines("1", jp("driver.ready.tmp"))
+file.rename(jp("driver.ready.tmp"), jp("driver.ready"))
 n <- 0L
 repeat {
   if (file.exists(jp("kernel.stop"))) quit(save = "no", status = 0)

@@ -777,6 +777,11 @@ class EnvManager:
                     (_t.time() - r["last_used"]) / 86400, 1)
             if r["state"] == "failed" and r.get("log"):
                 entry["log_tail"] = r["log"][-800:]  # the probe, right here
+            if r["state"] == "building" and r.get("updated_at"):
+                # the poll surface answers "since WHEN" (wait-legibility
+                # round: "building" alone left a watcher unable to say
+                # 'started Ts ago' without its own clock)
+                entry["building_since"] = r["updated_at"]
             realizations.append(entry)
         return {
             "env_id": env_id,

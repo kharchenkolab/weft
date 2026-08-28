@@ -145,8 +145,12 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   NEVER run a placebo task for this: memoization returns the recorded
   manifest and nothing rebuilds.
   `wait=False` submits instead of blocking: poll `env_status(env_id)`
-  (site's realization state; terminal `ready`|`failed`, failed rows
-  carry the error envelope as `log_tail`); `realize.async_done` /
+  (site's realization state; a `building` row carries
+  `building_since`; terminal `ready`|`failed`, failed rows
+  carry the error envelope as `log_tail`). A SYNC realize arriving
+  mid-build JOINS — waits, then fast-paths — narrated by one
+  `realize.waiting` event naming env/site and the build's start;
+  `realize.async_done` /
   `realize.async_failed` events close the lane. Use it to build on
   TWO sites concurrently or to end a turn during a long build. It is
   process-bound (dies with the controller — safely, resumable); for a

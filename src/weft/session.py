@@ -956,11 +956,20 @@ class SessionManager:
                 "state.conflict",
                 f"another ensure is already running on {session_id}",
                 stage="realize", retryable=True,
+                # both clocks, different questions: beat age says the
+                # holder is ALIVE; held-since says how long the install
+                # has been running (narrate it, don't spin on it —
+                # session.ensure_done fires when the holder finishes)
                 hints={"holder_beat_age_s": round(
                            _t.time() - held.get("hb", _t.time()), 1),
+                       **({"held_since_s": round(
+                               _t.time() - held["since"], 1)}
+                          if held.get("since") else {}),
                        "suggestion": "one ensure per session — wait and "
-                                     "retry; a dead holder's claim goes "
-                                     "stale in 90s"})
+                                     "retry (session.ensure_done in the "
+                                     "event feed marks the holder's "
+                                     "finish); a dead holder's claim "
+                                     "goes stale in 90s"})
         stop = threading.Event()
 
         def _beat():

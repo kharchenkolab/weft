@@ -73,6 +73,10 @@ _SESSION_MIGRATIONS = [
     # judged on BEAT AGE, never chain duration (chains run 45 min)
     ("ensure_nonce", "ALTER TABLE sessions ADD COLUMN ensure_nonce TEXT"),
     ("ensure_hb", "ALTER TABLE sessions ADD COLUMN ensure_hb REAL"),
+    # the claim's START (wait-legibility round): holder_beat_age_s says
+    # the holder is ALIVE; held-since says how long a sibling has been
+    # waiting behind it — different questions, both in the refusal
+    ("ensure_since", "ALTER TABLE sessions ADD COLUMN ensure_since REAL"),
     # build_deps (eight-asks D): conda packages whose HEADERS/libs the
     # session's source compiles need (lzma.h class on read-only bases) —
     # realized as a deps-extended toolchain prefix live, folded into
@@ -343,10 +347,11 @@ class Store:
         now = time.time()
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "UPDATE sessions SET ensure_nonce=?, ensure_hb=? "
+                "UPDATE sessions SET ensure_nonce=?, ensure_hb=?, "
+                "ensure_since=? "
                 "WHERE session_id=? AND (ensure_nonce IS NULL "
                 "OR ensure_hb IS NULL OR ensure_hb < ?)",
-                (nonce, now, session_id, now - stale_s))
+                (nonce, now, now, session_id, now - stale_s))
             return cur.rowcount > 0
 
     def heartbeat_session_ensure(self, session_id: str,
@@ -358,15 +363,17 @@ class Store:
 
     def release_session_ensure(self, session_id: str, nonce: str) -> None:
         self._write(
-            "UPDATE sessions SET ensure_nonce=NULL, ensure_hb=NULL "
+            "UPDATE sessions SET ensure_nonce=NULL, ensure_hb=NULL, "
+            "ensure_since=NULL "
             "WHERE session_id=? AND ensure_nonce=?", (session_id, nonce))
 
     def session_ensure_claim(self, session_id: str) -> dict | None:
-        r = self._row("SELECT ensure_nonce, ensure_hb FROM sessions "
-                      "WHERE session_id=?", (session_id,))
+        r = self._row("SELECT ensure_nonce, ensure_hb, ensure_since "
+                      "FROM sessions WHERE session_id=?", (session_id,))
         if not r or not r["ensure_nonce"]:
             return None
-        return {"nonce": r["ensure_nonce"], "hb": r["ensure_hb"]}
+        return {"nonce": r["ensure_nonce"], "hb": r["ensure_hb"],
+                "since": r["ensure_since"]}
 
     def job_drive_claim(self, job_id: str) -> dict | None:
         r = self._row("SELECT driver_nonce, driver_hb FROM jobs "

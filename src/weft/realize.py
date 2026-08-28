@@ -12,6 +12,7 @@ same in-process future.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import shlex
 import threading
@@ -38,6 +39,30 @@ def env_dir_rel(env_id: str) -> str:
 def _build_lock(env_id: str, site: str) -> threading.Lock:
     with _BUILD_LOCKS_GUARD:
         return _BUILD_LOCKS.setdefault((env_id, site), threading.Lock())
+
+
+@contextlib.contextmanager
+def _joined_build_lock(env_id: str, adapter, store):
+    """The per-(env, site) build lock, with the JOIN made legible: a
+    sync caller arriving mid-build waits by contract (sync means
+    wait-until-ready), but the wait must never be silent — a joined
+    call was indistinguishable from a slow one, and a consumer's
+    project read as frozen for a whole build (aba serialization
+    report, 2026-08-27). On contention, ONE realize.waiting event
+    names the env, the site, and the in-flight build's start before
+    blocking."""
+    lk = _build_lock(env_id, adapter.name)
+    if not lk.acquire(blocking=False):
+        row = store.get_realization(env_id, adapter.name) or {}
+        store.emit("realize.waiting", env_id=env_id, site=adapter.name,
+                   **({"build_started_at": row["updated_at"]}
+                      if row.get("state") == "building"
+                      and row.get("updated_at") else {}))
+        lk.acquire()
+    try:
+        yield
+    finally:
+        lk.release()
 
 
 def _has_package(canonical: dict, name: str) -> bool:
@@ -194,7 +219,7 @@ def ensure_realization(
         strategy = "overlay"
 
     rel = env_dir_rel(env_id)
-    with _build_lock(env_id, adapter.name):
+    with _joined_build_lock(env_id, adapter, store):
         existing = store.get_realization(env_id, adapter.name)
         if existing and existing["state"] == "ready":
             # the recorded location, not the computed one: a read-only-root

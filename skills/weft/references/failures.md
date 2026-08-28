@@ -35,7 +35,7 @@ an unchanged failing task more than once.
 | `data.transfer_failed` | bytes did not arrive (route died mid-move) | retryable — resubmit re-plans the route; `doctor()` if it repeats on one site |
 | `site.bootstrap_failed` | the site's shim/tools could not be placed | hints name the step; `pixi_source`/`WEFT_PIXI_VERSION` are the levers, `register_site` again is the retry |
 | `sched.timeout` | a scheduler/transport call exceeded its budget | retryable infra — not a job verdict; `site_load`/`doctor` if persistent |
-| `state.conflict` | another in-flight operation holds the claim (one ensure per session, one collector per job) | retryable — wait and re-call; stale claims are taken over automatically |
+| `state.conflict` | another in-flight operation holds the claim (one ensure per session, one collector per job) | retryable, returned IMMEDIATELY — `hints.held_since_s` says how long the holder has run (narrate it); wait on `session.ensure_done` in the feed, never a tight retry loop; stale claims are taken over automatically |
 | `tool.bad_arguments` | the call does not bind to the verb's signature | `hints.signature` is the live one; stringified arrays/objects on container params are auto-coerced, so this usually means a real parameter mistake |
 | `session.cold_base` | conda add on an adopted/packed base (cold cache — a clone would re-download the base) | `hints.delta_lanes` (pypi/cran layer without a clone) and `hints.options` (`extends_env` with the base EnvID, warm-cache site, `full_clone=true`) |
 | `retain.no_durable` / `retain.keep_exists` / `data.last_copy` / `data.pinned` / `data.external_home` | retention/eviction refusals | see references/data.md — each names its levers |
