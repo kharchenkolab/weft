@@ -111,6 +111,7 @@ _SCAFFOLD_EXACT = {
     "runner.sh", "log", "log.err", "pid", "pid.real", "pid.epoch",
     "exit_code", "wall_s", "rusage", "node",
     "driver.py", "driver.R", "driver.jl", "kernel.stop",
+    "driver.ready",
 }
 
 
