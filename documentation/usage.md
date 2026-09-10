@@ -668,7 +668,12 @@ per-lane availability FACTS (404 is false; transport trouble is
 "unknown", never false) with no mutation — and with `cran_repos` the
 cran probe answers "unknown" outright: crandb indexes CRAN only, and
 a package living in a secondary registry must never probe false.
-`target={"env": env_id}` runs the ONE-solve extends path and returns
+`target={"kernel": kid}` resolves to the kernel's session (installs
+live on the next block) or, for a frozen-env kernel, to its env —
+where the envelope adds `restart_required: true` + `kernel_note`
+when the solve minted a new env the running interpreter cannot adopt
+(start a kernel on the new env; session-attached kernels avoid the
+restart entirely). `target={"env": env_id}` runs the ONE-solve extends path and returns
 the same envelope (`lane: "extends_env"`, `outcome: "solved"`;
 `cran_repos` becomes the spec's `r_repositories`). Enforcement is
 at-realize by default — the note says so, `verified` stays `{}`, and
@@ -784,7 +789,13 @@ CANCELLED as `job.state` with `state="CANCELLED"`. There is no
 `job.state` with DONE/FAILED. Cancels are confirm-then-settle: after
 `task_cancel` the job stays live until the scheduler agrees it is
 gone; each unconfirmed poll resends and emits `job.cancel_retry`.
-Lease deaths are `kernel.died` /
+`kernel.block_failed` carries `wall_ms` (the in-block cost — the
+driver stamps it before the rc, so it is present whenever the result
+is); block results carry it too. `realize.overlay_fallback` carries
+`failure_class` when the cause classified (e.g. `pip_missing`);
+`realize.prefix.done` carries `log_path` — download/cache attribution
+lives in pixi's own persisted output rather than numbers weft cannot
+vouch for. Lease deaths are `kernel.died` /
 `service.exited`, each carrying `cause`
 ("walltime_exceeded"/"oom"/"cancelled"/"exited"/"lost") and, on
 scheduler sites, the raw `slurm_state`. Duration-bearing events carry

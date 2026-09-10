@@ -31,6 +31,7 @@ repeat {
   out_f <- jp(sprintf("blocks/%04d.out", n))
   err_f <- jp(sprintf("blocks/%04d.err", n))
   rc <- 0L
+  t0 <- Sys.time()
   out_con <- file(out_f, open = "wt"); err_con <- file(err_f, open = "wt")
   # created empty NOW; flushed between top-level expressions so a
   # controller tailing the files streams statement-by-statement (R
@@ -56,6 +57,11 @@ repeat {
   })
   sink(type = "message"); sink(type = "output")
   close(out_con); close(err_con)
+  wall_f <- jp(sprintf("blocks/%04d.wall_ms", n))
+  writeLines(as.character(as.integer(
+    as.numeric(Sys.time() - t0, units = "secs") * 1000)),
+    paste0(wall_f, ".tmp"))
+  file.rename(paste0(wall_f, ".tmp"), wall_f)
   writeLines(as.character(rc), paste0(rc_f, ".tmp"))
   file.rename(paste0(rc_f, ".tmp"), rc_f)
   unlink(jp("current_block"))

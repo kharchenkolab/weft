@@ -83,6 +83,28 @@ _COMPILE_PATTERNS: tuple[re.Pattern, ...] = (
 )
 
 
+_PIP_MISSING_RE = re.compile(r"No module named pip\b")
+
+
+def _pip_missing_hints(text: str) -> dict | None:
+    """The pip-less-python shape (env-churn incident): a pypi layer
+    install died because the interpreter carries no pip AND the site
+    has no uv. Unclassified, this hid as a generic realize failure
+    whose cause lived only in the site log — and every overlay fell
+    back to a full prefix without saying why. The remedy names the
+    levers each surface can pull."""
+    if not _PIP_MISSING_RE.search(text or ""):
+        return None
+    return {"failure_class": "pip_missing",
+            "remedy": "this python has no pip and the site has no uv "
+                      "— a pypi layer needs one installer. Env spec: "
+                      "add \"pip\" to deps.conda and re-ensure (for "
+                      "published bases, re-publish). Site: provide uv "
+                      "on PATH. Until then, pypi deltas realize as a "
+                      "FULL prefix (overlay fallback) or fail in "
+                      "sessions."}
+
+
 def compile_signature(text: str) -> bool:
     """Does this log show a COMPILE-stage failure? One owner for the
     retry-with-toolchain gates (realize prefix, session pypi lanes)."""

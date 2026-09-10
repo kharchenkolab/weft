@@ -2182,6 +2182,7 @@ class Weft:
             target = {{"env_id": "env", "session_id": "session",
                        "kernel_id": "kernel"}
                       .get(k, k): v for k, v in target.items()}
+            from_kernel = None
             if "kernel" in target:
                 # the kernel is where the agent IS (aba2 ask): resolve
                 # to what the kernel runs on — its session when it has
@@ -2197,9 +2198,18 @@ class Weft:
                                "suggestion": "list_kernels shows live "
                                              "kernels"})
                 if krow.get("session_id"):
+                    # session-attached kernels see installs LIVE (the
+                    # forward hook): satisfied means the kernel's next
+                    # block has it — no restart, no caveat
                     target["session"] = krow["session_id"]
                 else:
+                    # env-attached kernels are FROZEN: the resolution
+                    # mints a new env the RUNNING interpreter cannot
+                    # adopt — the answer must say so (aba2 ask 37:
+                    # satisfied:true here forced a ModuleNotFoundError
+                    # on the very next exec)
                     target["env"] = krow["env_id"]
+                    from_kernel = kid
         if not isinstance(target, dict) or not target or \
                 set(target) - {"session", "env"}:
             raise WeftError(
@@ -2277,6 +2287,20 @@ class Weft:
                    "env_id": got["env_id"],
                    "note": "postconditions enforce at realize — ready "
                            "means verified, per site"}
+            if from_kernel and out["changed"]:
+                # the RUNNING kernel keeps its old env — a bare
+                # satisfied:true here is an answer the caller cannot
+                # use (envelope v1 additive field, 2026-09-09,
+                # coordinated with aba's vendored schema copy)
+                out["restart_required"] = True
+                out["kernel_note"] = (
+                    f"kernel {from_kernel} keeps its frozen env — "
+                    f"start a kernel on {got['env_id']} to use the "
+                    "addition (kernel_restart replays onto the SAME "
+                    "env; it does not adopt the new one). For "
+                    "mid-analysis installs without restarts, attach "
+                    "kernels to a SESSION: session-target ensures are "
+                    "live on the next block.")
             if site:
                 out.update(self._env_verify_now(
                     got["env_id"], site, request, verify, attempt))

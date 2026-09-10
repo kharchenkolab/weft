@@ -167,7 +167,11 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
   `ensure_available({"session": sid}, {"pypi": [...], "cran": [...]})`
   (tagged; `{"session_id"}`/`{"env_id"}` are accepted target-key
   aliases, and `{"kernel": kid}` resolves to the kernel's session when
-  it has one, else its env) or `ensure_available({"session": sid}, ["Name"],
+  it has one — installs there are LIVE on the next block — else its
+  FROZEN env: the mint succeeds but the running interpreter keeps the
+  old env, so the envelope adds `restart_required: true` +
+  `kernel_note`; attach kernels to sessions when you expect
+  mid-analysis installs) or `ensure_available({"session": sid}, ["Name"],
   lanes=["conda", "cran"])` (ranked — YOUR lane order; the substrate
   speaks each lane's dialect: an R-namespace bare name on conda tries
   `r-<lowercase>` then `bioconductor-<lowercase>` on a not-found miss
@@ -394,8 +398,11 @@ exact solve.
 ## Overlay mechanics (what actually happens)
 
 When a child `extends_env` a parent that is realized on the site, the
-child env dir holds ONLY its delta: `pylib/` (pip `--target`, artifact
-hashes from the lock), `rlib/` (R delta, `.libPaths`-composed), or a
+child env dir holds ONLY its delta: `pylib/` (uv when the site has
+it, else the parent's pip, `--target`-installed at the lock's artifact
+hashes — a pip-less parent still overlays wherever uv exists;
+without either, the fallback failure and the `overlay_fallback` event
+carry `failure_class: pip_missing` naming the levers), `rlib/` (R delta, `.libPaths`-composed), or a
 Julia project instantiated against the shared depot. Its `activate.sh`
 sources the parent's and appends `PYTHONPATH`/`R_LIBS`/`JULIA_PROJECT`
 lines. Same EnvID, same behavior — a conformance test holds overlay and

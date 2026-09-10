@@ -26,6 +26,7 @@ while true
     mkpath(art)
     ENV["WEFT_BLOCK_DIR"] = art
     rc = 0
+    t0 = time()
     # real files from block start, flushed on a timer: a controller
     # tailing them streams output while the block runs
     out = open(jp("blocks/" * lpad(n, 4, '0') * ".out"), "w")
@@ -50,6 +51,9 @@ while true
         close(flusher)
         close(out); close(err)
     end
+    wall_f = jp("blocks/" * lpad(n, 4, '0') * ".wall_ms")
+    write(wall_f * ".tmp", string(round(Int, (time() - t0) * 1000)))
+    mv(wall_f * ".tmp", wall_f, force=true)
     write(rc_f * ".tmp", string(rc))
     mv(rc_f * ".tmp", rc_f, force=true)
     rm(jp("current_block"), force=true)

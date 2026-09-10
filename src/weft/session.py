@@ -1493,8 +1493,10 @@ class SessionManager:
                         tail = (r.err or r.out)[-1500:]
                         code, retryable = _pip_failure(tail)
             if r.rc != 0:
+                from .evidence import _pip_missing_hints
                 hints = {"requested": list(pypi),
-                         **failure_evidence(adapter, lg, r.out)}
+                         **failure_evidence(adapter, lg, r.out),
+                         **(_pip_missing_hints(tail) or {})}
                 if code == "env.realize_failed":
                     hints.update(_syslib_hints(tail) or {})
                 raise WeftError(
@@ -1513,10 +1515,12 @@ class SessionManager:
             tail = (ra.err or ra.out)[-1500:]
             code, retryable = _pip_failure(
                 tail, default="env.solve_failed", default_retryable=True)
+            from .evidence import _pip_missing_hints
             raise WeftError(
                 code, "pypi delta resolution failed against the base",
                 stage="realize", retryable=retryable,
-                hints={"requested": pypi, "log_tail": tail})
+                hints={"requested": pypi, "log_tail": tail,
+                       **(_pip_missing_hints(tail) or {})})
         else:
             data = _json.loads(adapter.read_file(report_rel).decode())
             missing = [f'{i["metadata"]["name"]}=={i["metadata"]["version"]}'
@@ -1574,9 +1578,11 @@ class SessionManager:
                             tail = (rb.err or rb.out)[-1500:]
                             code, retryable = _pip_failure(tail)
                 if rb.rc != 0:
+                    from .evidence import _pip_missing_hints
                     hints = {"missing": missing,
                              **failure_evidence(adapter, lgb,
-                                                rb.out)}
+                                                rb.out),
+                             **(_pip_missing_hints(tail) or {})}
                     if code == "env.realize_failed":
                         hints.update(_syslib_hints(tail) or {})
                     raise WeftError(

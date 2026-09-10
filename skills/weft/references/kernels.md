@@ -33,6 +33,8 @@ auto-snapshotting the session into a real EnvID (recorded in the
 manifest with `session: {session_id, snapshotted_at_promote}`);
 `kernel_restart` replays into the session as it now is.
 
+Block results (and `kernel.block_failed`) carry `wall_ms` — the
+driver-measured in-block cost, stamped before the rc.
 `blocks/NNNN.{out,err}` exist (empty) from block start and GROW while
 the block runs — hosts streaming live output tail them at an offset;
 `.rc` appearing (written last, atomic) is completion.

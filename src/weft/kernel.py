@@ -346,17 +346,33 @@ class KernelManager:
                 rc = int(adapter.read_file(f"{base}.rc").decode().strip() or 1)
                 out = adapter.read_file(f"{base}.out", 65536).decode("utf-8", "replace")
                 err = adapter.read_file(f"{base}.err", 16384).decode("utf-8", "replace")
+                # wall_ms: written by the driver BEFORE rc, so present
+                # whenever rc is (absent only under pre-upgrade
+                # drivers). Honest numbers for the in-block cost that
+                # was invisible to telemetry (env-churn: 223s of cold
+                # first-import recovered only from .pyc mtimes).
+                wall_ms = None
+                if adapter.file_exists(f"{base}.wall_ms"):
+                    try:
+                        wall_ms = int(adapter.read_file(
+                            f"{base}.wall_ms").decode().strip())
+                    except ValueError:
+                        pass
                 arts = adapter.run_cmd(
                     f"ls {shlex.quote(adapter.path(base + '.artifacts'))} 2>/dev/null"
                 ).out.split()
                 if rc != 0:
                     self.store.emit("kernel.block_failed", kernel=kernel_id,
-                                    block=block, rc=rc, err_tail=err[-500:])
+                                    block=block, rc=rc, err_tail=err[-500:],
+                                    **({"wall_ms": wall_ms}
+                                       if wall_ms is not None else {}))
                 if (k.get("capture") or "transcript") == "transcript":
                     self.store.put_kernel_block(kernel_id, block, rc=rc,
                                                 out=out, err=err)
                 return {"kernel_id": kernel_id, "block": block, "rc": rc,
                         "out": out, "err": err, "artifacts": arts,
+                        **({"wall_ms": wall_ms}
+                           if wall_ms is not None else {}),
                         "state": "done"}
             if time.time() >= deadline:
                 # not an error: the block may legitimately be long-running

@@ -124,6 +124,7 @@ def main():
         out = _LiveFile(_p(f"blocks/{n:04d}.out"))
         err = _LiveFile(_p(f"blocks/{n:04d}.err"))
         rc = 0
+        _t0 = time.monotonic()
         try:
             if _SESSION_PREFIX:
                 import importlib
@@ -160,6 +161,13 @@ def main():
         finally:
             out.close()
             err.close()
+        # wall_ms BEFORE rc: rc is the consume signal, so the timing
+        # is guaranteed present when a reader reacts to rc (env-churn
+        # asks: 223 s of first-import was invisible to telemetry)
+        wall = str(int((time.monotonic() - _t0) * 1000))
+        wtmp = _p(f"blocks/{n:04d}.wall_ms.tmp")
+        open(wtmp, "w").write(wall)
+        os.replace(wtmp, _p(f"blocks/{n:04d}.wall_ms"))
         tmp = rc_f + ".tmp"
         open(tmp, "w").write(str(rc))
         os.replace(tmp, rc_f)

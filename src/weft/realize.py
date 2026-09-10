@@ -390,7 +390,14 @@ def ensure_realization(
                     # working env — we just pay for a full build and say so.
                     store.emit("realize.overlay_fallback", env_id=env_id,
                                site=adapter.name, parent=overlay_parent,
-                               reason=e.detail[:300])
+                               reason=e.detail[:300],
+                               # the CAUSE, not just the wrapper text —
+                               # the env-churn incident's why lived
+                               # only in a site log
+                               **({"failure_class":
+                                       (e.hints or {})["failure_class"]}
+                                  if (e.hints or {}).get("failure_class")
+                                  else {}))
                     strategy = base_strategy
                     if archive_ref and not strategy.endswith("packed"):
                         strategy = "modules+packed" if modules else "packed"
@@ -837,8 +844,12 @@ def _build_prefix(
                         f"{shlex.quote(manifest_path)} 2>&1",
                         log_rel, timeout=5400)
     if emit is not None and build.rc == 0:
+        # log_path on SUCCESS too: download/cache attribution lives in
+        # pixi's own output — weft persists it and points, rather than
+        # parsing numbers it cannot vouch for (tool-honesty)
         emit("realize.prefix.done", env_id=env_id, site=adapter.name,
-             elapsed_s=round(_t.time() - t0, 1))
+             elapsed_s=round(_t.time() - t0, 1),
+             log_path=adapter.path(log_rel))
     if build.rc != 0:
         from .evidence import _syslib_hints
         raise WeftError(
@@ -1460,12 +1471,24 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
     _lg = f"logs/{rel.rsplit('/', 1)[-1]}-overlay-pypi.log"
 
     def install(flags: str):
+        # uv-first, pip fallback — lane parity with the session pypi
+        # fetch (env-churn ask 36: a pip-less base sent every pypi
+        # overlay through overlay_fallback into a full fresh prefix,
+        # ~70s of cold first-import each, while uv one lane over
+        # would have installed the delta in seconds; uv is a
+        # standalone binary and needs no pip in the parent)
         return _rl(adapter, _w(
             prelude +
             f". {shlex.quote(parent_dir)}/activate.sh && "
             f"mkdir -p {shlex.quote(pylib)} && "
-            f"python -m pip install --no-deps --no-input {flags} "
-            f"--target {shlex.quote(pylib)} -r {shlex.quote(req)} 2>&1"),
+            f"if command -v uv >/dev/null 2>&1 && "
+            f"uv pip install --no-deps {flags} "
+            f"--target {shlex.quote(pylib)} "
+            f"--python \"$(command -v python)\" -r {shlex.quote(req)} "
+            f">/dev/null 2>&1; then echo '#overlay uv'; "
+            f"else python -m pip install --no-deps --no-input {flags} "
+            f"--target {shlex.quote(pylib)} -r {shlex.quote(req)} "
+            f"&& echo '#overlay pip'; fi 2>&1"),
             _lg, timeout=1800, runner=adapter.run_activated)
 
     r = install("--require-hashes" if all_hashed else "")
@@ -1475,7 +1498,7 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
         # unhashed rather than paying a full-prefix rebuild — but say so.
         r = install("")
     if r.rc != 0:
-        from .evidence import _syslib_hints
+        from .evidence import _pip_missing_hints, _syslib_hints
         raise WeftError(
             "env.realize_failed",
             "could not install the pypi delta into the overlay layer: "
@@ -1487,7 +1510,8 @@ def _overlay_pypi(env_id: str, env_row: dict, parent_row: dict,
                    # the cran sibling attaches this classifier on the
                    # same function's failures; a missing lzma.h here
                    # was an unclassified failure (parity sweep)
-                   **(_syslib_hints(r.out or "") or {})})
+                   **(_syslib_hints(r.out or "") or {}),
+                   **(_pip_missing_hints(r.out or "") or {})})
     # entry-point scripts: pip --target does not place them on PATH
     binw = f"{adapter.path(rel)}/bin"
     adapter.run_cmd(

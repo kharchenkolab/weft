@@ -435,7 +435,8 @@ normalized failure hints ({ecosystem, solver_message, user_pins}),
 A kernel is a tracked, detached job running a small per-language driver
 (python/R/julia — a registry, `kernel.LANGUAGES`) that executes code
 blocks against persistent interpreter state, through a file protocol
-(blocks/NNNN.{code,out,err,rc} + artifacts dir + heartbeat) — Jupyter-like
+(blocks/NNNN.{code,out,err,wall_ms,rc} + artifacts dir + heartbeat +
+driver.ready) — Jupyter-like
 statefulness with no sockets, working over any control channel and
 surviving disconnects.
 

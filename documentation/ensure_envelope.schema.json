@@ -1,5 +1,5 @@
 {
-  "$comment": "ensure_available result envelope v1 — the PINNED cross-repo contract (aba guards it consumer-side; tests/conformance/test_envelope.py guards it here). Changes are deliberate, versioned events. 2026-07-22 additive: attempt.repositories, success.verified_site + env-target verify-now note semantics (coordinated with aba's vendored copy); 2026-07-26 additive: attempt.shadows_base.",
+  "$comment": "ensure_available result envelope v1 — the PINNED cross-repo contract (aba guards it consumer-side; tests/conformance/test_envelope.py guards it here). Changes are deliberate, versioned events. 2026-07-22 additive: attempt.repositories, success.verified_site + env-target verify-now note semantics (coordinated with aba's vendored copy); 2026-07-26 additive: attempt.shadows_base; 2026-09-09 additive: success.restart_required + success.kernel_note (kernel-resolved env targets — the running kernel cannot adopt the minted env; coordinated with aba's vendored copy).",
   "envelope_version": 1,
   "success": {
     "satisfied": "bool (true)",
@@ -9,7 +9,9 @@
     "runtime": "the session runtime contract block",
     "session_id": "str (session targets)",
     "env_id": "str (env targets; the note says WHICH enforcement happened: 'verified now' against site='s ready realization, or 'postconditions enforce at realize')",
-    "verified_site": "str (env targets only, and only when site= was passed AND the result env already held a ready realization there — verified is then populated from a live check; absent = deferred to realize, verified stays {})"
+    "verified_site": "str (env targets only, and only when site= was passed AND the result env already held a ready realization there — verified is then populated from a live check; absent = deferred to realize, verified stays {})",
+    "restart_required": "bool (present and true ONLY when the target was a KERNEL that resolved to its frozen env and the solve changed it: the running interpreter keeps the old env — satisfied refers to the minted env, not the kernel)",
+    "kernel_note": "str (with restart_required: names the kernel, the minted env, and the session-attached lane that avoids restarts)"
   },
   "error_hints": {
     "$comment": "failures use the standard error envelope {error, stage, detail, hints, retryable, meaning}; these keys ride hints",
