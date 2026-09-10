@@ -125,3 +125,104 @@ class ScriptedAgent:
     def _result(success, rounds, actions, unchanged, last) -> dict:
         return {"success": success, "rounds": rounds, "actions": actions,
                 "unchanged_resubmits": unchanged, "last": last}
+
+
+class LadderAgent:
+    """The CORNER CENSUS agent (the generalization's dynamic guard): an
+    agent that provisions/repairs an env reading ONLY structured
+    outputs — env_inspect facts, refusal hints, result notes — and
+    descends the escalation ladder (inspect -> lever -> env_exec
+    diagnose -> env_amend/session repair). The property under test is
+    that no lever chain is a DEAD END or a LOOP: every corner resolves
+    to success OR terminates at an HONEST 'cannot, because X' (a
+    refusal that advertises no further lever), and a (code, subject)
+    pair never repeats — a repeat is a cycle, which is the bug this
+    exists to catch. If this table navigates the hints, a language
+    model has every chance; if a hint loops THIS agent, it would have
+    misled the model too."""
+
+    def __init__(self, weft, max_steps: int = 6):
+        self.w = weft
+        self.max_steps = max_steps
+
+    def provision(self, env_id: str, site: str,
+                  needs: str | None = None,
+                  repair_cmd: str | None = None) -> dict:
+        """Reach a usable env. `needs`: a predicate name env_inspect can
+        answer ('pip'); `repair_cmd`: the fix to apply if it is absent.
+        Returns {resolved, terminal_honest, chain, seen, env_id}."""
+        chain: list[str] = []
+        seen: list[tuple] = []       # (code, subject) — a repeat is a loop
+        eid = env_id
+        for _ in range(self.max_steps):
+            insp = self.w.env_inspect(eid, site)
+            if not insp.get("realized"):
+                # lever: env_status/env_realize (named in the suggestion)
+                sug = insp.get("suggestion", "")
+                if "env_realize" not in sug:
+                    return self._term(chain, seen, honest=False, eid=eid)
+                chain.append("env_realize (from inspect suggestion)")
+                self.w.env_realize(eid, site)
+                continue
+            itp = insp.get("interpreter") or {}
+            if needs == "pip" and not itp.get("pip_version") \
+                    and repair_cmd:
+                # the fix an ssh agent would make — but in-band + re-owned
+                r = self.w.env_amend(eid, site, repair_cmd,
+                                     why="corner-census repair")
+                if "error" not in r:
+                    chain.append(f"env_amend -> {r['env_id']}")
+                    return {"resolved": True, "terminal_honest": False,
+                            "chain": chain, "seen": seen,
+                            "env_id": r["env_id"]}
+                # refusal: follow the posted door, guarding against loops
+                key = (r["error"], eid)
+                if key in seen:
+                    return self._term(chain, seen, honest=False, eid=eid,
+                                      note="LOOP: lever led back to the "
+                                           "same refusal")
+                seen.append(key)
+                door = self._door(r)
+                if door is None:
+                    # honest dead-end: refusal names no further lever
+                    return self._term(chain, seen, honest=True, eid=eid)
+                verb, arg = door
+                chain.append(f"{r['error']} -> {verb}")
+                if verb == "extends_env":
+                    got = self.w.env_ensure(
+                        {"extends_env": eid, "deps": {}})
+                    if "error" in got:
+                        return self._term(chain, seen, honest=False,
+                                          eid=eid)
+                    eid = got["env_id"]
+                    self.w.env_realize(eid, site)
+                    continue
+                return self._term(chain, seen, honest=True, eid=eid)
+            # nothing to repair — the env is usable as-is
+            return {"resolved": True, "terminal_honest": False,
+                    "chain": chain, "seen": seen, "env_id": eid}
+        return self._term(chain, seen, honest=False, eid=eid,
+                          note="STEP BUDGET SPENT — chain did not "
+                               "terminate")
+
+    @staticmethod
+    def _door(err: dict):
+        """Extract the FIRST actionable lever a refusal advertises. The
+        contract: a wall posts its door. No door found -> honest
+        dead-end (acceptable); a door that exists -> must be live."""
+        h = err.get("hints") or {}
+        levers = h.get("levers") or h.get("options") or {}
+        for k, v in levers.items():
+            if "extends_env" in k or "extends_env" in str(v):
+                return ("extends_env", v)
+            if "session" in k:
+                return ("session", v)
+        return None
+
+    @staticmethod
+    def _term(chain, seen, *, honest, eid, note=None):
+        out = {"resolved": False, "terminal_honest": honest,
+               "chain": chain, "seen": seen, "env_id": eid}
+        if note:
+            out["note"] = note
+        return out
