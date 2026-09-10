@@ -963,6 +963,19 @@ w.provenance("dref:…")   # who produced this artifact, all the way down
 ```python
 w.doctor()                                  # shim health per site, stale jobs
                                             # (multi-hop sites: which hop died)
+w.env_inspect(env_id, "hpc")                 # ground truth of a realization:
+                                            # interpreter path/version, pip &
+                                            # setuptools present+versions, uv,
+                                            # strategy, grade (record + one
+                                            # live probe; read-only)
+w.env_exec(env_id, "hpc", "python -m pip install 'setuptools<81'",
+           why="base pkg_resources trap")   # run INSIDE the activated env —
+                                            # audited/deny-listed/bounded like
+                                            # site_exec; changes are NOT
+                                            # re-owned (session_snapshot or the
+                                            # forthcoming amend keeps them);
+                                            # read-only/published bases refuse
+                                            # with the session/extends door
 w.site_exec("local", "df -h .", why="check quota before big staging")
 w.job_node_exec(job_id, "nvidia-smi; free -m",
                 why="job looks stuck")      # INSIDE the job's allocation

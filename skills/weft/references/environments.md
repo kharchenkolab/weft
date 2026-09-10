@@ -301,6 +301,20 @@ w.env_unpublish("hpc", tree, "lab-py", "2026.07") # pointer only; grace
     `shadows_base` — rlib packages MASKING same-named base-library
     packages via .libPaths() order. Iterate freely here — that's what
     it's for. See "Adaptive moves" below.
+- **Standing on it, fixing it in place:** `env_inspect(env_id,
+  site)` answers "what am I actually on" in one call — interpreter
+  path/version, pip & setuptools present+versions (the pip-less/
+  setuptools trap surfaced by name), uv, strategy, grade — record
+  facts plus one live probe, read-only. `env_exec(env_id, site, cmd,
+  why)` runs a command INSIDE the activated realization (the audited,
+  activated equal of site_exec): the natural fix without leaving weft
+  for raw ssh. It is DIAGNOSTIC — weft does not re-own changes, so a
+  mutation diverges the realization from its EnvID and the fence
+  rebuilds it from the lock on next use; to KEEP a change, run it in a
+  session (`session_run_installer` → `session_snapshot` mints a
+  citable env carrying it). Shared/published/read-only bases refuse
+  in-place mutation and name the session/`extends_env` door — their
+  bytes back other stores' records.
 - **Reuse:** identical resolutions share EnvIDs; realizations re-adopt
   across workspaces from the site marker; `env_status(env_id)` shows the
   per-site realization matrix (your memory of what is installed where).

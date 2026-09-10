@@ -1362,6 +1362,157 @@ class Weft:
         return {"env_id": env_id, "site": site, "state": "cleared",
                 "note": "next task using this env here rebuilds it from the lockfile"}
 
+    def env_inspect(self, env_id: str, site: str) -> dict:
+        """Ground truth of a realization — "what am I actually standing
+        on" in one call, instead of shell archaeology. Record facts
+        (strategy, location, read_only, package count, grade) plus a
+        LIVE probe of the activated interpreter: its path and version,
+        whether pip and setuptools are present and at what versions
+        (the pip-less-base / setuptools trap the env-churn incident
+        hit), and whether uv is on PATH. Read-only; never mutates.
+
+        A not-realized env answers `realized: false` with the
+        env_realize lever — no probe to run."""
+        real = self.store.get_realization(env_id, site)
+        env_row = self.store.get_env(env_id)
+        if not env_row:
+            raise WeftError("task.invalid", f"unknown EnvID: {env_id}",
+                            stage="solve")
+        out = {"env_id": env_id, "site": site,
+               "realized": bool(real and real["state"] == "ready")}
+        if real:
+            out.update({k: real.get(k) for k in
+                        ("strategy", "state", "location")})
+            out["read_only"] = bool(real.get("read_only"))
+        if not out["realized"]:
+            out["suggestion"] = (f"env_realize({env_id!r}, {site!r}) "
+                                 "first — nothing to inspect until it "
+                                 "is realized here")
+            return out
+        # package count from the RECORD (coherent, no scan)
+        canon = env_row.get("canonical") or {}
+        out["package_count"] = sum(
+            len(v) for v in (canon.get("platforms") or {}).values())
+        try:
+            from .grade import grade_env
+            out["grade"] = grade_env(canon)["grade"]
+        except Exception:      # noqa: BLE001 — grading is best-effort
+            pass
+        adapter = self._adapter(site)
+        from .realize import env_dir_rel as _edr
+        loc = real.get("location") or _edr(env_id)
+        # ONE activated probe: the facts only the disk knows. Emits
+        # machine-parseable KEY=VALUE lines; missing tools print empty.
+        probe = (
+            'echo "python=$(command -v python 2>/dev/null)"; '
+            'echo "python_version=$(python --version 2>&1)"; '
+            'echo "pip=$(python -m pip --version 2>/dev/null '
+            '| cut -d\" \" -f2)"; '
+            'echo "setuptools=$(python -c '
+            "'import importlib.metadata as m; "
+            "print(m.version(\\\"setuptools\\\"))' 2>/dev/null)\"; "
+            'echo "uv=$(command -v uv 2>/dev/null)"')
+        try:
+            r = adapter.run_activated(
+                f". {shlex.quote(adapter.path(loc))}/activate.sh && "
+                f"{{ {probe}; }}", timeout=60)
+            facts = {}
+            for line in (r.out or "").splitlines():
+                if "=" in line:
+                    k, _, v = line.partition("=")
+                    facts[k.strip()] = v.strip()
+            out["interpreter"] = {
+                "python_path": facts.get("python") or None,
+                "python_version": facts.get("python_version") or None,
+                "pip_version": facts.get("pip") or None,
+                "setuptools_version": facts.get("setuptools") or None,
+                "has_uv": bool(facts.get("uv")),
+            }
+            # the ONE fact the incident turned on, surfaced plainly
+            if not facts.get("pip") and not facts.get("uv"):
+                out["note"] = ("no pip in this python AND no uv on the "
+                               "site — pypi layer adds fall back to a "
+                               "full prefix (add \"pip\" to deps.conda, "
+                               "or provide uv)")
+        except WeftError as e:
+            out["probe_error"] = e.detail[:200]
+        return out
+
+    def env_exec(self, env_id: str, site: str, cmd: str, why: str,
+                 timeout: int = 120, max_out: int = 8000,
+                 max_err: int = 4000) -> dict:
+        """Run a command INSIDE the activated realization (interpreter,
+        PATH, env vars set) — the sanctioned door for the natural fix
+        an agent would otherwise leave weft to make over raw ssh. Same
+        guardrail model as site_exec: audited `why`, deny-list, bounded
+        timeout/output. The env must be realized on the site (a
+        not-realized env refuses with the env_realize lever).
+
+        DIAGNOSIS by default; weft does NOT re-own changes. A command
+        that MUTATES the prefix leaves the realization diverged from
+        its EnvID — the integrity fence rebuilds it from the lock on
+        next use, discarding the change. To keep a change as part of
+        the record: run it in a SESSION (session_run_installer →
+        session_snapshot mints a citable env carrying it), the
+        designed lane for repairs. (This door is the audited,
+        activated equal of the site_exec an agent already has — it
+        adds legibility, not new reach.)
+
+        Shared/published realizations refuse: their bytes back other
+        stores' records and are read-only by contract — mutating them
+        is never sanctioned; the refusal names the session/extends
+        door."""
+        timeout = _bounded(timeout, 1, 3600, "timeout")
+        max_out = _bounded(max_out, 1, 1 << 20, "max_out")
+        max_err = _bounded(max_err, 1, 1 << 20, "max_err")
+        self._check_denied("env.exec", site, cmd, why)
+        real = self.store.get_realization(env_id, site)
+        if not real or real["state"] != "ready":
+            raise WeftError(
+                "env.not_realized",
+                f"env {env_id} is not realized on {site}",
+                stage="realize",
+                hints={"suggestion": f"env_realize({env_id!r}, "
+                                     f"{site!r}) first"})
+        if real.get("read_only"):
+            raise WeftError(
+                "task.invalid",
+                "this realization is a read-only adopted/published "
+                "base — its bytes belong to its owner and back other "
+                "stores' records; weft will not run commands that "
+                "might mutate it in place",
+                stage="realize",
+                hints={"levers": {
+                    "diagnose": "site_exec runs read-only shells on "
+                                "the site",
+                    "change": "mint your own env: env_ensure("
+                              "{'extends_env': '" + env_id + "', "
+                              "'deps': {...}}) overlays on the RO base; "
+                              "or a session over it for exploratory "
+                              "repair"}})
+        adapter = self._adapter(site)
+        from .realize import env_dir_rel as _edr
+        loc = real.get("location") or _edr(env_id)
+        script = (f". {shlex.quote(adapter.path(loc))}/activate.sh && "
+                  f"cd {shlex.quote(adapter.path(loc))} && ( {cmd} )")
+        from .realize import _ns_wrap_cmd
+        ns = bool(self.runner
+                  and self.runner.ns_wrap_needed(env_id, site))
+        r = adapter.run_activated(_ns_wrap_cmd(script) if ns else script,
+                                  timeout=timeout)
+        self.store.audit_log(None, "env.exec", site=site, command=cmd,
+                             why=why, result=f"rc={r.rc}")
+        self.store.emit("env.exec", env_id=env_id, site=site, rc=r.rc)
+        return {"env_id": env_id, "site": site, "rc": r.rc,
+                "stdout": (r.out or "")[-max_out:],
+                "stderr": (r.err or "")[-max_err:],
+                "note": "changes here are NOT re-owned — the integrity "
+                        "fence rebuilds this realization from the lock "
+                        "on next use if you mutated it. To keep a "
+                        "change: session_run_installer + "
+                        "session_snapshot mints a citable env carrying "
+                        "it."}
+
     def env_gpu_hint(self, site: str) -> dict:
         """What GPU userland can this site's driver support? (doc S3/S4)"""
         from .gpu import suggest_gpu_spec
@@ -3450,7 +3601,7 @@ PUBLIC_TOOLS = [
     "site_route_probe", "module_check", "module_list", "site_exec",
     "job_node_exec", "site_teardown", "site_unregister",
     "env_ensure", "env_status", "env_why", "env_packages", "env_repair",
-    "env_realize",
+    "env_realize", "env_inspect", "env_exec",
     "env_gpu_hint", "env_revise", "env_find_near",
     "env_publish", "env_adopt", "env_unpublish", "env_published",
     "data_register", "data_describe", "data_fetch", "data_fingerprint",
