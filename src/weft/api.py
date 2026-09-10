@@ -1511,7 +1511,180 @@ class Weft:
                         "on next use if you mutated it. To keep a "
                         "change: session_run_installer + "
                         "session_snapshot mints a citable env carrying "
-                        "it."}
+                        "it, or env_amend to re-own it in place."}
+
+    def env_amend(self, env_id: str, site: str, cmd: str, why: str,
+                  label: str = "", source: str | None = None,
+                  timeout: int = 600, verify=None) -> dict:
+        """Repair a realization IN PLACE and RE-OWN the result: run the
+        command inside the activated prefix (no clone), then mint the
+        amended identity and rebind — one transaction, no detour, and
+        the fix becomes a portable recipe automatically.
+
+        The amended env is `{extends_env: <env_id>, post_install:
+        [cmd]}` — a first-class EnvID by spec algebra (post_install is
+        hashed into identity), whose lock is the parent's pins and
+        whose realization elsewhere is "realize parent + replay the
+        repair". This site's prefix, having just had exactly that done
+        to it, is rebound as the amended env's realization (fresh
+        integrity fingerprint); the parent's realization here flips to
+        `missing` (those bytes no longer realize the parent — honest,
+        so the pristine parent rebuilds cleanly on next use); running
+        FROZEN-env kernels on this prefix re-point to the amended env
+        (they genuinely run the amended bytes). Identity is preserved
+        by RE-identifying immediately, never by forbidding change.
+
+        `source=` a local path is content-addressed and staged first,
+        so a `pip install ./wheel`-style repair stays portable.
+        `verify=` proves a postcondition in the amended runtime.
+
+        Refuses (each names its door) on: not-realized (env_realize);
+        read-only/published/shared bases and non-prefix strategies
+        (squashfs/overlay) — their bytes are immutable or back other
+        stores' records, so mint a delta with `extends_env` or a
+        session instead. A FAILED repair leaves no half-amended
+        identity: the parent's realization goes `missing` (dirty
+        prefix rebuilds pristine) and the error carries the command
+        output."""
+        timeout = _bounded(timeout, 1, 10800, "timeout")
+        self._check_denied("env.amend", site, cmd, why)
+        real = self.store.get_realization(env_id, site)
+        if not real or real["state"] != "ready":
+            raise WeftError(
+                "env.not_realized",
+                f"env {env_id} is not realized on {site}",
+                stage="realize",
+                hints={"suggestion": f"env_realize({env_id!r}, "
+                                     f"{site!r}) first"})
+        strategy = real.get("strategy") or "prefix"
+        door = {"extends_env": "mint a delta env instead: env_ensure("
+                               "{'extends_env': '" + env_id + "', "
+                               "'deps': {...}}) — realizes fresh here, "
+                               "your own to amend",
+                "session": "a session over this base runs the repair in "
+                           "a clone and session_snapshot mints it"}
+        if real.get("read_only"):
+            raise WeftError(
+                "task.invalid",
+                "this realization is a read-only adopted/published base "
+                "— its bytes belong to its owner and back other stores' "
+                "records; amend cannot mutate it in place",
+                stage="realize", hints={"levers": door})
+        if not (strategy == "prefix" or strategy.endswith("+prefix")):
+            raise WeftError(
+                "task.invalid",
+                f"amend needs a mutable prefix realization; this one is "
+                f"{strategy!r} (immutable image / composed overlay)",
+                stage="realize", hints={"levers": door})
+        env_row = self.store.get_env(env_id)
+        if not env_row:
+            raise WeftError("task.invalid", f"unknown EnvID: {env_id}",
+                            stage="solve")
+        adapter = self._adapter(site)
+        from .realize import (amend_rebind, env_dir_rel as _edr,
+                              _ns_wrap_cmd)
+        loc = real.get("location") or _edr(env_id)
+
+        # 1. content-address the source (portable repair) BEFORE the run
+        pi_inputs = []
+        if source:
+            from pathlib import Path as _P
+            info = self.dataman.register(_P(source).resolve())
+            mount = _P(source).name
+            pi_inputs = [{"ref": info["ref"], "mount_as": mount}]
+            # stage it beside the prefix so the command can reach it —
+            # the same shim materialize the session installer uses
+            from .task import Task as _Task
+            t = _Task.from_dict({"command": "true",
+                                 "inputs": [{"ref": info["ref"],
+                                             "mount_as": mount}]})
+            self.dataman.ensure_at([info["ref"]], adapter,
+                                   self.runner.transfers)
+            plan = self.dataman.materialize_plan(t, site=site)
+            adapter.write_file(f"{loc}/inputs.tsv", plan.encode())
+            ep = adapter.transfer_endpoint()
+            adapter.shim(["materialize", "--cas", ep["cas_root"],
+                          "--dir", adapter.path(loc)], timeout=300)
+
+        # 2. run the repair IN PLACE (activated, guarded, ns-wrapped)
+        script = (f". {shlex.quote(adapter.path(loc))}/activate.sh && "
+                  f"cd {shlex.quote(adapter.path(loc))} && ( {cmd} )")
+        ns = bool(self.runner and self.runner.ns_wrap_needed(env_id, site))
+        r = adapter.run_activated(_ns_wrap_cmd(script) if ns else script,
+                                  timeout=timeout)
+        self.store.audit_log(None, "env.amend", site=site, command=cmd,
+                             why=why, result=f"rc={r.rc}")
+        if r.rc != 0:
+            # no half-amended identity: the dirty prefix rebuilds
+            # pristine on next use (env_amend is atomic — mint+rebind
+            # only on success)
+            self.store.set_realization(
+                env_id, site, strategy, _edr(env_id), "missing",
+                log="amend command failed — prefix dirty, will rebuild")
+            self.store.emit("env.amend_failed", env_id=env_id, site=site,
+                            rc=r.rc)
+            return WeftError(
+                "env.realize_failed",
+                "the amend command failed — the prefix is left dirty "
+                "and this env will rebuild pristine on next use",
+                stage="realize", retryable=False,
+                hints={"rc": r.rc, "stdout": (r.out or "")[-4000:],
+                       "stderr": (r.err or "")[-4000:]}).to_dict()
+
+        # 3. mint the amended identity (spec algebra — no fresh realize)
+        spec = {"extends_env": env_id,
+                "post_install": [cmd],
+                "step_notes": {"0": why}}
+        if label:
+            spec["name"] = label
+        if pi_inputs:
+            spec["post_install_inputs"] = pi_inputs
+        got = self.env_ensure(spec)
+        if "error" in got:
+            # the repair ran but the identity would not mint: keep the
+            # working bytes but say the record could not form
+            got.setdefault("hints", {})["amend_note"] = (
+                "the repair succeeded on the prefix, but the amended "
+                "env spec did not solve — the bytes work; the record "
+                "does not yet name them")
+            return got
+        amended = got["env_id"]
+
+        # 4. rebind: this prefix IS the amended env's realization now
+        digest = amend_rebind(amended, adapter, loc, strategy,
+                              extra={"amended_from": env_id})
+        self.store.set_realization(amended, site, strategy, loc, "ready",
+                                   read_only=False)
+        self.store.set_realization(
+            env_id, site, strategy, _edr(env_id), "missing",
+            log="rebound to amended env " + amended)
+        repointed = self.store.repoint_kernels_env(env_id, amended, site)
+        for kid in repointed:
+            self.store.emit("kernel.env_amended", kernel=kid,
+                            env_id=amended, amended_from=env_id)
+        self.store.emit("env.amended", env_id=amended, parent=env_id,
+                        site=site, kernels_repointed=len(repointed))
+
+        out = {"env_id": amended, "parent": env_id, "site": site,
+               "rc": 0, "grade": "escape-hatch",
+               "kernels_repointed": repointed,
+               "note": "repaired in place and RE-OWNED: this is a new "
+                       "citable EnvID carrying the repair as a "
+                       "post_install step — it realizes on any site as "
+                       "'parent + replay'. The parent's realization "
+                       "here was released (its pristine bytes rebuild "
+                       "on next use)."}
+        if verify is not None and isinstance(verify, dict) and verify:
+            try:
+                from .realize import _realize_postcondition
+                amended_row = self.store.get_env(amended)
+                _realize_postcondition(amended_row, adapter, loc, verify,
+                                       _ns_wrap_cmd if ns else "")
+                out["verified"] = True
+            except WeftError as e:
+                out["verified"] = False
+                out["verify_error"] = e.to_dict()
+        return out
 
     def env_gpu_hint(self, site: str) -> dict:
         """What GPU userland can this site's driver support? (doc S3/S4)"""
@@ -3601,7 +3774,7 @@ PUBLIC_TOOLS = [
     "site_route_probe", "module_check", "module_list", "site_exec",
     "job_node_exec", "site_teardown", "site_unregister",
     "env_ensure", "env_status", "env_why", "env_packages", "env_repair",
-    "env_realize", "env_inspect", "env_exec",
+    "env_realize", "env_inspect", "env_exec", "env_amend",
     "env_gpu_hint", "env_revise", "env_find_near",
     "env_publish", "env_adopt", "env_unpublish", "env_published",
     "data_register", "data_describe", "data_fetch", "data_fingerprint",

@@ -97,7 +97,9 @@ w.data_fetch(ref, "local/path")  # only when previews aren't enough
    env_id, site)` is ground truth of a realization (interpreter, pip/
    setuptools, uv, strategy); `env_exec(env_id, site, cmd, why)` runs
    the natural fix INSIDE the activated env (audited like site_exec) —
-   weft does not re-own changes, so keep a real fix in a session
+   weft does not re-own changes; `env_amend(env_id, site, cmd, why)`
+   runs the fix in place AND re-owns it (a new EnvID carrying it as
+   post_install, portable as parent+replay), or keep it in a session
    (snapshot). `doctor()` (multi-hop sites: which hop died),
    `site_load()`, `task_logs()`, `site_exec(site, cmd, why=...)` and
    `job_node_exec(job_id, cmd, why=...)` — INSIDE a running job's

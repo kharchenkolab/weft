@@ -1389,6 +1389,22 @@ class Store:
         self._write(f"UPDATE kernels SET {', '.join(sets)} WHERE kernel_id=?",
                     tuple(vals))
 
+    def repoint_kernels_env(self, old_env_id: str, new_env_id: str,
+                            site: str) -> list[str]:
+        """env_amend rebind: a running kernel frozen on `old_env_id`
+        runs against the prefix that is now `new_env_id`'s bytes — its
+        record must follow (session-attached kernels are untouched;
+        they have their own prefix). Returns the kernel ids repointed."""
+        rows = self._rows(
+            "SELECT kernel_id FROM kernels WHERE env_id=? AND site=? "
+            "AND state='running' AND (session_id IS NULL OR session_id='')",
+            (old_env_id, site))
+        ids = [r["kernel_id"] for r in rows]
+        for kid in ids:
+            self._write("UPDATE kernels SET env_id=? WHERE kernel_id=?",
+                        (new_env_id, kid))
+        return ids
+
     def list_kernels(self, state: str | None = None) -> list[dict]:
         q, vals = "SELECT * FROM kernels", ()
         if state:

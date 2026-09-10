@@ -1736,6 +1736,31 @@ def _spot_check_and_mark(
                        (_json.dumps(marker) + "\n").encode())
 
 
+def amend_rebind(amended_env_id: str, adapter: SiteAdapter, rel: str,
+                 strategy: str, extra: dict | None = None) -> str:
+    """Re-certify a prefix that was mutated in place (env_amend): the
+    bytes at `rel` are now a realization of `amended_env_id` (parent
+    realized + the captured repair executed), so the marker is
+    rewritten with a FRESH fingerprint over the mutated inventory.
+    After this the integrity fence blesses these bytes for the amended
+    env and REJECTS them for the parent (its recorded digest no longer
+    reproduces) — which is why env_amend flips the parent's row to
+    missing. Returns the fresh bin_digest.
+
+    Identity honesty by re-identification, not by forbidding change:
+    the amended id (extras differ — post_install is hashed) gets its
+    own certified bytes at the moment they change."""
+    import json as _json
+    digest = _bin_digest(adapter, rel, strategy)
+    marker = {"strategy": strategy, "bin_digest": digest,
+              "amended_from": (extra or {}).get("amended_from"),
+              **{k: v for k, v in (extra or {}).items()
+                 if k != "amended_from"}}
+    adapter.write_file(f"{rel}/.weft-ready",
+                       (_json.dumps(marker) + "\n").encode())
+    return digest
+
+
 def _build_packed(
     env_id: str, env_row: dict, adapter: SiteAdapter, rel: str,
     modules: list[str], modules_init: str, caps: dict | None,

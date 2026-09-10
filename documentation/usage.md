@@ -971,11 +971,21 @@ w.env_inspect(env_id, "hpc")                 # ground truth of a realization:
 w.env_exec(env_id, "hpc", "python -m pip install 'setuptools<81'",
            why="base pkg_resources trap")   # run INSIDE the activated env —
                                             # audited/deny-listed/bounded like
-                                            # site_exec; changes are NOT
-                                            # re-owned (session_snapshot or the
-                                            # forthcoming amend keeps them);
-                                            # read-only/published bases refuse
-                                            # with the session/extends door
+                                            # site_exec; DIAGNOSTIC (changes
+                                            # not re-owned; the fence rebuilds
+                                            # a mutated prefix)
+w.env_amend(env_id, "hpc", "python -m pip install 'setuptools<81'",
+            why="pkg_resources trap")        # repair IN PLACE and RE-OWN it:
+                                            # returns a NEW EnvID carrying the
+                                            # fix as a post_install step
+                                            # (realizes elsewhere as
+                                            # parent+replay); this site's
+                                            # prefix rebinds, the parent's
+                                            # realization here is released,
+                                            # frozen kernels re-point.
+                                            # read-only/published/squashfs
+                                            # bases refuse with the
+                                            # session/extends door
 w.site_exec("local", "df -h .", why="check quota before big staging")
 w.job_node_exec(job_id, "nvidia-smi; free -m",
                 why="job looks stuck")      # INSIDE the job's allocation
